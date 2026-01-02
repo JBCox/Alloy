@@ -46,6 +46,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.output import create_output
 
 from config import Config
 from orchestrator import Orchestrator, AIResponse
@@ -287,12 +288,38 @@ class AICollab:
 
         history_file = Path.home() / ".alloy-history"
         self.completer = AlloyCompleter(available_ais)
-        self.session = PromptSession(
-            history=FileHistory(str(history_file)),
-            auto_suggest=AutoSuggestFromHistory(),
-            completer=self.completer,
-            complete_while_typing=True,
-        )
+        self.session = None
+        self.simple_mode = False
+
+        # Try to create PromptSession with proper output handling
+        try:
+            # Try to create output - this may fail on some terminals
+            try:
+                output = create_output(always_prefer_tty=False)
+            except Exception:
+                output = None
+
+            self.session = PromptSession(
+                history=FileHistory(str(history_file)),
+                auto_suggest=AutoSuggestFromHistory(),
+                completer=self.completer,
+                complete_while_typing=True,
+                output=output,
+            )
+        except Exception as e:
+            # Fall back to simple input mode
+            self.console.print(f"[yellow]Note: Using simple input mode ({e.__class__.__name__})[/yellow]")
+            self.simple_mode = True
+
+    def get_input(self) -> str:
+        """Get user input, with fallback for incompatible terminals."""
+        if self.simple_mode or self.session is None:
+            # Simple fallback mode
+            sys.stdout.write("\n> ")
+            sys.stdout.flush()
+            return input().strip()
+        else:
+            return self.session.prompt("\n> ").strip()
 
     def run(self):
         """Main loop."""
@@ -300,7 +327,7 @@ class AICollab:
 
         while True:
             try:
-                user_input = self.session.prompt("\n> ").strip()
+                user_input = self.get_input()
                 if not user_input:
                     continue
 
