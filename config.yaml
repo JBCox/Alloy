@@ -55,12 +55,40 @@ ais:
     weight: 1
     fallback_ai: ""
 
-  # GitHub Copilot CLI (install with: npm install -g @github/copilot)
+  # GitHub Copilot CLI (install with: gh extension install github/gh-copilot)
   # copilot:
-  #   command: "copilot -p {message}"
+  #   command: "gh copilot suggest {message}"
   #   color: "magenta"
   #   enabled: false
   #   description: "GitHub Copilot CLI"
+
+  # -------------------------------------------------------------------------
+  # FREE AI Options
+  # -------------------------------------------------------------------------
+
+  # Ollama - 100% FREE, runs locally (https://ollama.ai)
+  # Install: Download from ollama.ai, then run: ollama pull llama3.1
+  ollama:
+    command: "python wrappers/ollama_wrapper.py {message}"
+    color: "yellow"
+    enabled: false
+    description: "Local AI via Ollama (FREE, unlimited)"
+    timeout: 120
+    retry_count: 1
+    weight: 1
+    fallback_ai: ""
+
+  # Groq - FREE tier with generous limits (https://console.groq.com)
+  # Blazing fast inference, great for quick queries
+  groq:
+    command: "python wrappers/groq_wrapper.py {message}"
+    color: "red"
+    enabled: false
+    description: "Groq Cloud (FREE tier, very fast)"
+    timeout: 60
+    retry_count: 1
+    weight: 1
+    fallback_ai: ""
 
 # ============================================================================
 # Collaboration Modes

@@ -189,6 +189,106 @@ The API key starts with "sk-". Costs vary by model ($0.002-0.06 per 1K tokens).
             best_for="Those in OpenAI ecosystem - check OpenAI for current offers"
         )
     ),
+
+    "ollama": AIInstallInfo(
+        name="Ollama (Local)",
+        description="Run AI models locally - 100% FREE, unlimited usage",
+        install_type="cli_tool",
+        api_key_env=None,
+        api_key_url="https://ollama.ai",
+        cli_command="ollama --version",
+        install_instructions="""
+1. Download Ollama from https://ollama.ai
+2. Install and run it (starts automatically)
+3. Pull a model: ollama pull llama3.1
+4. Enable in Alloy's config.yaml: set ollama.enabled = true
+
+Popular models:
+  - llama3.1 (general purpose, recommended)
+  - codellama (coding focused)
+  - mistral (fast and capable)
+""",
+        detailed_help="""
+Ollama runs AI models locally on your computer. It's completely FREE with no usage limits.
+
+Requirements:
+- 8GB+ RAM (16GB recommended for larger models)
+- ~4-8GB disk space per model
+
+Installation:
+1. Download from ollama.ai (Windows/Mac/Linux)
+2. Run the installer
+3. Ollama starts automatically as a background service
+
+Getting models:
+- ollama pull llama3.1      (8B, good balance)
+- ollama pull llama3.1:70b  (70B, more capable, needs 40GB+ RAM)
+- ollama pull codellama     (coding focused)
+- ollama pull mistral       (fast, efficient)
+
+To verify: ollama list (shows installed models)
+To test: ollama run llama3.1 "Hello, how are you?"
+
+The Alloy wrapper at wrappers/ollama_wrapper.py handles communication.
+""",
+        pricing=AIPricing(
+            has_free_tier=True,
+            free_tier_limits="100% FREE - runs locally, no API costs ever",
+            paid_price="FREE (your electricity only)",
+            price_per_request="$0.00 - unlimited local usage",
+            best_for="Privacy-focused users, offline use, unlimited free queries"
+        )
+    ),
+
+    "groq": AIInstallInfo(
+        name="Groq Cloud",
+        description="Blazing fast AI inference - generous FREE tier",
+        install_type="api_key",
+        api_key_env="GROQ_API_KEY",
+        api_key_url="https://console.groq.com/keys",
+        cli_command=None,
+        install_instructions="""
+1. Go to https://console.groq.com
+2. Sign up (free, just need email)
+3. Go to API Keys and create one
+4. Set GROQ_API_KEY environment variable
+5. Enable in Alloy's config.yaml: set groq.enabled = true
+""",
+        detailed_help="""
+Groq offers extremely fast AI inference with a generous free tier.
+
+Why Groq?
+- FAST: 10x faster than most cloud APIs
+- FREE: Generous rate limits at no cost
+- Quality: Runs Llama 3.1, Mixtral, and more
+
+Free tier limits (very generous):
+- 30 requests/minute for most models
+- 14,400 requests/day
+- No credit card required!
+
+To set up:
+1. Create account at console.groq.com
+2. Generate API key
+3. Set environment variable:
+   Windows: setx GROQ_API_KEY "gsk_..."
+   Mac/Linux: export GROQ_API_KEY="gsk_..."
+
+Available models:
+- llama-3.1-70b-versatile (best quality)
+- llama-3.1-8b-instant (fastest)
+- mixtral-8x7b-32768 (good for long context)
+
+The Alloy wrapper at wrappers/groq_wrapper.py handles communication.
+""",
+        pricing=AIPricing(
+            has_free_tier=True,
+            free_tier_limits="30 req/min, 14,400 req/day - no credit card needed!",
+            paid_price="Free tier is very generous, paid plans available",
+            price_per_request="FREE within limits (most users never exceed)",
+            best_for="Fast responses, free usage, no local hardware needed"
+        )
+    ),
 }
 
 
@@ -390,14 +490,14 @@ Provide clear, step-by-step instructions to help them get {info.name} working. B
 
         lines.extend([
             "",
-            "RECOMMENDATION:",
+            "RECOMMENDATION FOR FREE USAGE:",
             "-" * 40,
-            "1. Start with Gemini (free tier) to try Alloy at no cost",
-            "2. Students: GitHub Copilot is FREE for you!",
-            "3. Check each provider's site for current pricing/offers",
+            "1. Ollama - 100% free, runs locally, no limits (needs 8GB+ RAM)",
+            "2. Groq - Free cloud tier, very fast, generous limits",
+            "3. Gemini - Free tier (1M tokens/month)",
+            "4. GitHub Copilot - FREE for students/teachers/OSS maintainers",
             "",
-            "Note: CLI tools use API credits. Pricing changes frequently.",
-            "Always verify at the provider's website before committing.",
+            "Best combo: Ollama (unlimited local) + Groq (fast cloud backup)",
         ])
 
         return "\n".join(lines)
