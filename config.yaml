@@ -1,0 +1,99 @@
+# AI Collab Configuration
+# Configure your AI CLI tools here
+
+# Default AI to use when no @mention is specified
+default_ai: claude
+
+# AI definitions
+# Each AI needs:
+#   - command: The CLI command (use {message} placeholder for the prompt)
+#   - color: Display color for this AI's responses
+#   - enabled: Set to false to disable an AI
+
+ais:
+  claude:
+    command: "claude -p {message}"
+    color: "cyan"
+    enabled: true
+    description: "Anthropic's Claude Code CLI"
+
+  gemini:
+    command: "gemini -p {message}"
+    color: "blue"
+    enabled: true
+    description: "Google's Gemini CLI"
+
+  # OpenAI Codex CLI (installed via winget)
+  codex:
+    command: "C:/Users/joshu/AppData/Local/Microsoft/WinGet/Packages/OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe/codex-x86_64-pc-windows-msvc.exe exec {message}"
+    color: "green"
+    enabled: true
+    description: "OpenAI Codex CLI"
+
+  # GitHub Copilot CLI (not currently installed)
+  # Install with: npm install -g @github/copilot
+  # copilot:
+  #   command: "copilot -p {message}"
+  #   color: "magenta"
+  #   enabled: false
+  #   description: "GitHub Copilot CLI"
+
+# Collaboration mode defaults
+modes:
+  roundtable:
+    rounds: 1           # Each AI speaks once
+    parallel: false
+
+  chain:
+    rounds: 3           # A -> B -> C refinement
+    checkpoint: false   # Pause after each round
+    # order: [claude, gemini, codex]  # Custom AI order
+
+  brainstorm:
+    rounds: 1
+    parallel: true      # Generate ideas in parallel
+
+  devils-advocate:
+    rounds: 2           # Point/counterpoint exchanges
+
+  roles:
+    rounds: 1
+    # Default role template (architecture, debate, review, research)
+    # template: architecture
+
+  code-review:
+    rounds: 1
+    parallel: true
+
+  solve:
+    rounds: 3           # Understand -> Plan -> Implement
+    checkpoint: false
+
+  # Global mode settings
+  global:
+    max_rounds: 10              # Safety cap for all modes
+    satisfaction_threshold: 8   # For --until=satisfied (1-10)
+
+# Legacy special commands (for backwards compatibility)
+special_commands:
+  debate_rounds: 3
+  all_parallel: false
+
+# Display settings
+display:
+  # Show timestamps on messages
+  show_timestamps: true
+
+  # Max width for response text (0 = no limit)
+  max_width: 120
+
+  # Show which AI is responding with a header
+  show_ai_header: true
+
+# Context settings
+context:
+  # How many messages to keep in history
+  max_history: 50
+
+  # Auto-include last N messages as context (0 = disabled)
+  auto_context: 0
