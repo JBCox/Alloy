@@ -69,6 +69,7 @@ class AlloyCompleter(Completer):
         ("/modes", "Show collaboration modes"),
         ("/settings", "Open settings editor"),
         ("/install", "AI installation assistant"),
+        ("/pricing", "Compare AI pricing and tiers"),
         ("/gui", "Launch graphical interface"),
         ("/reload", "Reload configuration"),
         ("/history", "Show conversation history"),
@@ -360,6 +361,8 @@ class AICollab:
             self.launch_gui()
         elif cmd == "install":
             self.run_install_assistant()
+        elif cmd == "pricing":
+            self.show_pricing()
         else:
             self.console.print(f"[yellow]Unknown command: /{cmd}[/yellow]")
         return True
@@ -371,6 +374,15 @@ class AICollab:
             interactive_install(self.config)
         except Exception as e:
             self.console.print(f"[red]Failed to run installer: {e}[/red]")
+
+    def show_pricing(self):
+        """Show AI pricing comparison."""
+        try:
+            from ai_installer import AIInstaller
+            installer = AIInstaller(self.config)
+            self.console.print(installer.get_pricing_info())
+        except Exception as e:
+            self.console.print(f"[red]Failed to get pricing: {e}[/red]")
 
     def launch_gui(self):
         """Launch the GUI application."""
@@ -944,6 +956,7 @@ class AICollab:
   /modes                   Show collaboration modes
   /settings                Open settings editor
   /install                 AI installation assistant
+  /pricing                 Compare AI pricing and tiers
   /gui                     Launch graphical interface
   /reload                  Reload configuration
   /history                 Show conversation

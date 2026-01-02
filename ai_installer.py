@@ -16,6 +16,16 @@ from orchestrator import Orchestrator
 
 
 @dataclass
+class AIPricing:
+    """Pricing information for an AI."""
+    has_free_tier: bool
+    free_tier_limits: str  # Description of free tier limits
+    paid_price: str  # Price description
+    price_per_request: str  # Approximate cost per request
+    best_for: str  # Who this tier is best for
+
+
+@dataclass
 class AIInstallInfo:
     """Installation information for an AI."""
     name: str
@@ -26,6 +36,7 @@ class AIInstallInfo:
     cli_command: Optional[str]  # Command to check if installed
     install_instructions: str  # Basic instructions
     detailed_help: str  # Detailed help for AI to provide
+    pricing: Optional[AIPricing] = None  # Pricing information
 
 
 # Installation info for each AI
@@ -55,7 +66,14 @@ On Windows: setx ANTHROPIC_API_KEY "sk-ant-..."
 On Mac/Linux: export ANTHROPIC_API_KEY="sk-ant-..."
 
 The API key starts with "sk-ant-". Typical costs are $0.01-0.02 per request.
-"""
+""",
+        pricing=AIPricing(
+            has_free_tier=False,
+            free_tier_limits="No free tier - pay-as-you-go only",
+            paid_price="~$3/M input tokens, ~$15/M output tokens (Claude 3.5 Sonnet)",
+            price_per_request="~$0.01-0.05 per typical request",
+            best_for="Professional developers, complex analysis, coding tasks"
+        )
     ),
 
     "gemini": AIInstallInfo(
@@ -84,7 +102,14 @@ On Windows: setx GOOGLE_API_KEY "AIza..."
 On Mac/Linux: export GOOGLE_API_KEY="AIza..."
 
 The API key starts with "AIza". Google offers a free tier with generous limits.
-"""
+""",
+        pricing=AIPricing(
+            has_free_tier=True,
+            free_tier_limits="15 requests/minute, 1M tokens/month FREE (Gemini 1.5 Flash)",
+            paid_price="$0.075/M input, $0.30/M output (Flash) - very affordable",
+            price_per_request="~$0.001-0.01 per request (often FREE)",
+            best_for="Budget-conscious users, high-volume usage, students"
+        )
     ),
 
     "copilot": AIInstallInfo(
@@ -120,7 +145,14 @@ Step 4: Subscription
 - Free for verified students, teachers, and open source maintainers
 
 To test: gh copilot suggest "hello world in python"
-"""
+""",
+        pricing=AIPricing(
+            has_free_tier=True,
+            free_tier_limits="FREE for students, teachers, and OSS maintainers",
+            paid_price="$10/month individual, $19/month business",
+            price_per_request="Unlimited requests with subscription",
+            best_for="Students (FREE), active coders who want flat-rate pricing"
+        )
     ),
 
     "codex": AIInstallInfo(
@@ -148,7 +180,14 @@ On Windows: setx OPENAI_API_KEY "sk-..."
 On Mac/Linux: export OPENAI_API_KEY="sk-..."
 
 The API key starts with "sk-". Costs vary by model ($0.002-0.06 per 1K tokens).
-"""
+""",
+        pricing=AIPricing(
+            has_free_tier=False,
+            free_tier_limits="No free tier (had $5 free credit for new accounts, may vary)",
+            paid_price="$0.50-15/M tokens depending on model (GPT-4o, GPT-4, etc.)",
+            price_per_request="~$0.01-0.10 per request depending on model",
+            best_for="Those already in OpenAI ecosystem, need GPT-4 specifically"
+        )
     ),
 }
 
@@ -318,6 +357,78 @@ Provide clear, step-by-step instructions to help them get {info.name} working. B
 
         return "\n".join(lines)
 
+    def get_pricing_info(self) -> str:
+        """Get pricing information for all AIs."""
+        lines = [
+            "=== AI Pricing Comparison ===",
+            "",
+            "FREE TIER OPTIONS:",
+            "-" * 40,
+        ]
+
+        # Free tier AIs first
+        for ai_name, info in AI_INSTALL_INFO.items():
+            if info.pricing and info.pricing.has_free_tier:
+                lines.append(f"\n{info.name}")
+                lines.append(f"  Free: {info.pricing.free_tier_limits}")
+                lines.append(f"  Paid: {info.pricing.paid_price}")
+                lines.append(f"  Best for: {info.pricing.best_for}")
+
+        lines.extend([
+            "",
+            "PAID ONLY:",
+            "-" * 40,
+        ])
+
+        # Paid only AIs
+        for ai_name, info in AI_INSTALL_INFO.items():
+            if info.pricing and not info.pricing.has_free_tier:
+                lines.append(f"\n{info.name}")
+                lines.append(f"  Price: {info.pricing.paid_price}")
+                lines.append(f"  Per request: {info.pricing.price_per_request}")
+                lines.append(f"  Best for: {info.pricing.best_for}")
+
+        lines.extend([
+            "",
+            "RECOMMENDATION:",
+            "-" * 40,
+            "Start with Gemini (free tier) to try Alloy at no cost.",
+            "Add Claude for complex coding tasks when you're ready.",
+            "Students: Get GitHub Copilot free!",
+        ])
+
+        return "\n".join(lines)
+
+    def get_recommended_setup(self, budget: str = "free") -> list[str]:
+        """Get recommended AIs based on budget.
+
+        Args:
+            budget: "free", "low" ($0-10/mo), "medium" ($10-50/mo), "unlimited"
+
+        Returns:
+            List of recommended AI names in priority order
+        """
+        if budget == "free":
+            return ["gemini", "copilot"]  # Copilot free for students
+        elif budget == "low":
+            return ["gemini", "copilot", "claude"]
+        elif budget == "medium":
+            return ["claude", "gemini", "copilot", "codex"]
+        else:  # unlimited
+            return ["claude", "gemini", "codex", "copilot"]
+
+    def get_pricing_summary_for_ai(self, ai_name: str) -> str:
+        """Get a short pricing summary for an AI."""
+        info = self.get_install_info(ai_name)
+        if not info or not info.pricing:
+            return "Pricing info not available"
+
+        p = info.pricing
+        if p.has_free_tier:
+            return f"FREE TIER: {p.free_tier_limits}"
+        else:
+            return f"PAID: {p.price_per_request}"
+
 
 def interactive_install(config: Config):
     """Run interactive installation assistant in CLI."""
@@ -365,6 +476,16 @@ def interactive_install(config: Config):
             continue
 
         console.print(f"[dim]{info.description}[/dim]")
+
+        # Show pricing
+        if info.pricing:
+            p = info.pricing
+            if p.has_free_tier:
+                console.print(f"[green]💰 FREE TIER:[/green] {p.free_tier_limits}")
+            else:
+                console.print(f"[yellow]💰 PAID:[/yellow] {p.price_per_request}")
+            console.print(f"[dim]   Best for: {p.best_for}[/dim]")
+
         console.print(f"\n[bold]Quick Setup:[/bold]")
         console.print(info.install_instructions)
 
