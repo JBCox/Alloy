@@ -69,10 +69,10 @@ The API key starts with "sk-ant-". Typical costs are $0.01-0.02 per request.
 """,
         pricing=AIPricing(
             has_free_tier=False,
-            free_tier_limits="No free tier - pay-as-you-go only",
-            paid_price="~$3/M input tokens, ~$15/M output tokens (Claude 3.5 Sonnet)",
-            price_per_request="~$0.01-0.05 per typical request",
-            best_for="Professional developers, complex analysis, coding tasks"
+            free_tier_limits="CLI uses API credits - check console.anthropic.com for current pricing",
+            paid_price="Pay-as-you-go: ~$3/M input, ~$15/M output (Sonnet)",
+            price_per_request="Varies by model and usage",
+            best_for="Coding tasks, complex analysis - check Anthropic for current offers"
         )
     ),
 
@@ -183,10 +183,10 @@ The API key starts with "sk-". Costs vary by model ($0.002-0.06 per 1K tokens).
 """,
         pricing=AIPricing(
             has_free_tier=False,
-            free_tier_limits="No free tier (had $5 free credit for new accounts, may vary)",
-            paid_price="$0.50-15/M tokens depending on model (GPT-4o, GPT-4, etc.)",
-            price_per_request="~$0.01-0.10 per request depending on model",
-            best_for="Those already in OpenAI ecosystem, need GPT-4 specifically"
+            free_tier_limits="CLI uses API credits - check platform.openai.com for current pricing",
+            paid_price="Pay-as-you-go: $0.50-15/M tokens depending on model",
+            price_per_request="Varies by model (GPT-4o cheaper than GPT-4)",
+            best_for="Those in OpenAI ecosystem - check OpenAI for current offers"
         )
     ),
 }
@@ -392,9 +392,12 @@ Provide clear, step-by-step instructions to help them get {info.name} working. B
             "",
             "RECOMMENDATION:",
             "-" * 40,
-            "Start with Gemini (free tier) to try Alloy at no cost.",
-            "Add Claude for complex coding tasks when you're ready.",
-            "Students: Get GitHub Copilot free!",
+            "1. Start with Gemini (free tier) to try Alloy at no cost",
+            "2. Students: GitHub Copilot is FREE for you!",
+            "3. Check each provider's site for current pricing/offers",
+            "",
+            "Note: CLI tools use API credits. Pricing changes frequently.",
+            "Always verify at the provider's website before committing.",
         ])
 
         return "\n".join(lines)
