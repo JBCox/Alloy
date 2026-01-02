@@ -36,14 +36,16 @@ from typing import Optional
 script_dir = Path(__file__).parent
 sys.path.insert(0, str(script_dir))
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
+from rich.live import Live
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.completion import Completer, Completion
 
 from config import Config
 from orchestrator import Orchestrator, AIResponse
@@ -55,6 +57,152 @@ from prompts import (
     get_code_review_aggregate_prompt, get_solve_prompt,
     get_judge_quality_prompt, get_judge_consensus_prompt
 )
+
+
+class AlloyCompleter(Completer):
+    """Autocomplete for Alloy commands and mentions."""
+
+    # System commands
+    SYSTEM_COMMANDS = [
+        ("/help", "Show help"),
+        ("/ais", "List available AIs"),
+        ("/modes", "Show collaboration modes"),
+        ("/settings", "Open settings editor"),
+        ("/gui", "Launch graphical interface"),
+        ("/reload", "Reload configuration"),
+        ("/history", "Show conversation history"),
+        ("/clear", "Clear history"),
+        ("/quit", "Exit Alloy"),
+    ]
+
+    # Collaboration modes with their options
+    MODES = [
+        ("@roundtable", "Full-context discussion"),
+        ("@chain", "Sequential refinement"),
+        ("@brainstorm", "Parallel idea generation"),
+        ("@devils-advocate", "Steelman/Attack/Verdict"),
+        ("@roles", "Role-based collaboration"),
+        ("@code-review", "Multi-perspective review"),
+        ("@solve", "Collaborative problem solving"),
+        ("@all", "Query all AIs"),
+    ]
+
+    # Mode options (inside brackets)
+    MODE_OPTIONS = [
+        ("rounds=", "Number of rounds (e.g., rounds=3)"),
+        ("order=", "AI order (e.g., order=claude,gemini)"),
+        ("judge=", "Judge AI (e.g., judge=claude)"),
+        ("template=", "Role template (architecture/debate/review/research)"),
+        ("parallel", "Run in parallel"),
+        ("checkpoint", "Pause after each round"),
+    ]
+
+    # Role templates
+    ROLE_TEMPLATES = [
+        ("architecture", "Architect, Critic, Implementer roles"),
+        ("debate", "Proposer, Opponent, Moderator roles"),
+        ("review", "Author, Reviewer, Editor roles"),
+        ("research", "Researcher, Analyst, Synthesizer roles"),
+    ]
+
+    # Command flags
+    FLAGS = [
+        ("--checkpoint", "Pause after each round for review"),
+        ("--until=satisfied", "Continue until quality threshold met"),
+        ("--until=consensus", "Continue until AIs agree"),
+        ("--implement", "Write code at the end"),
+        ("--parallel", "Run in parallel mode"),
+    ]
+
+    def __init__(self, ai_names: list[str]):
+        self.ai_names = ai_names
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        word = document.get_word_before_cursor(WORD=True)
+
+        # Complete system commands starting with /
+        if text.startswith("/") or word.startswith("/"):
+            for cmd, desc in self.SYSTEM_COMMANDS:
+                if cmd.startswith(word) or cmd.startswith(text):
+                    yield Completion(
+                        cmd,
+                        start_position=-len(word),
+                        display_meta=desc
+                    )
+            return
+
+        # Complete flags starting with --
+        if word.startswith("--") or (word.startswith("-") and len(word) >= 2):
+            for flag, desc in self.FLAGS:
+                if flag.startswith(word):
+                    yield Completion(
+                        flag,
+                        start_position=-len(word),
+                        display_meta=desc
+                    )
+            return
+
+        # Check if we're inside brackets for mode options
+        if "[" in text and "]" not in text.split("[")[-1]:
+            # We're inside brackets - suggest mode options
+            bracket_content = text.split("[")[-1]
+            last_part = bracket_content.split(",")[-1].strip()
+
+            # Check if we're completing a template= value
+            if "template=" in last_part and "=" in last_part:
+                template_prefix = last_part.split("=")[-1]
+                for template, desc in self.ROLE_TEMPLATES:
+                    if template.startswith(template_prefix):
+                        yield Completion(
+                            template,
+                            start_position=-len(template_prefix),
+                            display_meta=desc
+                        )
+                return
+
+            # Check if we're completing a judge= or order= value (AI names)
+            if ("judge=" in last_part or "order=" in last_part) and "=" in last_part:
+                ai_prefix = last_part.split("=")[-1].split(",")[-1]
+                for ai_name in self.ai_names:
+                    if ai_name.startswith(ai_prefix):
+                        yield Completion(
+                            ai_name,
+                            start_position=-len(ai_prefix),
+                            display_meta=f"Use {ai_name}"
+                        )
+                return
+
+            # Suggest mode options
+            for opt, desc in self.MODE_OPTIONS:
+                if opt.startswith(last_part):
+                    yield Completion(
+                        opt,
+                        start_position=-len(last_part),
+                        display_meta=desc
+                    )
+            return
+
+        # Complete @ mentions and modes
+        if text.startswith("@") or word.startswith("@"):
+            # AI mentions
+            for ai_name in self.ai_names:
+                mention = f"@{ai_name}"
+                if mention.startswith(word) or mention.startswith(text):
+                    yield Completion(
+                        mention,
+                        start_position=-len(word),
+                        display_meta=f"Send to {ai_name}"
+                    )
+
+            # Modes
+            for mode, desc in self.MODES:
+                if mode.startswith(word) or mode.startswith(text):
+                    yield Completion(
+                        mode,
+                        start_position=-len(word),
+                        display_meta=desc
+                    )
 
 
 # Color scheme for different AIs
@@ -136,9 +284,12 @@ class AICollab:
         self.router = Router(available_ais, self.config.default_ai)
 
         history_file = Path.home() / ".alloy-history"
+        self.completer = AlloyCompleter(available_ais)
         self.session = PromptSession(
             history=FileHistory(str(history_file)),
             auto_suggest=AutoSuggestFromHistory(),
+            completer=self.completer,
+            complete_while_typing=True,
         )
 
     def run(self):
@@ -200,9 +351,37 @@ class AICollab:
             self.print_ais()
         elif cmd == "modes":
             self.print_modes()
+        elif cmd == "settings":
+            self.open_settings()
+        elif cmd == "reload":
+            self._reload_config()
+        elif cmd == "gui":
+            self.launch_gui()
         else:
             self.console.print(f"[yellow]Unknown command: /{cmd}[/yellow]")
         return True
+
+    def launch_gui(self):
+        """Launch the GUI application."""
+        self.console.print("[dim]Launching GUI...[/dim]")
+        try:
+            from gui.app import run_gui
+            # Run GUI in a separate process so CLI can continue or exit cleanly
+            import subprocess
+            import sys
+            subprocess.Popen([sys.executable, "-c", "from gui.app import run_gui; run_gui()"])
+            self.console.print("[green]GUI launched in a new window.[/green]")
+        except Exception as e:
+            self.console.print(f"[red]Failed to launch GUI: {e}[/red]")
+
+    def _reload_config(self):
+        """Reload configuration from disk."""
+        try:
+            self.config = Config.load()
+            self.orchestrator = Orchestrator(self.config)
+            self.console.print("[green]Configuration reloaded successfully.[/green]")
+        except Exception as e:
+            self.console.print(f"[red]Failed to reload config: {e}[/red]")
 
     def handle_ai_message(self, parsed: ParsedMessage, original: str):
         self.history.add_user_message(original)
@@ -222,18 +401,51 @@ class AICollab:
 
     # ==================== BASIC QUERIES ====================
 
-    def query_single_ai(self, ai_name: str, message: str):
+    def query_ai_with_display(self, ai_name: str, message: str, status_text: str = None) -> AIResponse:
+        """Query an AI and display the response, using streaming if enabled."""
         color = self.get_ai_color(ai_name)
-        with self.console.status(f"[{color}]Asking {ai_name}...[/{color}]"):
-            response = self.orchestrator.query(ai_name, message)
-        self.display_response(response)
+        status_text = status_text or f"Asking {ai_name}..."
+
+        if self.config.streaming:
+            stream = self.orchestrator.query_streaming(ai_name, message)
+            return self.display_response_streaming(ai_name, stream)
+        else:
+            with self.console.status(f"[{color}]{status_text}[/{color}]"):
+                response = self.orchestrator.query(ai_name, message)
+            self.display_response(response)
+            return response
+
+    def query_single_ai(self, ai_name: str, message: str):
+        if self.config.streaming:
+            # Streaming mode - show output as it arrives
+            stream = self.orchestrator.query_streaming(ai_name, message)
+            self.display_response_streaming(ai_name, stream)
+        else:
+            # Blocking mode - wait for full response
+            color = self.get_ai_color(ai_name)
+            with self.console.status(f"[{color}]Asking {ai_name}...[/{color}]"):
+                response = self.orchestrator.query(ai_name, message)
+            self.display_response(response)
 
     def query_all_ais(self, message: str):
         self.console.print("[dim]Querying all AIs...[/dim]\n")
-        responses = self.orchestrator.query_all(message, parallel=self.config.all_parallel)
-        for response in responses:
-            self.display_response(response)
-            self.console.print()
+        use_parallel = self.config.parallel or self.config.all_parallel
+
+        if self.config.streaming:
+            # Streaming mode - show each AI's output as it arrives
+            # For now, do sequential streaming (parallel streaming with multiple panels is more complex)
+            for ai_name in self.config.get_enabled_ais().keys():
+                if self.abort_requested:
+                    break
+                stream = self.orchestrator.query_streaming(ai_name, message)
+                self.display_response_streaming(ai_name, stream)
+                self.console.print()
+        else:
+            # Blocking mode - use existing parallel/sequential logic
+            responses = self.orchestrator.query_all(message, parallel=use_parallel)
+            for response in responses:
+                self.display_response(response)
+                self.console.print()
 
     # ==================== MODE EXECUTION ====================
 
@@ -327,11 +539,7 @@ class AICollab:
 
                 prompt = get_roundtable_prompt(topic, context, is_first=(len(all_responses) == 0))
 
-                color = self.get_ai_color(ai_name)
-                with self.console.status(f"[{color}]{ai_name} is thinking...[/{color}]"):
-                    response = self.orchestrator.query(ai_name, prompt)
-
-                self.display_response(response)
+                response = self.query_ai_with_display(ai_name, prompt, f"{ai_name} is thinking...")
                 if response.success:
                     all_responses.append({"ai": ai_name, "content": response.content})
                 self.console.print()
@@ -368,12 +576,7 @@ class AICollab:
             self.console.print(f"[dim]── Round {round_num}/{config.rounds} ({ai_name}) ──[/dim]\n")
 
             prompt = get_chain_prompt(topic, current_response)
-            color = self.get_ai_color(ai_name)
-
-            with self.console.status(f"[{color}]{ai_name} is refining...[/{color}]"):
-                response = self.orchestrator.query(ai_name, prompt)
-
-            self.display_response(response)
+            response = self.query_ai_with_display(ai_name, prompt, f"{ai_name} is refining...")
             self.console.print()
 
             if response.success:
@@ -429,10 +632,7 @@ class AICollab:
             merge_prompt = get_brainstorm_prompt(topic, phase="merge", all_ideas="\n\n".join(all_ideas))
 
             judge = config.judge or self.config.default_ai
-            with self.console.status(f"[dim]Consolidating ideas...[/dim]"):
-                merge_response = self.orchestrator.query(judge, merge_prompt)
-
-            self.display_response(merge_response)
+            self.query_ai_with_display(judge, merge_prompt, "Consolidating ideas...")
 
         self.console.print("\n[dim]── Brainstorm complete ──[/dim]")
 
@@ -451,10 +651,7 @@ class AICollab:
         self.console.print("[dim]── Phase 1: Steelman ──[/dim]\n")
         steelman_ai = ais[0]
         prompt = get_devils_advocate_prompt(topic, phase="steelman")
-
-        with self.console.status(f"[{self.get_ai_color(steelman_ai)}]{steelman_ai} building best case...[/]"):
-            steelman_response = self.orchestrator.query(steelman_ai, prompt)
-        self.display_response(steelman_response)
+        steelman_response = self.query_ai_with_display(steelman_ai, prompt, f"{steelman_ai} building best case...")
         self.console.print()
 
         if not steelman_response.success:
@@ -464,10 +661,7 @@ class AICollab:
         self.console.print("[dim]── Phase 2: Attack ──[/dim]\n")
         attack_ai = ais[1 % len(ais)]
         prompt = get_devils_advocate_prompt(topic, phase="attack", steelman=steelman_response.content)
-
-        with self.console.status(f"[{self.get_ai_color(attack_ai)}]{attack_ai} finding weaknesses...[/]"):
-            attack_response = self.orchestrator.query(attack_ai, prompt)
-        self.display_response(attack_response)
+        attack_response = self.query_ai_with_display(attack_ai, prompt, f"{attack_ai} finding weaknesses...")
         self.console.print()
 
         if not attack_response.success:
@@ -481,10 +675,7 @@ class AICollab:
             steelman=steelman_response.content,
             attack=attack_response.content
         )
-
-        with self.console.status(f"[{self.get_ai_color(verdict_ai)}]{verdict_ai} synthesizing...[/]"):
-            verdict_response = self.orchestrator.query(verdict_ai, prompt)
-        self.display_response(verdict_response)
+        self.query_ai_with_display(verdict_ai, prompt, f"{verdict_ai} synthesizing...")
 
         self.console.print("\n[dim]── Devil's Advocate complete ──[/dim]")
 
@@ -525,11 +716,7 @@ class AICollab:
             ]) if all_contributions else ""
 
             prompt = get_role_prompt(role_name, role_desc, topic, context)
-
-            with self.console.status(f"[{self.get_ai_color(ai_name)}]{ai_name} as {role_name}...[/]"):
-                response = self.orchestrator.query(ai_name, prompt)
-
-            self.display_response(response)
+            response = self.query_ai_with_display(ai_name, prompt, f"{ai_name} as {role_name}...")
             if response.success:
                 all_contributions.append({"role": role_name, "content": response.content})
             self.console.print()
@@ -559,11 +746,7 @@ class AICollab:
             self.console.print(f"[dim]── {review_type.title()} Review ({ai_name}) ──[/dim]\n")
 
             prompt = get_code_review_prompt(code, review_type)
-
-            with self.console.status(f"[{self.get_ai_color(ai_name)}]{ai_name} reviewing {review_type}...[/]"):
-                response = self.orchestrator.query(ai_name, prompt)
-
-            self.display_response(response)
+            response = self.query_ai_with_display(ai_name, prompt, f"{ai_name} reviewing {review_type}...")
             if response.success:
                 all_reviews.append(f"=== {review_type.upper()} ({ai_name}) ===\n{response.content}")
             self.console.print()
@@ -574,9 +757,7 @@ class AICollab:
             aggregate_prompt = get_code_review_aggregate_prompt(code, "\n\n".join(all_reviews))
 
             judge = config.judge or self.config.default_ai
-            with self.console.status(f"[dim]Consolidating feedback...[/dim]"):
-                aggregate_response = self.orchestrator.query(judge, aggregate_prompt)
-            self.display_response(aggregate_response)
+            self.query_ai_with_display(judge, aggregate_prompt, "Consolidating feedback...")
 
         self.console.print("\n[dim]── Code Review complete ──[/dim]")
 
@@ -603,11 +784,7 @@ class AICollab:
             self.console.print(f"[dim]── Phase {i+1}: {phase.title()} ({ai_name}) ──[/dim]\n")
 
             prompt = get_solve_prompt(problem, phase, understanding=understanding, plan=plan)
-
-            with self.console.status(f"[{self.get_ai_color(ai_name)}]{ai_name} working on {phase}...[/]"):
-                response = self.orchestrator.query(ai_name, prompt)
-
-            self.display_response(response)
+            response = self.query_ai_with_display(ai_name, prompt, f"{ai_name} working on {phase}...")
             self.console.print()
 
             if response.success:
@@ -627,6 +804,56 @@ class AICollab:
         self.console.print("[dim]── Solve complete ──[/dim]")
 
     # ==================== DISPLAY ====================
+
+    def display_response_streaming(self, ai_name: str, stream_generator) -> AIResponse:
+        """Display a streaming response with live updates."""
+        color = self.get_ai_color(ai_name)
+        content_buffer = ""
+        error = None
+
+        def make_panel(text: str, streaming: bool = True) -> Panel:
+            """Create a panel for the current content."""
+            try:
+                display_content = Markdown(text) if text.strip() else Text("...")
+            except Exception:
+                display_content = Text(text)
+
+            suffix = " [dim]streaming...[/dim]" if streaming else ""
+            return Panel(
+                display_content,
+                title=f"[{color} bold]{ai_name}[/{color} bold]{suffix}",
+                border_style=color,
+                padding=(0, 1)
+            )
+
+        try:
+            with Live(make_panel(""), refresh_per_second=self.config.refresh_rate, console=self.console) as live:
+                for chunk in stream_generator:
+                    if isinstance(chunk, str):
+                        content_buffer += chunk
+                        # Update display periodically (every few chars to reduce flicker)
+                        if len(content_buffer) % 10 == 0 or chunk == '\n':
+                            live.update(make_panel(content_buffer, streaming=True))
+
+                # Final update without streaming indicator
+                live.update(make_panel(content_buffer, streaming=False))
+
+        except KeyboardInterrupt:
+            self.abort_requested = True
+            error = "Interrupted by user"
+
+        # Build the response
+        response = AIResponse(
+            ai_name=ai_name,
+            content=content_buffer.strip(),
+            success=error is None,
+            error=error
+        )
+
+        if response.success:
+            self.history.add_ai_response(ai_name, response.content)
+
+        return response
 
     def display_response(self, response: AIResponse):
         color = self.get_ai_color(response.ai_name)
@@ -704,6 +931,9 @@ class AICollab:
   /help                    Show this help
   /ais                     List available AIs
   /modes                   Show collaboration modes
+  /settings                Open settings editor
+  /gui                     Launch graphical interface
+  /reload                  Reload configuration
   /history                 Show conversation
   /clear                   Clear history
   /quit                    Exit
@@ -738,6 +968,32 @@ class AICollab:
 
         self.console.print(table)
 
+    def open_settings(self):
+        """Open settings editor in separate process."""
+        import multiprocessing
+
+        def run_settings_editor(config_path_str):
+            import tkinter as tk
+            from gui.settings import SettingsEditor
+            from pathlib import Path
+
+            root = tk.Tk()
+            root.withdraw()
+            editor = SettingsEditor(root, config_path=Path(config_path_str))
+            root.mainloop()
+
+        config_path = Config.get_config_path()
+
+        # Launch in separate process so CLI is not blocked
+        p = multiprocessing.Process(
+            target=run_settings_editor,
+            args=(str(config_path),)
+        )
+        p.start()
+
+        self.console.print("[dim]Settings editor opened in new window.[/dim]")
+        self.console.print("[dim]Changes will take effect after restarting Alloy.[/dim]")
+
     def print_modes(self):
         table = Table(title="Collaboration Modes")
         table.add_column("Mode", style="cyan")
@@ -761,6 +1017,86 @@ class AICollab:
 
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Alloy - Multiple AIs, stronger together",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python main.py              Start CLI mode
+  python main.py --gui        Start GUI mode
+  python main.py --setup      Run setup wizard
+"""
+    )
+    parser.add_argument("--gui", action="store_true", help="Launch graphical interface")
+    parser.add_argument("--setup", action="store_true", help="Run setup wizard")
+
+    args = parser.parse_args()
+
+    # Handle --gui flag
+    if args.gui:
+        try:
+            from gui.app import run_gui
+            run_gui()
+            return
+        except ImportError as e:
+            Console().print(f"[red]GUI not available: {e}[/red]")
+            sys.exit(1)
+
+    # Handle --setup flag
+    if args.setup:
+        try:
+            import tkinter as tk
+            from gui.wizard import SetupWizard
+
+            root = tk.Tk()
+            root.withdraw()
+
+            def on_complete():
+                root.destroy()
+
+            wizard = SetupWizard(root, on_complete=on_complete)
+            root.mainloop()
+            return
+        except ImportError as e:
+            Console().print(f"[red]Setup wizard not available: {e}[/red]")
+            sys.exit(1)
+
+    # Check for first run - launch setup wizard if no config exists
+    if not Config.config_exists():
+        try:
+            import tkinter as tk
+            from gui.wizard import SetupWizard
+
+            console = Console()
+            console.print("\n[cyan]Welcome to Alloy![/cyan]")
+            console.print("[dim]No configuration found. Launching setup wizard...[/dim]\n")
+
+            # Run the setup wizard
+            root = tk.Tk()
+            root.withdraw()
+
+            wizard_completed = [False]  # Use list to allow mutation in closure
+
+            def on_complete():
+                wizard_completed[0] = True
+                root.destroy()
+
+            wizard = SetupWizard(root, on_complete=on_complete)
+            root.mainloop()
+
+            if not wizard_completed[0]:
+                console.print("[yellow]Setup cancelled. Run 'alloy' again to restart setup.[/yellow]")
+                sys.exit(0)
+
+            console.print("[green]Setup complete! Starting Alloy...[/green]\n")
+
+        except ImportError as e:
+            Console().print(f"[yellow]GUI not available ({e}). Using default configuration.[/yellow]")
+        except Exception as e:
+            Console().print(f"[yellow]Setup wizard failed: {e}. Using default configuration.[/yellow]")
+
     try:
         app = AICollab()
         app.run()

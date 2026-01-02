@@ -1,14 +1,28 @@
-# AI Collab Configuration
-# Configure your AI CLI tools here
+# ============================================================================
+# Alloy Configuration
+# Multiple AIs, stronger together.
+# ============================================================================
 
 # Default AI to use when no @mention is specified
 default_ai: claude
 
-# AI definitions
+# Default judge AI for synthesis/verdict (empty = use default_ai)
+default_judge: ""
+
+# ============================================================================
+# AI Definitions
+# ============================================================================
 # Each AI needs:
-#   - command: The CLI command (use {message} placeholder for the prompt)
-#   - color: Display color for this AI's responses
-#   - enabled: Set to false to disable an AI
+#   - command: CLI command (use {message} placeholder for the prompt)
+#   - color: Display color for responses
+#   - enabled: Set to false to disable
+#   - description: Short description for help text
+#
+# Optional per-AI settings:
+#   - timeout: Override global timeout (0 = use global)
+#   - retry_count: Override global retry count
+#   - weight: Voting weight for consensus (higher = more influence)
+#   - fallback_ai: Backup AI to use if this one fails
 
 ais:
   claude:
@@ -16,84 +30,162 @@ ais:
     color: "cyan"
     enabled: true
     description: "Anthropic's Claude Code CLI"
+    timeout: 0
+    retry_count: 0
+    weight: 1
+    fallback_ai: ""
 
   gemini:
     command: "gemini -p {message}"
     color: "blue"
     enabled: true
     description: "Google's Gemini CLI"
+    timeout: 0
+    retry_count: 0
+    weight: 1
+    fallback_ai: ""
 
-  # OpenAI Codex CLI (installed via winget)
   codex:
-    command: "C:/Users/joshu/AppData/Local/Microsoft/WinGet/Packages/OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe/codex-x86_64-pc-windows-msvc.exe exec {message}"
+    command: "codex exec {message}"
     color: "green"
     enabled: true
     description: "OpenAI Codex CLI"
+    timeout: 0
+    retry_count: 0
+    weight: 1
+    fallback_ai: ""
 
-  # GitHub Copilot CLI (not currently installed)
-  # Install with: npm install -g @github/copilot
+  # GitHub Copilot CLI (install with: npm install -g @github/copilot)
   # copilot:
   #   command: "copilot -p {message}"
   #   color: "magenta"
   #   enabled: false
   #   description: "GitHub Copilot CLI"
 
-# Collaboration mode defaults
+# ============================================================================
+# Collaboration Modes
+# ============================================================================
+# Configure default behavior for each collaboration mode.
+# Options: rounds, parallel, checkpoint
+
 modes:
   roundtable:
-    rounds: 1           # Each AI speaks once
+    rounds: 1           # Each AI speaks once per round
     parallel: false
 
   chain:
-    rounds: 3           # A -> B -> C refinement
-    checkpoint: false   # Pause after each round
-    # order: [claude, gemini, codex]  # Custom AI order
+    rounds: 3           # A -> B -> C sequential refinement
+    parallel: false
 
   brainstorm:
     rounds: 1
-    parallel: true      # Generate ideas in parallel
+    parallel: true      # Generate ideas simultaneously
 
   devils-advocate:
-    rounds: 2           # Point/counterpoint exchanges
+    rounds: 2           # Point and counterpoint exchanges
+    parallel: false
 
   roles:
     rounds: 1
-    # Default role template (architecture, debate, review, research)
-    # template: architecture
+    parallel: false
 
   code-review:
     rounds: 1
-    parallel: true
+    parallel: true      # Reviews generated in parallel
 
   solve:
     rounds: 3           # Understand -> Plan -> Implement
-    checkpoint: false
+    parallel: false
 
-  # Global mode settings
+  # Global mode settings (apply to all modes)
   global:
-    max_rounds: 10              # Safety cap for all modes
-    satisfaction_threshold: 8   # For --until=satisfied (1-10)
+    satisfaction_threshold: 8   # Quality score for --until=satisfied (1-10)
+    max_rounds: 10              # Safety cap on all mode iterations
+    voting_system: majority     # majority, unanimous, or weighted
 
-# Legacy special commands (for backwards compatibility)
-special_commands:
-  debate_rounds: 3
-  all_parallel: false
+# ============================================================================
+# Custom Role Templates
+# ============================================================================
+# Define custom role templates for @roles mode.
+# Format: template_name: { roles: { role_name: description, ... } }
+#
+# Built-in templates: architecture, debate, review, research
 
-# Display settings
+custom_templates: {}
+  # Example:
+  # security:
+  #   roles:
+  #     attacker: "Find vulnerabilities and attack vectors"
+  #     defender: "Design mitigations and security measures"
+  #     auditor: "Evaluate the security posture objectively"
+
+# ============================================================================
+# Display Settings
+# ============================================================================
+
 display:
-  # Show timestamps on messages
+  # Show timestamps on each message
   show_timestamps: true
+
+  # Show AI name header above each response
+  show_ai_header: true
 
   # Max width for response text (0 = no limit)
   max_width: 120
 
-  # Show which AI is responding with a header
-  show_ai_header: true
+  # Output verbosity: silent, normal, verbose, debug
+  verbose_mode: normal
 
-# Context settings
+  # Number of characters to show in history preview
+  preview_length: 100
+
+# ============================================================================
+# Context Settings
+# ============================================================================
+
 context:
-  # How many messages to keep in history
+  # Maximum messages to keep in conversation history
   max_history: 50
 
   # Auto-include last N messages as context (0 = disabled)
   auto_context: 0
+
+  # Automatically save conversations to disk
+  save_conversations: false
+
+  # Directory for saved conversations (empty = current directory)
+  save_path: ""
+
+# ============================================================================
+# Execution Settings
+# ============================================================================
+
+execution:
+  # Stream output as it generates (show tokens in real-time)
+  streaming: true
+
+  # Enable parallel execution for @all and applicable modes
+  parallel: false
+
+  # Streaming display refresh rate (updates per second)
+  refresh_rate: 10
+
+  # Global timeout in seconds (per-AI query)
+  timeout: 300
+
+  # Maximum concurrent AI queries during parallel execution
+  max_concurrent_ais: 3
+
+  # Number of retry attempts on query failure
+  retry_count: 0
+
+  # Seconds to wait between retry attempts
+  retry_delay: 2
+
+# ============================================================================
+# Legacy Settings (for backwards compatibility)
+# ============================================================================
+
+special_commands:
+  debate_rounds: 3
+  all_parallel: false

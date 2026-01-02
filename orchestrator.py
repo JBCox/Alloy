@@ -5,7 +5,7 @@ import shlex
 import sys
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import AIConfig, Config
@@ -48,6 +48,82 @@ class Orchestrator:
             )
 
         return self._execute(ai_config, message)
+
+    def query_streaming(self, ai_name: str, message: str) -> Generator[str, None, AIResponse]:
+        """
+        Stream a query to a specific AI, yielding chunks as they arrive.
+
+        Args:
+            ai_name: Name of the AI to query
+            message: The message/prompt to send
+
+        Yields:
+            String chunks as they arrive from the AI
+
+        Returns:
+            AIResponse with the complete result (via generator return)
+        """
+        ai_config = self.config.get_ai(ai_name)
+        if ai_config is None:
+            return AIResponse(
+                ai_name=ai_name,
+                content="",
+                success=False,
+                error=f"Unknown or disabled AI: {ai_name}"
+            )
+
+        return self._execute_streaming(ai_config, message)
+
+    def _execute_streaming(self, ai_config: AIConfig, message: str) -> Generator[str, None, AIResponse]:
+        """Execute an AI CLI command with streaming output."""
+        full_content = ""
+        error = None
+
+        try:
+            escaped_message = self._escape_message(message)
+            command = ai_config.command.replace("{message}", escaped_message)
+
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                encoding="utf-8",
+                errors="replace",
+                env={**os.environ, "NO_COLOR": "1", "PYTHONUNBUFFERED": "1"},
+            )
+
+            # Stream stdout character by character for responsive output
+            while True:
+                char = process.stdout.read(1)
+                if not char:
+                    break
+                full_content += char
+                yield char
+
+            process.wait(timeout=self.timeout)
+
+            if process.returncode != 0:
+                stderr = process.stderr.read().strip()
+                if stderr and not full_content:
+                    error = f"Command failed: {stderr}"
+
+        except subprocess.TimeoutExpired:
+            process.kill()
+            error = f"Timeout: AI did not respond within {self.timeout} seconds"
+        except FileNotFoundError:
+            error = f"CLI not found: {ai_config.command.split()[0]}. Is it installed and in PATH?"
+        except Exception as e:
+            error = f"Error: {str(e)}"
+
+        return AIResponse(
+            ai_name=ai_config.name,
+            content=full_content.strip(),
+            success=error is None,
+            error=error
+        )
 
     def query_all(self, message: str, parallel: bool = False) -> list[AIResponse]:
         """
