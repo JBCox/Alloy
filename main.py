@@ -68,6 +68,7 @@ class AlloyCompleter(Completer):
         ("/ais", "List available AIs"),
         ("/modes", "Show collaboration modes"),
         ("/settings", "Open settings editor"),
+        ("/install", "AI installation assistant"),
         ("/gui", "Launch graphical interface"),
         ("/reload", "Reload configuration"),
         ("/history", "Show conversation history"),
@@ -357,9 +358,19 @@ class AICollab:
             self._reload_config()
         elif cmd == "gui":
             self.launch_gui()
+        elif cmd == "install":
+            self.run_install_assistant()
         else:
             self.console.print(f"[yellow]Unknown command: /{cmd}[/yellow]")
         return True
+
+    def run_install_assistant(self):
+        """Run the AI installation assistant."""
+        try:
+            from ai_installer import interactive_install
+            interactive_install(self.config)
+        except Exception as e:
+            self.console.print(f"[red]Failed to run installer: {e}[/red]")
 
     def launch_gui(self):
         """Launch the GUI application."""
@@ -932,6 +943,7 @@ class AICollab:
   /ais                     List available AIs
   /modes                   Show collaboration modes
   /settings                Open settings editor
+  /install                 AI installation assistant
   /gui                     Launch graphical interface
   /reload                  Reload configuration
   /history                 Show conversation

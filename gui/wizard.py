@@ -251,11 +251,192 @@ class SetupWizard(tk.Toplevel):
         self.detection_results = ttk.Frame(page)
         self.detection_results.pack(fill="both", expand=True, pady=PAD["medium"])
 
-        # Rescan button
-        rescan_btn = ttk.Button(page, text="Rescan", command=self._run_detection)
-        rescan_btn.pack(anchor="w", pady=PAD["medium"])
+        # Button row
+        btn_frame = ttk.Frame(page)
+        btn_frame.pack(anchor="w", pady=PAD["medium"])
+
+        rescan_btn = ttk.Button(btn_frame, text="Rescan", command=self._run_detection)
+        rescan_btn.pack(side="left", padx=(0, PAD["small"]))
+
+        install_btn = ttk.Button(
+            btn_frame,
+            text="Install Missing AIs...",
+            command=self._launch_install_assistant,
+            style="Accent.TButton"
+        )
+        install_btn.pack(side="left")
 
         return page
+
+    def _launch_install_assistant(self):
+        """Launch the AI installation assistant."""
+        try:
+            from ai_installer import AIInstaller
+            from config import Config
+            from tkinter import messagebox
+
+            # Load config
+            config = Config.load(self.config_path if self.config_path.exists() else None)
+            installer = AIInstaller(config)
+
+            # Get working AI
+            helper_ai = installer.get_working_ai()
+            missing = installer.get_missing_ais()
+
+            if not missing:
+                messagebox.showinfo(
+                    "All AIs Available",
+                    "All configured AIs are already working!"
+                )
+                return
+
+            # Create installation dialog
+            self._show_install_dialog(installer, helper_ai, missing)
+
+        except Exception as e:
+            from tkinter import messagebox
+            messagebox.showerror("Error", f"Failed to launch installer: {e}")
+
+    def _show_install_dialog(self, installer, helper_ai, missing):
+        """Show the installation assistant dialog."""
+        from ai_installer import AI_INSTALL_INFO
+
+        dialog = tk.Toplevel(self)
+        dialog.title("AI Installation Assistant")
+        dialog.geometry("600x500")
+        dialog.configure(bg=COLORS["bg"])
+        dialog.transient(self)
+        dialog.grab_set()
+
+        # Center
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() - 600) // 2
+        y = (dialog.winfo_screenheight() - 500) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        apply_dark_theme(dialog)
+
+        main = ttk.Frame(dialog)
+        main.pack(fill="both", expand=True, padx=PAD["large"], pady=PAD["large"])
+
+        # Header
+        ttk.Label(
+            main,
+            text="Install Missing AIs",
+            style="Heading.TLabel"
+        ).pack(anchor="w")
+
+        if helper_ai:
+            ttk.Label(
+                main,
+                text=f"Using {helper_ai} to help with installation",
+                style="Accent.TLabel"
+            ).pack(anchor="w", pady=(PAD["small"], 0))
+
+        ttk.Label(
+            main,
+            text=f"Missing: {', '.join(missing)}",
+            style="Dim.TLabel"
+        ).pack(anchor="w", pady=(PAD["small"], PAD["medium"]))
+
+        # AI selection
+        ttk.Label(main, text="Select AI to install:").pack(anchor="w")
+
+        ai_var = tk.StringVar(value=missing[0] if missing else "")
+        ai_combo = ttk.Combobox(
+            main,
+            textvariable=ai_var,
+            values=missing,
+            state="readonly",
+            width=30
+        )
+        ai_combo.pack(anchor="w", pady=PAD["small"])
+
+        # Instructions area
+        ttk.Label(main, text="Instructions:", style="Subheading.TLabel").pack(
+            anchor="w", pady=(PAD["medium"], PAD["small"])
+        )
+
+        instructions_text = tk.Text(
+            main,
+            height=12,
+            wrap="word",
+            bg=COLORS["bg_light"],
+            fg=COLORS["fg"],
+            font=FONTS["body"],
+            padx=8,
+            pady=8
+        )
+        instructions_text.pack(fill="both", expand=True)
+
+        def update_instructions(*args):
+            ai_name = ai_var.get()
+            info = installer.get_install_info(ai_name)
+            instructions_text.config(state="normal")
+            instructions_text.delete("1.0", "end")
+            if info:
+                instructions_text.insert("1.0", info.install_instructions.strip())
+            instructions_text.config(state="disabled")
+
+        ai_var.trace_add("write", update_instructions)
+        update_instructions()  # Initial
+
+        # Buttons
+        btn_frame = ttk.Frame(main)
+        btn_frame.pack(fill="x", pady=(PAD["medium"], 0))
+
+        def open_api_page():
+            ai_name = ai_var.get()
+            if installer.open_api_key_page(ai_name):
+                instructions_text.config(state="normal")
+                instructions_text.insert("end", "\n\n[Browser opened - get your API key!]")
+                instructions_text.config(state="disabled")
+
+        def get_ai_help():
+            if not helper_ai:
+                from tkinter import messagebox
+                messagebox.showinfo("No Helper", "No working AI available to help. Set up at least one AI first.")
+                return
+
+            ai_name = ai_var.get()
+            instructions_text.config(state="normal")
+            instructions_text.insert("end", f"\n\n--- Asking {helper_ai} for help... ---\n\n")
+            instructions_text.config(state="disabled")
+            instructions_text.see("end")
+
+            def get_help_thread():
+                def update_text(chunk):
+                    dialog.after(0, lambda: _append_text(chunk))
+
+                def _append_text(chunk):
+                    instructions_text.config(state="normal")
+                    instructions_text.insert("end", chunk)
+                    instructions_text.config(state="disabled")
+                    instructions_text.see("end")
+
+                installer.get_ai_assisted_help(helper_ai, ai_name, "", callback=update_text)
+
+            threading.Thread(target=get_help_thread, daemon=True).start()
+
+        ttk.Button(
+            btn_frame,
+            text="Open API Key Page",
+            command=open_api_page
+        ).pack(side="left", padx=(0, PAD["small"]))
+
+        if helper_ai:
+            ttk.Button(
+                btn_frame,
+                text=f"Ask {helper_ai} for Help",
+                command=get_ai_help,
+                style="Accent.TButton"
+            ).pack(side="left", padx=(0, PAD["small"]))
+
+        ttk.Button(
+            btn_frame,
+            text="Close",
+            command=dialog.destroy
+        ).pack(side="right")
 
     def _create_ai_config_page(self) -> ttk.Frame:
         """Create AI configuration page."""
