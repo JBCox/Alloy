@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AI Chat</title>
+<style>
+  :root {
+    --bg: #17151C; --surface: #201D26; --surface2: #2A2631;
+    --line: rgba(255,255,255,.07); --text: #ECE8E3; --muted: #8D8798;
+    --claude: #E07B54; --gpt: #2EAE8B; --gemini: #5B7FE8; --josh: #C9A227;
+    --danger: #C75B5B;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.55 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .display { font-family: Bahnschrift, "Segoe UI", sans-serif; }
+  .mono { font-family: "Cascadia Mono", Consolas, monospace; }
+
+  /* ---------- header ---------- */
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 18px; border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #1C1922, var(--bg));
+  }
+  .wordmark { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+  .wordmark .dots { display: flex; }
+  .wordmark .dots i { width: 11px; height: 11px; border-radius: 50%; margin-left: -3px; }
+  .wordmark .dots i:nth-child(1) { background: var(--claude); margin-left: 0; }
+  .wordmark .dots i:nth-child(2) { background: var(--gpt); }
+  .wordmark .dots i:nth-child(3) { background: var(--gemini); }
+  .wordmark h1 {
+    font-family: Bahnschrift, sans-serif; font-weight: 600;
+    font-size: 17px; letter-spacing: .14em; text-transform: uppercase;
+  }
+  #stopBtn {
+    flex: 0 0 auto; border: 1px solid var(--danger); border-radius: 9px;
+    padding: 10px 22px; font-family: Bahnschrift, sans-serif; font-size: 14px;
+    letter-spacing: .08em; text-transform: uppercase; cursor: pointer;
+    background: var(--surface2); color: var(--danger); transition: filter .15s;
+  }
+  #stopBtn:hover { filter: brightness(1.15); }
+  #stopBtn[hidden] { display: none; }
+  #roundBadge { margin-left: auto; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+
+  /* ---------- layout ---------- */
+  main { flex: 1; display: flex; min-height: 0; }
+  aside {
+    width: 270px; flex: 0 0 auto; border-right: 1px solid var(--line);
+    padding: 16px 14px; overflow-y: auto; background: #1A1720;
+  }
+  .rail-label {
+    font-family: Bahnschrift, sans-serif; font-size: 11px; letter-spacing: .18em;
+    text-transform: uppercase; color: var(--muted); margin: 18px 4px 8px;
+  }
+  .rail-label:first-child { margin-top: 0; }
+
+  /* ---------- seats ---------- */
+  .seat {
+    background: var(--surface); border: 1px solid var(--line);
+    border-left: 3px solid var(--seat, var(--muted));
+    border-radius: 10px; padding: 10px 12px; margin-bottom: 10px;
+    transition: box-shadow .3s, opacity .2s;
+  }
+  .seat[data-provider=claude] { --seat: var(--claude); }
+  .seat[data-provider=gpt] { --seat: var(--gpt); }
+  .seat[data-provider=gemini] { --seat: var(--gemini); }
+  .seat.off { opacity: .45; }
+  .seat.thinking { box-shadow: 0 0 18px -2px var(--seat); animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 7px -2px var(--seat); } }
+  @media (prefers-reduced-motion: reduce) { .seat.thinking { animation: none; } }
+  .seat-head { display: flex; align-items: center; gap: 8px; }
+  .seat-head .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--seat); }
+  .seat-head .name {
+    font-family: Bahnschrift, sans-serif; font-size: 14px; letter-spacing: .1em;
+    text-transform: uppercase; flex: 1;
+  }
+  .seat-head .state { font-size: 11px; color: var(--muted); }
+  .seat.thinking .state { color: var(--seat); }
+  .seat select {
+    width: 100%; margin-top: 7px; background: var(--surface2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px;
+    font: 12.5px "Cascadia Mono", Consolas, monospace; outline: none;
+  }
+  .seat .switch { float: right; }
+  .seat-head .rm {
+    border: 0; background: none; color: var(--muted); cursor: pointer;
+    font-size: 14px; line-height: 1; padding: 0 2px;
+  }
+  .seat-head .rm:hover { color: var(--danger); }
+  #addSeatRow { display: flex; gap: 6px; margin-bottom: 10px; }
+  #addSeatRow select {
+    flex: 1; background: var(--surface2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px;
+    font: 12.5px "Cascadia Mono", Consolas, monospace; outline: none;
+  }
+  .seat.noauth { border-left-style: dashed; }
+  .seat.noauth .state { color: var(--danger); }
+
+  /* ---------- accounts ---------- */
+  .acct {
+    background: var(--surface); border: 1px solid var(--line);
+    border-left: 3px solid var(--seat, var(--muted));
+    border-radius: 10px; padding: 8px 12px; margin-bottom: 8px;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .acct .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--seat, var(--muted)); }
+  .acct .aname {
+    font-family: Bahnschrift, sans-serif; font-size: 13px; letter-spacing: .1em;
+    text-transform: uppercase;
+  }
+  .acct .ast {
+    flex: 1; min-width: 0; font-size: 11.5px; text-align: right;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .acct .st-ok { color: var(--muted); }
+  .acct .st-bad { color: var(--danger); }
+  .acct .st-dim { color: var(--muted); font-style: italic; }
+  .acct .abtns { display: flex; gap: 5px; flex-basis: 100%; justify-content: flex-end; }
+  .acct .abtns:empty { display: none; }
+  .acct .hint {
+    flex-basis: 100%; font: 11px "Cascadia Mono", Consolas, monospace;
+    color: var(--muted); user-select: all; overflow-wrap: anywhere;
+  }
+  .btn-sm.danger { border-color: var(--danger); color: var(--danger); }
+  #acctBtn {
+    width: 100%; display: flex; align-items: center; gap: 8px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    color: var(--text); padding: 9px 12px; margin-top: 16px; cursor: pointer;
+    font-family: Bahnschrift, sans-serif; font-size: 12px; letter-spacing: .14em;
+    text-transform: uppercase;
+  }
+  #acctBtn:hover { border-color: rgba(255,255,255,.25); }
+  #acctBadge {
+    margin-left: auto; background: var(--danger); color: #fff; border-radius: 999px;
+    font: 11px "Cascadia Mono", Consolas, monospace; padding: 1px 7px;
+  }
+  #acctModal {
+    position: fixed; inset: 0; z-index: 50; display: none;
+    align-items: flex-start; justify-content: center; padding-top: 9vh;
+    background: rgba(10,8,14,.6);
+  }
+  #acctModal.show { display: flex; }
+  .modal {
+    background: #1A1720; border: 1px solid var(--line); border-radius: 12px;
+    width: min(460px, 92vw); max-height: 78vh; overflow-y: auto;
+    padding: 16px 18px 14px; box-shadow: 0 20px 60px rgba(0,0,0,.55);
+  }
+  .modal-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .modal-head h2 {
+    flex: 1; font-family: Bahnschrift, sans-serif; font-weight: 600; font-size: 13px;
+    letter-spacing: .16em; text-transform: uppercase; color: var(--muted);
+  }
+  .modal-head .close {
+    border: 0; background: none; color: var(--muted); cursor: pointer;
+    font-size: 16px; line-height: 1; padding: 2px 4px;
+  }
+  .modal-head .close:hover { color: var(--text); }
+  #acctNote {
+    font-size: 12px; color: var(--muted); margin-bottom: 10px;
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px;
+  }
+  #acctNote.danger { color: var(--danger); border-color: var(--danger); }
+
+  /* ---------- controls ---------- */
+  .ctl { background: var(--surface); border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
+  .ctl label { font-size: 12.5px; color: var(--muted); display: block; margin-bottom: 6px; }
+  .rounds { display: flex; align-items: center; gap: 10px; }
+  .rounds button {
+    width: 28px; height: 28px; border-radius: 7px; border: 1px solid var(--line);
+    background: var(--surface2); color: var(--text); font-size: 16px; cursor: pointer;
+  }
+  .rounds b { font-family: "Cascadia Mono", Consolas, monospace; font-size: 15px; min-width: 2ch; text-align: center; }
+  #folderRow { display: flex; gap: 6px; }
+  #folderPath {
+    flex: 1; font: 11.5px "Cascadia Mono", Consolas, monospace; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; align-self: center;
+  }
+  .btn-sm {
+    border: 1px solid var(--line); background: var(--surface2); color: var(--text);
+    border-radius: 7px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+    white-space: nowrap;
+  }
+  .btn-sm:hover { border-color: rgba(255,255,255,.25); }
+  input[type=checkbox] { accent-color: var(--josh); width: 15px; height: 15px; }
+  .yolo-note { font-size: 11px; color: var(--danger); margin-top: 5px; display: none; }
+
+  /* ---------- transcript ---------- */
+  .stage { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #feed { flex: 1; overflow-y: auto; padding: 22px 26px; scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { #feed { scroll-behavior: auto; } }
+  .empty {
+    height: 100%; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 10px; color: var(--muted); text-align: center;
+  }
+  .empty .dots { display: flex; margin-bottom: 6px; }
+  .empty .dots i { width: 16px; height: 16px; border-radius: 50%; margin-left: -4px; opacity: .85; }
+  .empty .dots i:nth-child(1) { background: var(--claude); margin-left: 0; }
+  .empty .dots i:nth-child(2) { background: var(--gpt); }
+  .empty .dots i:nth-child(3) { background: var(--gemini); }
+  .empty h2 { font-family: Bahnschrift, sans-serif; font-weight: 500; font-size: 19px;
+    letter-spacing: .05em; color: var(--text); }
+  .empty p { font-size: 13.5px; max-width: 380px; }
+
+  .msg {
+    max-width: 860px; margin: 0 0 18px; padding: 12px 16px 13px;
+    background: var(--surface); border: 1px solid var(--line);
+    border-left: 3px solid var(--who, var(--muted)); border-radius: 10px;
+    animation: rise .22s ease-out;
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
+  @media (prefers-reduced-motion: reduce) { .msg { animation: none; } }
+  .msg[data-provider=claude] { --who: var(--claude); }
+  .msg[data-provider=gpt] { --who: var(--gpt); }
+  .msg[data-provider=gemini] { --who: var(--gemini); }
+  .msg.josh { --who: var(--josh); background: #241F17; margin-left: 60px; }
+  .msg.system { --who: var(--muted); color: var(--muted); font-size: 13px; }
+  .msg-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+  .msg-head .who {
+    font-family: Bahnschrift, sans-serif; font-size: 12.5px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--who);
+  }
+  .msg-head .meta { font: 11px "Cascadia Mono", Consolas, monospace; color: var(--muted); }
+  .msg-body p { margin-bottom: 9px; } .msg-body p:last-child { margin-bottom: 0; }
+  .msg-body code {
+    font: 12.5px "Cascadia Mono", Consolas, monospace; background: var(--surface2);
+    border-radius: 4px; padding: 1px 5px;
+  }
+  .msg-body pre {
+    background: #131118; border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; overflow-x: auto; margin-bottom: 9px;
+  }
+  .msg-body pre code { background: none; padding: 0; }
+
+  .typing { display: flex; align-items: center; gap: 9px; color: var(--muted);
+    font-size: 13px; margin: 0 0 18px 2px; }
+  .typing .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--who); }
+  .typing .dot { animation: blink 1.2s infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+  @media (prefers-reduced-motion: reduce) { .typing .dot { animation: none; } }
+
+  /* ---------- composer ---------- */
+  .composer {
+    display: flex; gap: 10px; padding: 14px 18px; border-top: 1px solid var(--line);
+    background: #1A1720; align-items: flex-end;
+  }
+  #say {
+    flex: 1; background: var(--surface); border: 1px solid var(--line);
+    border-radius: 9px; color: var(--text); padding: 10px 14px; font: inherit;
+    outline: none; resize: none; overflow-y: auto; line-height: 1.45;
+    min-height: 42px; max-height: 40vh; display: block;
+  }
+  #say:disabled { opacity: .4; }
+  #say::placeholder { color: var(--muted); }
+  #sayBtn {
+    border: 1px solid var(--josh); background: none; color: var(--josh);
+    border-radius: 9px; padding: 0 18px; font-family: Bahnschrift, sans-serif;
+    font-size: 13px; letter-spacing: .08em; text-transform: uppercase; cursor: pointer;
+    height: 42px; flex: none;
+  }
+  #sayBtn:disabled { opacity: .35; cursor: default; }
+  .after { display: none; gap: 8px; align-items: center; }
+  .after.show { display: flex; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wordmark">
+    <div class="dots"><i></i><i></i><i></i></div>
+    <h1>AI Chat</h1>
+  </div>
+  <span id="roundBadge" class="mono"></span>
+  <button id="stopBtn" class="display" hidden>Stop</button>
+</header>
+
+<main>
+  <aside>
+    <div class="rail-label">Seats</div>
+
+    <div id="seatList"></div>
+    <div id="addSeatRow">
+      <select id="addSeatProvider">
+        <option value="claude">Claude</option>
+        <option value="gpt">GPT</option>
+        <option value="gemini">Gemini</option>
+      </select>
+      <button class="btn-sm" id="addSeatBtn">+ Add seat</button>
+    </div>
+
+    <div class="rail-label">Conversation</div>
+    <div class="ctl">
+      <label>Rounds — each seat speaks once per round</label>
+      <div class="rounds">
+        <button id="rMinus">−</button><b id="rVal" class="mono">6</b><button id="rPlus">+</button>
+      </div>
+    </div>
+    <div class="ctl">
+      <label>Working folder — files they read &amp; write</label>
+      <div id="folderRow">
+        <span id="folderPath">auto (fresh per conversation)</span>
+        <button class="btn-sm" id="pickFolder">Choose</button>
+      </div>
+    </div>
+    <div class="ctl">
+      <label style="display:flex;align-items:center;gap:8px;margin:0">
+        <input type="checkbox" id="yolo"> Full autonomy (shell access)
+      </label>
+      <div class="yolo-note" id="yoloNote">They can run any command in the working folder. Only for topics you trust.</div>
+    </div>
+
+    <button id="acctBtn" title="Sign in and out of the AI accounts">
+      <span>Accounts</span><span id="acctBadge" hidden></span>
+    </button>
+  </aside>
+
+  <div class="stage">
+    <div id="feed">
+      <div class="empty" id="emptyState">
+        <div class="dots"><i></i><i></i><i></i></div>
+        <h2>Three minds, one table</h2>
+        <p>Type your opening message below and hit Send — that starts the
+           conversation. Anything you type after that joins as an interjection,
+           and when a run ends, keep typing to continue it. Shift+Enter adds a
+           line, ↑ recalls what you last sent. /help lists commands like /clear
+           and /compact.</p>
+      </div>
+    </div>
+    <div class="composer">
+      <textarea id="say" rows="1" placeholder="Type your opening message — Send starts the conversation" autocomplete="off" spellcheck="false"></textarea>
+      <button id="sayBtn" class="display">Send</button>
+      <div class="after" id="afterRow">
+        <button class="btn-sm" id="openTranscript">Transcript</button>
+        <button class="btn-sm" id="openWorkspace">Folder</button>
+        <button class="btn-sm" id="newBtn">New conversation</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div id="acctModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Accounts</h2>
+      <button class="close" id="acctClose" title="Close">✕</button>
+    </div>
+    <div id="acctNote" hidden></div>
+    <div id="acctList"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let running = false, canContinue = false;
+let transcriptPath = null, workspacePath = null, customFolder = null;
+let rounds = 6;
+const EMPTY_HTML = document.getElementById("feed").innerHTML;
+
+/* ---------- markdown-lite ---------- */
+function esc(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function md(s) {
+  s = esc(s).replace(/\[\[WRAP\]\]/g, "");
+  const blocks = s.split(/```/);
+  let out = "";
+  blocks.forEach((b, i) => {
+    if (i % 2) { out += "<pre><code>" + b.replace(/^\w*\n/, "") + "</code></pre>"; return; }
+    b.split(/\n{2,}/).forEach(p => {
+      if (!p.trim()) return;
+      p = p.replace(/`([^`]+)`/g, "<code>$1</code>")
+           .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+           .replace(/\*([^*]+)\*/g, "<i>$1</i>")
+           .replace(/\n/g, "<br>");
+      out += "<p>" + p + "</p>";
+    });
+  });
+  return out;
+}
+
+/* ---------- feed ---------- */
+function addMsg(kind, name, text, meta) {
+  // kind: "josh" | "system" | a provider id ("claude"/"gpt"/"gemini")
+  $("emptyState")?.remove();
+  const d = document.createElement("div");
+  if (kind === "josh" || kind === "system") d.className = "msg " + kind;
+  else { d.className = "msg"; d.dataset.provider = kind; }
+  d.innerHTML = `<div class="msg-head"><span class="who">${esc(name)}</span>` +
+    (meta ? `<span class="meta">${esc(meta)}</span>` : "") +
+    `</div><div class="msg-body">${md(text)}</div>`;
+  $("feed").appendChild(d);
+  $("feed").scrollTop = $("feed").scrollHeight;
+}
+let typingEl = null;
+function showTyping(provider, name) {
+  hideTyping();
+  typingEl = document.createElement("div");
+  typingEl.className = "typing";
+  typingEl.style.setProperty("--who", `var(--${provider})`);
+  typingEl.innerHTML = `<span class="dot"></span> ${esc(name)} is thinking…`;
+  $("feed").appendChild(typingEl);
+  $("feed").scrollTop = $("feed").scrollHeight;
+}
+function hideTyping() { typingEl?.remove(); typingEl = null; }
+function seatState(key, cls, label) {
+  const seat = $("seat-" + key);
+  if (!seat) return;
+  seat.classList.toggle("thinking", cls === "thinking");
+  seat.querySelector(".state").textContent = label;
+}
+
+/* ---------- events from python ---------- */
+window.uiEvent = ({event, payload}) => {
+  if (event === "started") {
+    transcriptPath = payload.transcript; workspacePath = payload.workspace;
+    convProviders = (payload.participants || []).map(p => p.provider);
+  } else if (event === "auth_status") {
+    renderAccounts(payload);
+  } else if (event === "thinking") {
+    $("roundBadge").textContent = `round ${payload.round}/${payload.turns}`;
+    seatState(payload.speaker, "thinking", "thinking…");
+    showTyping(payload.provider, payload.name);
+  } else if (event === "thinking_done") {
+    seatState(payload.speaker, "", "ready"); hideTyping();
+  } else if (event === "message") {
+    hideTyping();
+    addMsg(payload.provider || payload.speaker, payload.name, payload.text,
+           payload.round ? "round " + payload.round : "opening");
+  } else if (event === "status") {
+    addMsg("system", "relay", payload.text, "");
+  } else if (event === "agent_error") {
+    addMsg("system", "relay", payload.message, "");
+    seatState(payload.speaker, "", "error");
+  } else if (event === "error") {
+    addMsg("system", "relay", payload.message, "");
+    finish();
+  } else if (event === "done") {
+    canContinue = !!payload.can_continue;
+    if (transcriptPath) addMsg("system", "relay", canContinue
+      ? "Conversation paused. Reply to continue it, or start a new one."
+      : "Conversation ended. Transcript saved.", "");
+    finish();
+  }
+};
+
+function finish() {
+  running = false; hideTyping();
+  $("stopBtn").hidden = true;
+  $("say").placeholder = canContinue ? CONT_PH : IDLE_PH;
+  $("roundBadge").textContent = "";
+  seats.forEach(s => seatState(s.id, "", "ready"));
+  applyAuthToSeats();
+  if (transcriptPath) $("afterRow").classList.add("show");
+  $("say").focus();
+}
+
+/* ---------- seats ---------- */
+const PROVIDER_NAMES = { claude: "Claude", gpt: "GPT", gemini: "Gemini" };
+let seats = [], nextSeatId = 0, uiCfg = null;
+
+function seatDisplayName(seat) {
+  const n = seats.filter(s => s.provider === seat.provider).indexOf(seat) + 1;
+  const base = PROVIDER_NAMES[seat.provider];
+  return n > 1 ? `${base} ${n}` : base;
+}
+function refreshSeatNames() {
+  seats.forEach(s => { s.el.querySelector(".name").textContent = seatDisplayName(s); });
+}
+function addSeat(provider) {
+  const seat = { id: nextSeatId++, provider, el: null };
+  const d = document.createElement("div");
+  d.className = "seat";
+  d.dataset.provider = provider;
+  d.id = "seat-" + seat.id;
+  d.innerHTML =
+    `<div class="seat-head">
+      <span class="dot"></span><span class="name"></span>
+      <span class="state">ready</span>
+      <input type="checkbox" class="switch" checked>
+      <button class="rm" title="Remove seat">✕</button>
+    </div>
+    <select class="model"></select>
+    <select class="effort"></select>`;
+  seat.el = d;
+  d.querySelector(".switch").onchange = e =>
+    d.classList.toggle("off", !e.target.checked);
+  d.querySelector(".rm").onclick = () => {
+    seats = seats.filter(s => s !== seat);
+    d.remove();
+    refreshSeatNames();
+  };
+  $("seatList").appendChild(d);
+  seats.push(seat);
+  refreshSeatNames();
+  if (uiCfg) fillSeat(seat);
+  applyAuthToSeats();
+  return seat;
+}
+$("addSeatBtn").onclick = () => addSeat($("addSeatProvider").value);
+
+function fillSeat(seat) {
+  const mSel = seat.el.querySelector(".model");
+  const eSel = seat.el.querySelector(".effort");
+  if (seat.provider === "claude") {
+    fill(mSel, uiCfg.claude_models, uiCfg.claude_default_model);
+    fill(eSel, ["low", "medium", "high", "xhigh", "max"].map(l => ({id: l, label: "Thinking: " + l})),
+         uiCfg.claude_default_effort);
+  } else if (seat.provider === "gpt") {
+    fill(mSel, gptModels.map(m => ({id: m.id, label: m.label})),
+         uiCfg.gpt_default_model);
+    fillGptLevels(eSel, mSel.value, uiCfg.gpt_default_effort);
+    mSel.onchange = () => fillGptLevels(eSel, mSel.value, eSel.value);
+  } else {
+    fill(mSel, geminiFamilies.map(f => ({id: f.base, label: f.label})),
+         uiCfg.gemini_default_family);
+    fillGeminiLevels(eSel, mSel.value, uiCfg.gemini_default_level);
+    mSel.onchange = () => fillGeminiLevels(eSel, mSel.value, eSel.value);
+  }
+}
+
+/* ---------- accounts ---------- */
+let authStatus = {};        // provider id -> latest status dict
+let convProviders = [];     // providers in the current/paused conversation
+
+function openAccounts() { $("acctModal").classList.add("show"); }
+function closeAccounts() { $("acctModal").classList.remove("show"); }
+$("acctBtn").onclick = () => { setAcctNote(""); openAccounts(); };
+$("acctClose").onclick = closeAccounts;
+$("acctModal").onclick = e => { if (e.target === $("acctModal")) closeAccounts(); };
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeAccounts(); });
+
+function setAcctNote(text, danger) {
+  const n = $("acctNote");
+  n.hidden = !text;
+  n.textContent = text || "";
+  n.classList.toggle("danger", !!danger);
+}
+
+function renderAccounts(payload) {
+  if (!payload || !payload.providers) return;
+  const seatable = payload.providers.filter(p => p.seatable);
+  seatable.forEach(p => { PROVIDER_NAMES[p.provider] = p.label; });
+  const bad = seatable.filter(p =>
+    p.state === "signed_out" || p.state === "not_installed").length;
+  $("acctBadge").hidden = !bad;
+  $("acctBadge").textContent = bad;
+  const sel = $("addSeatProvider");
+  if (sel.options.length !== seatable.length) {
+    const cur = sel.value;
+    sel.innerHTML = "";
+    seatable.forEach(p => {
+      const o = document.createElement("option");
+      o.value = p.provider; o.textContent = p.label; sel.appendChild(o);
+    });
+    if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+  }
+  const list = $("acctList");
+  list.innerHTML = "";
+  setAcctNote("");   // status just changed — any pending arm/sign-in note is stale
+  payload.providers.forEach(p => {
+    authStatus[p.provider] = p;
+    document.documentElement.style.setProperty("--" + p.provider, p.color);
+    const d = document.createElement("div");
+    d.className = "acct";
+    d.style.setProperty("--seat", p.color);
+    let st, cls;
+    if (p.state === "signed_in") { st = "signed in" + (p.email ? " · " + p.email : ""); cls = "st-ok"; }
+    else if (p.state === "signed_out") { st = "not signed in"; cls = "st-bad"; }
+    else if (p.state === "not_installed") { st = "not installed"; cls = "st-bad"; }
+    else { st = p.detail || "checking…"; cls = "st-dim"; }
+    d.innerHTML =
+      `<span class="dot"></span><span class="aname">${esc(p.label)}</span>` +
+      `<span class="ast ${cls}" title="${esc(p.detail || "")}">${esc(st)}</span>` +
+      (p.state === "not_installed" ? `<div class="hint">${esc(p.install_hint)}</div>` : "") +
+      `<span class="abtns"></span>`;
+    const btns = d.querySelector(".abtns");
+    const mk = (label, fn, title) => {
+      const b = document.createElement("button");
+      b.className = "btn-sm"; b.textContent = label;
+      if (title) b.title = title;
+      b.onclick = fn; btns.appendChild(b); return b;
+    };
+    if (p.state === "signed_out")
+      mk("Sign in", async () => {
+        const r = await pywebview.api.sign_in(p.provider);
+        setAcctNote(r?.error ? r.error :
+          "A terminal window opened — finish signing in there; status refreshes automatically.",
+          !!r?.error);
+      });
+    if (p.state === "signed_in" && p.can_logout) {
+      const b = mk("Log out", () => {
+        if (b.dataset.arm) {
+          delete b.dataset.arm; b.textContent = "…"; b.disabled = true;
+          setAcctNote(`Signing ${p.label} out…`);
+          pywebview.api.sign_out(p.provider);
+        } else {
+          b.dataset.arm = "1"; b.textContent = "Really log out?"; b.classList.add("danger");
+          setAcctNote(
+            `Logging out ${p.label} signs the ${p.label} CLI out machine-wide — every app and terminal on this PC` +
+            (p.provider === "claude" ? ", including any Claude Code sessions" : "") +
+            ` — not just AI Chat. Click "Really log out?" to confirm.`, true);
+          setTimeout(() => {
+            if (b.dataset.arm) {
+              delete b.dataset.arm; b.textContent = "Log out"; b.classList.remove("danger");
+              setAcctNote("");
+            }
+          }, 8000);
+        }
+      }, "Signs the CLI out machine-wide, not just this app");
+    }
+    mk("↻", () => pywebview.api.recheck_auth(p.provider), "Re-check status");
+    list.appendChild(d);
+  });
+  applyAuthToSeats();
+}
+
+function applyAuthToSeats() {
+  seats.forEach(s => {
+    const st = authStatus[s.provider];
+    const bad = !!st && (st.state === "signed_out" || st.state === "not_installed");
+    s.el.classList.toggle("noauth", bad);
+    if (!running) s.el.querySelector(".state").textContent = bad ? "sign-in needed" : "ready";
+  });
+}
+
+function authBlockMsg(providers) {
+  for (const p of [...new Set(providers)]) {
+    const st = authStatus[p];
+    if (st && st.state === "signed_out")
+      return `${st.label} isn't signed in — use Sign in below (or disable that seat).`;
+    if (st && st.state === "not_installed")
+      return `The ${st.label} CLI isn't installed — the install command is below.`;
+  }
+  return null;
+}
+function authBlocked(providers) {
+  const msg = authBlockMsg(providers);
+  if (!msg) return false;
+  addMsg("system", "relay", msg, "");
+  setAcctNote(msg, true);
+  openAccounts();
+  return true;
+}
+
+/* ---------- controls ---------- */
+function cfgFor(seat) {
+  const enabled = seat.el.querySelector(".switch").checked;
+  const model = seat.el.querySelector(".model").value;
+  const effort = seat.el.querySelector(".effort").value;
+  if (seat.provider === "gemini") {
+    // agy model ids carry the thinking level: <family>-<level>
+    return { id: seat.id, provider: "gemini", enabled,
+             model: model + "-" + effort, effort: "" };
+  }
+  return { id: seat.id, provider: seat.provider, enabled, model, effort };
+}
+let starting = false;
+const IDLE_PH = "Type your opening message — Send starts the conversation";
+const RUN_PH  = "Interject as Josh — delivered at the next turn · /help for commands";
+const CONT_PH = "Reply to continue the conversation · /help for commands";
+function autoGrow() {
+  const el = $("say");
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, Math.round(innerHeight * 0.4)) + "px";
+}
+function clearSay() { $("say").value = ""; histIdx = -1; autoGrow(); }
+const sayHist = [];          // most-recent-first, ↑ walks back through it
+let histIdx = -1;            // -1 = live text, not browsing history
+async function sendSay() {
+  const t = $("say").value.trim();
+  if (!t || starting) return;
+  if (sayHist[0] !== t) sayHist.unshift(t);
+  sayHist.length = Math.min(sayHist.length, 50);
+  if (t.startsWith("/")) {
+    clearSay();
+    addMsg("josh", "Josh", t, "command");
+    const r = await pywebview.api.command(t);
+    if (r?.error) addMsg("system", "relay", r.error, "");
+    else if (r?.note) addMsg("system", "relay", r.note, "");
+    return;
+  }
+  if (running) {
+    clearSay();
+    await pywebview.api.interject(t);
+    addMsg("josh", "Josh", t, "queued for next turn");
+    return;
+  }
+  if (canContinue) {
+    if (authBlocked(convProviders)) return;
+    starting = true;
+    const r = await pywebview.api.continue_chat({opener: t, turns: rounds});
+    starting = false;
+    if (r.error) { addMsg("system", "relay", r.error, ""); return; }
+    clearSay();
+    running = true;
+    $("stopBtn").hidden = false;
+    $("afterRow").classList.remove("show");
+    $("say").placeholder = RUN_PH;
+    return;
+  }
+  const enabled = seats.filter(s => s.el.querySelector(".switch").checked);
+  if (enabled.length < 2) {
+    addMsg("system", "relay", "Pick at least two participants.", "");
+    return;
+  }
+  if (authBlocked(enabled.map(s => s.provider))) return;
+  starting = true;
+  document.querySelectorAll(".msg").forEach(e => e.remove());
+  $("afterRow").classList.remove("show");
+  transcriptPath = null;
+  const cfg = {
+    opener: t, turns: rounds, yolo: $("yolo").checked, workspace: customFolder,
+    seats: seats.map(cfgFor),
+  };
+  const r = await pywebview.api.start(cfg);
+  starting = false;
+  if (r.error) { addMsg("system", "relay", r.error, ""); return; }
+  clearSay();
+  running = true;
+  $("stopBtn").hidden = false;
+  $("say").placeholder = RUN_PH;
+}
+$("sayBtn").onclick = sendSay;
+$("say").addEventListener("input", () => { histIdx = -1; autoGrow(); });
+addEventListener("resize", autoGrow);
+$("say").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendSay(); return; }
+  // ↑/↓ recall previous sends — only when the box is empty or already browsing,
+  // so arrows still move the caret through a draft you're editing.
+  const el = $("say");
+  if (e.key === "ArrowUp" && (histIdx >= 0 || !el.value)) {
+    if (histIdx + 1 >= sayHist.length) return;
+    e.preventDefault();
+    el.value = sayHist[++histIdx];
+    autoGrow(); el.setSelectionRange(el.value.length, el.value.length);
+  } else if (e.key === "ArrowDown" && histIdx >= 0) {
+    e.preventDefault();
+    el.value = --histIdx < 0 ? "" : sayHist[histIdx];
+    autoGrow(); el.setSelectionRange(el.value.length, el.value.length);
+  } else if (e.key === "Escape" && histIdx >= 0) {
+    e.preventDefault(); clearSay();
+  }
+});
+autoGrow();
+$("stopBtn").onclick = async () => {
+  await pywebview.api.stop();
+  addMsg("system", "relay", "Stopping after the current turn…", "");
+};
+
+$("rMinus").onclick = () => { rounds = Math.max(1, rounds - 1); $("rVal").textContent = rounds; };
+$("rPlus").onclick = () => { rounds = Math.min(50, rounds + 1); $("rVal").textContent = rounds; };
+$("pickFolder").onclick = async () => {
+  const f = await pywebview.api.pick_folder();
+  if (f) { customFolder = f; $("folderPath").textContent = f; $("folderPath").style.color = "var(--text)"; }
+};
+$("yolo").onchange = () => { $("yoloNote").style.display = $("yolo").checked ? "block" : "none"; };
+$("openTranscript").onclick = () => pywebview.api.open_path(transcriptPath);
+$("openWorkspace").onclick = () => pywebview.api.open_path(customFolder || workspacePath);
+$("newBtn").onclick = async () => {
+  const r = await pywebview.api.reset_conversation();
+  if (r?.error) { addMsg("system", "relay", r.error, ""); return; }
+  canContinue = false; transcriptPath = null; workspacePath = null;
+  $("afterRow").classList.remove("show");
+  $("feed").innerHTML = EMPTY_HTML;
+  $("say").placeholder = IDLE_PH;
+  $("say").focus();
+};
+
+/* ---------- boot ---------- */
+function fill(sel, items, def) {
+  sel.innerHTML = "";
+  items.forEach(m => {
+    const o = document.createElement("option");
+    o.value = m.id; o.textContent = m.label;
+    if (m.id === def) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+let geminiFamilies = [], gptModels = [];
+function fillGeminiLevels(eSel, base, def) {
+  const fam = geminiFamilies.find(f => f.base === base) || geminiFamilies[0];
+  const order = ["high", "medium", "low"];
+  const levels = order.filter(l => fam.levels.includes(l));
+  fill(eSel,
+       levels.map(l => ({id: l, label: "Thinking: " + l})),
+       levels.includes(def) ? def : levels[0]);
+}
+function fillGptLevels(eSel, modelId, def) {
+  const m = gptModels.find(x => x.id === modelId) || gptModels[0];
+  const opts = m.levels.map(l => ({id: l, label: "Thinking: " + l}));
+  fill(eSel, opts,
+       m.levels.includes(def) ? def : (m.default_level || m.levels[0]));
+}
+addSeat("claude"); addSeat("gpt"); addSeat("gemini");
+window.addEventListener("pywebviewready", async () => {
+  // pull first (cheap cache snapshot) — pushes via auth_status events follow
+  renderAccounts(await pywebview.api.get_auth_status());
+  uiCfg = await pywebview.api.get_config();
+  gptModels = uiCfg.gpt_models;
+  geminiFamilies = uiCfg.gemini_families;
+  seats.forEach(fillSeat);
+  $("say").focus();
+});
+</script>
+</body>
+</html>
