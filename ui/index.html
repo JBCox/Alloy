@@ -45,9 +45,84 @@
   #stopBtn:hover { filter: brightness(1.15); }
   #stopBtn[hidden] { display: none; }
   #roundBadge { margin-left: auto; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+  .railToggles { display: flex; gap: 6px; }
+  .tgl {
+    border: 1px solid var(--line); background: none; color: var(--text);
+    border-radius: 7px; padding: 4px 10px; font-family: Bahnschrift, sans-serif;
+    font-size: 11px; letter-spacing: .1em; text-transform: uppercase; cursor: pointer;
+  }
+  .tgl:hover { border-color: rgba(255,255,255,.25); }
+  .tgl.off { color: var(--muted); border-style: dashed; }
+  main.no-chats #chatRail { display: none; }
+  main.no-seats aside { display: none; }
 
   /* ---------- layout ---------- */
   main { flex: 1; display: flex; min-height: 0; }
+
+  /* ---------- chat rail (history) ---------- */
+  #chatRail {
+    width: 224px; flex: 0 0 auto; border-right: 1px solid var(--line);
+    background: #15131A; display: flex; flex-direction: column; min-height: 0;
+  }
+  #chatRailHead { padding: 14px 12px 10px; }
+  #newChatBtn {
+    width: 100%; display: flex; align-items: center; gap: 8px;
+    background: var(--surface2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 9px;
+    padding: 9px 12px; font-size: 13.5px; cursor: pointer;
+    font-family: Bahnschrift, "Segoe UI", sans-serif; letter-spacing: .04em;
+    transition: border-color .15s, background .15s;
+  }
+  #newChatBtn:hover { border-color: rgba(255,255,255,.25); background: #322D3A; }
+  #newChatBtn .plus { font-size: 16px; line-height: 1; color: var(--muted); }
+  #chatList { flex: 1; overflow-y: auto; padding: 0 8px 14px; min-height: 0; }
+  .chat-group { margin-bottom: 8px; }
+  .chat-group-h {
+    width: 100%; display: flex; align-items: center; gap: 6px; border: 0;
+    background: none; color: var(--muted); cursor: pointer; padding: 4px 6px 3px;
+    font-family: Bahnschrift, sans-serif; font-size: 11px; letter-spacing: .12em;
+    text-transform: uppercase; text-align: left;
+  }
+  .chat-group-h:hover { color: var(--text); }
+  .chat-group-h .chev { font-size: 9px; flex: 0 0 auto; transition: transform .12s; }
+  @media (prefers-reduced-motion: reduce) { .chat-group-h .chev { transition: none; } }
+  .chat-group.closed .chev { transform: rotate(-90deg); }
+  .chat-group.closed .chat-group-body { display: none; }
+  .chat-group-h .gname {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  }
+  .chat-row {
+    position: relative; display: flex; align-items: center; gap: 7px;
+    border-radius: 9px; padding: 5px 24px 5px 9px;
+    cursor: pointer; margin-bottom: 1px; border: 1px solid transparent;
+  }
+  .chat-row:hover { background: var(--surface); }
+  .chat-row.active { background: var(--surface2); border-color: rgba(255,255,255,.10); }
+  .chat-row .who { display: flex; gap: 2px; flex: 0 0 auto; }
+  .chat-row .who i { width: 6px; height: 6px; border-radius: 50%; display: block; }
+  .chat-row .t {
+    flex: 1; min-width: 0; font-size: 13px; line-height: 1.35; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .chat-row.legacy .t { color: var(--muted); }
+  .chat-row .x {
+    position: absolute; top: 50%; transform: translateY(-50%); right: 3px;
+    width: 20px; height: 20px;
+    border: 0; border-radius: 6px; background: transparent; color: var(--muted);
+    cursor: pointer; font-size: 12px; line-height: 1; opacity: 0;
+    transition: opacity .12s;
+  }
+  .chat-row:hover .x, .chat-row .x[data-arm] { opacity: 1; }
+  .chat-row .x:hover, .chat-row .x[data-arm] { background: var(--surface2); color: var(--danger); }
+  .chat-row .x[data-arm] { width: auto; padding: 0 6px; font-size: 10.5px; }
+  .chat-row input.rename {
+    flex: 1; min-width: 0; background: var(--bg); color: var(--text);
+    border: 1px solid rgba(255,255,255,.18); border-radius: 6px;
+    padding: 4px 6px; font: inherit; font-size: 13px;
+  }
+  .chat-empty { padding: 14px 10px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+  #seatList.locked { opacity: .72; pointer-events: none; }
+
   aside {
     width: 270px; flex: 0 0 auto; border-right: 1px solid var(--line);
     padding: 16px 14px; overflow-y: auto; background: #1A1720;
@@ -76,8 +151,14 @@
   .seat-head .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--seat); }
   .seat-head .name {
     font-family: Bahnschrift, sans-serif; font-size: 14px; letter-spacing: .1em;
-    text-transform: uppercase; flex: 1;
+    text-transform: uppercase; flex: 1; min-width: 0;
+    background: none; border: 0; border-bottom: 1px dashed transparent;
+    color: var(--text); outline: none; padding: 0;
   }
+  /* the auto name lives in the placeholder — it must read like a real name */
+  .seat-head .name::placeholder { color: var(--text); opacity: 1; }
+  .seat-head .name:hover { border-bottom-color: var(--line); }
+  .seat-head .name:focus { border-bottom-color: var(--seat); }
   .seat-head .state { font-size: 11px; color: var(--muted); }
   .seat.thinking .state { color: var(--seat); }
   .seat select {
@@ -85,6 +166,41 @@
     border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px;
     font: 12.5px "Cascadia Mono", Consolas, monospace; outline: none;
   }
+  .seat .role-btn {
+    width: 100%; margin-top: 7px; background: var(--surface2); color: var(--muted);
+    border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px;
+    font: 12.5px "Cascadia Mono", Consolas, monospace; cursor: pointer;
+    text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .seat .role-btn.set { color: var(--text); }
+  .seat .role-btn:hover { border-color: var(--seat); }
+  /* The rail locks while a chat runs — but the role editor must stay reachable,
+     because Apply role change is the ONLY way to re-role a seated agent. */
+  #seatList.locked .role-btn { pointer-events: auto; }
+
+  /* ---------- role modal ---------- */
+  #roleModal .modal { border-left: 3px solid var(--seat, var(--muted)); }
+  #roleName, #roleInst {
+    width: 100%; margin-bottom: 8px; background: var(--surface2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px;
+    font: 12.5px "Cascadia Mono", Consolas, monospace; outline: none;
+  }
+  #roleInst { font-size: 12px; line-height: 1.45; resize: vertical; }
+  #roleName:focus, #roleInst:focus { border-color: var(--seat, var(--muted)); }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .chips button {
+    border: 1px solid var(--line); background: none; color: var(--muted);
+    border-radius: 999px; padding: 2px 8px; font-size: 11px; cursor: pointer;
+  }
+  .chips button:hover { color: var(--text); border-color: var(--seat, var(--muted)); }
+  #roleFoot { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+  #roleHint { flex: 1; font-size: 11px; color: var(--muted); line-height: 1.4; }
+  #roleApplyBtn {
+    border: 1px solid var(--seat, var(--muted)); background: none; color: var(--text);
+    border-radius: 7px; padding: 5px 12px; font-size: 12px; cursor: pointer;
+  }
+  #roleApplyBtn:hover:not([disabled]) { background: var(--surface2); }
+  #roleApplyBtn[disabled] { opacity: .45; cursor: default; }
   .seat .switch { float: right; }
   .seat-head .rm {
     border: 0; background: none; color: var(--muted); cursor: pointer;
@@ -99,6 +215,8 @@
   }
   .seat.noauth { border-left-style: dashed; }
   .seat.noauth .state { color: var(--danger); }
+  .seat.fatal { border-left-style: dashed; }
+  .seat.fatal .state { color: var(--danger); }
 
   /* ---------- accounts ---------- */
   .acct {
@@ -138,12 +256,12 @@
     margin-left: auto; background: var(--danger); color: #fff; border-radius: 999px;
     font: 11px "Cascadia Mono", Consolas, monospace; padding: 1px 7px;
   }
-  #acctModal {
+  #acctModal, #roleModal {
     position: fixed; inset: 0; z-index: 50; display: none;
     align-items: flex-start; justify-content: center; padding-top: 9vh;
     background: rgba(10,8,14,.6);
   }
-  #acctModal.show { display: flex; }
+  #acctModal.show, #roleModal.show { display: flex; }
   .modal {
     background: #1A1720; border: 1px solid var(--line); border-radius: 12px;
     width: min(460px, 92vw); max-height: 78vh; overflow-y: auto;
@@ -169,6 +287,12 @@
   .ctl { background: var(--surface); border: 1px solid var(--line);
     border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
   .ctl label { font-size: 12.5px; color: var(--muted); display: block; margin-bottom: 6px; }
+  .ctl select {
+    width: 100%; background: var(--surface2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px;
+    font: 12.5px "Cascadia Mono", Consolas, monospace; outline: none;
+  }
+  .ctl select:disabled { color: var(--muted); cursor: not-allowed; }
   .rounds { display: flex; align-items: center; gap: 10px; }
   .rounds button {
     width: 28px; height: 28px; border-radius: 7px; border: 1px solid var(--line);
@@ -246,13 +370,16 @@
   /* ---------- composer ---------- */
   .composer {
     display: flex; gap: 10px; padding: 14px 18px; border-top: 1px solid var(--line);
-    background: #1A1720; align-items: flex-end;
+    background: #1A1720; align-items: flex-end; flex-wrap: wrap;
   }
   #say {
+    /* the chat rail costs the stage 224px — below this the after-row wraps to
+       its own line instead of squeezing the box you actually type in */
+    min-width: 300px;
     flex: 1; background: var(--surface); border: 1px solid var(--line);
     border-radius: 9px; color: var(--text); padding: 10px 14px; font: inherit;
-    outline: none; resize: none; overflow-y: auto; line-height: 1.45;
-    min-height: 42px; max-height: 40vh; display: block;
+    outline: none; resize: vertical; overflow-y: auto; line-height: 1.45;
+    min-height: 42px; max-height: 70vh; display: block;
   }
   #say:disabled { opacity: .4; }
   #say::placeholder { color: var(--muted); }
@@ -265,6 +392,24 @@
   #sayBtn:disabled { opacity: .35; cursor: default; }
   .after { display: none; gap: 8px; align-items: center; }
   .after.show { display: flex; }
+  #attachBtn {
+    border: 1px solid var(--line); background: var(--surface); color: var(--muted);
+    border-radius: 9px; padding: 0 13px; font-size: 15px; cursor: pointer;
+    height: 42px; flex: none;
+  }
+  #attachBtn:hover { color: var(--text); border-color: rgba(255,255,255,.25); }
+  #attRow { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; }
+  #attRow[hidden] { display: none; }
+  .att-chip {
+    display: inline-flex; align-items: center; gap: 7px; background: var(--surface);
+    border: 1px solid var(--line); border-radius: 999px; padding: 3px 11px;
+    font: 12px "Cascadia Mono", Consolas, monospace; color: var(--text);
+  }
+  .att-chip button {
+    border: 0; background: none; color: var(--muted); cursor: pointer;
+    font-size: 12px; line-height: 1; padding: 0;
+  }
+  .att-chip button:hover { color: var(--danger); }
 </style>
 </head>
 <body>
@@ -274,11 +419,22 @@
     <div class="dots"><i></i><i></i><i></i></div>
     <h1>AI Chat</h1>
   </div>
+  <div class="railToggles">
+    <button id="tglChats" class="tgl">Chats</button>
+    <button id="tglSeats" class="tgl">Seats</button>
+  </div>
   <span id="roundBadge" class="mono"></span>
   <button id="stopBtn" class="display" hidden>Stop</button>
 </header>
 
 <main>
+  <nav id="chatRail">
+    <div id="chatRailHead">
+      <button id="newChatBtn" class="display"><span class="plus">＋</span> New chat</button>
+    </div>
+    <div id="chatList"></div>
+  </nav>
+
   <aside>
     <div class="rail-label">Seats</div>
 
@@ -294,10 +450,39 @@
 
     <div class="rail-label">Conversation</div>
     <div class="ctl">
-      <label>Rounds — each seat speaks once per round</label>
+      <label>Turn order — who speaks when</label>
+      <select id="modeSel" title="How the next speaker is chosen. Locked once the conversation starts.">
+        <option value="round_robin">Round-robin — fixed order</option>
+        <option value="speaker">Speaker picks next</option>
+        <option value="moderator">Moderator decides</option>
+        <option value="parallel">Parallel — everyone answers at once</option>
+        <option value="free">Free-running — reply as they please</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label id="roundsLabel">Rounds — each seat speaks once per round</label>
       <div class="rounds">
         <button id="rMinus">−</button><b id="rVal" class="mono">6</b><button id="rPlus">+</button>
       </div>
+      <label style="display:flex;align-items:center;gap:8px;margin:8px 0 0;font-size:12.5px;color:var(--muted)">
+        <input type="checkbox" id="untilDone"> Until done — they decide when to stop
+      </label>
+    </div>
+    <div class="ctl">
+      <label>Helpers — one-shot AIs a seat can spawn</label>
+      <select id="spawnSel" title="Seats end a reply with [[SPAWN: provider | task]] to run a one-shot helper. Each helper is a real CLI call.">
+        <option value="0">Off</option>
+        <option value="3">Up to 3</option>
+        <option value="10">Up to 10</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label>Teams — sub-conversations a seat can start</label>
+      <select id="teamSel" title="Seats end a reply with [[TEAM: seats | task]] to run a whole side conversation that reports back. A team is MANY real CLI calls.">
+        <option value="0">Off</option>
+        <option value="1">Up to 1</option>
+        <option value="3">Up to 3</option>
+      </select>
     </div>
     <div class="ctl">
       <label>Working folder — files they read &amp; write</label>
@@ -331,6 +516,9 @@
       </div>
     </div>
     <div class="composer">
+      <div id="attRow" hidden></div>
+      <button id="attachBtn" title="Attach files — saved into the working folder for the AIs to open">📎</button>
+      <input type="file" id="attachInput" multiple hidden>
       <textarea id="say" rows="1" placeholder="Type your opening message — Send starts the conversation" autocomplete="off" spellcheck="false"></textarea>
       <button id="sayBtn" class="display">Send</button>
       <div class="after" id="afterRow">
@@ -350,6 +538,26 @@
     </div>
     <div id="acctNote" hidden></div>
     <div id="acctList"></div>
+  </div>
+</div>
+
+<div id="roleModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="roleTitle">Role</h2>
+      <button class="close" id="roleClose" title="Close">✕</button>
+    </div>
+    <input id="roleName" type="text" maxlength="40" spellcheck="false"
+      placeholder="Role — the public name every seat sees in the roster">
+    <textarea id="roleInst" rows="5"
+      placeholder="What this seat does — private, only this seat sees it"></textarea>
+    <div class="chips" id="roleChips"></div>
+    <div id="roleFoot">
+      <span id="roleHint"></span>
+      <button class="btn-sm" id="roleDone">Done</button>
+      <button id="roleApplyBtn" hidden
+        title="Uses one agent turn: the seat compacts its context so it keeps its memory and wakes up in the new role">Apply role change</button>
+    </div>
   </div>
 </div>
 
@@ -382,34 +590,61 @@ function md(s) {
 }
 
 /* ---------- feed ---------- */
-function addMsg(kind, name, text, meta) {
+function addMsg(kind, name, text, meta, role) {
   // kind: "josh" | "system" | a provider id ("claude"/"gpt"/"gemini")
+  // `role` is the role the seat held WHEN IT SPOKE (stamped into the stored
+  // row), never its current one — otherwise re-roling in round 6 would
+  // relabel rounds 1-5 and the transcript would lie about who said what.
   $("emptyState")?.remove();
   const d = document.createElement("div");
   if (kind === "josh" || kind === "system") d.className = "msg " + kind;
   else { d.className = "msg"; d.dataset.provider = kind; }
+  if (role) meta = meta ? `${role} · ${meta}` : role;
   d.innerHTML = `<div class="msg-head"><span class="who">${esc(name)}</span>` +
     (meta ? `<span class="meta">${esc(meta)}</span>` : "") +
     `</div><div class="msg-body">${md(text)}</div>`;
   $("feed").appendChild(d);
+  // parallel modes: keep live typing indicators below the new message
+  typingEls.forEach(el => $("feed").appendChild(el));
   $("feed").scrollTop = $("feed").scrollHeight;
 }
-let typingEl = null;
-function showTyping(provider, name) {
-  hideTyping();
-  typingEl = document.createElement("div");
-  typingEl.className = "typing";
-  typingEl.style.setProperty("--who", `var(--${provider})`);
-  typingEl.innerHTML = `<span class="dot"></span> ${esc(name)} is thinking…`;
-  $("feed").appendChild(typingEl);
+// One indicator PER SEAT (keyed by seat id): in parallel modes several seats
+// think at once, and duplicate-provider seats need their own rows.
+const typingEls = new Map();
+function showTyping(speakerId, provider, name) {
+  hideTyping(speakerId);
+  const el = document.createElement("div");
+  el.className = "typing";
+  el.style.setProperty("--who", `var(--${provider})`);
+  el.innerHTML = `<span class="dot"></span> ${esc(name)} is thinking…`;
+  typingEls.set(speakerId, el);
+  $("feed").appendChild(el);
   $("feed").scrollTop = $("feed").scrollHeight;
 }
-function hideTyping() { typingEl?.remove(); typingEl = null; }
+function hideTyping(speakerId) {
+  const el = typingEls.get(speakerId);
+  if (el) { el.remove(); typingEls.delete(speakerId); }
+}
+function hideAllTyping() { typingEls.forEach(el => el.remove()); typingEls.clear(); }
 function seatState(key, cls, label) {
   const seat = $("seat-" + key);
   if (!seat) return;
   seat.classList.toggle("thinking", cls === "thinking");
   seat.querySelector(".state").textContent = label;
+}
+// Seats whose CLI session died. finish()/applyAuthToSeats() otherwise repaint
+// every card "ready" the moment a run ends — including the seat that just
+// permanently lost its memory. A card must not claim readiness the seat
+// doesn't have. Cleared only by evidence: that seat taking a turn again.
+let fatalSeats = new Set();
+const seatLabel = id => fatalSeats.has(id) ? "session lost" : "ready";
+function markFatal(id, on) {
+  fatalSeats[on ? "add" : "delete"](id);
+  $("seat-" + id)?.classList.toggle("fatal", on);
+}
+function clearFatal() {              // only when the chat itself changes
+  fatalSeats.forEach(id => $("seat-" + id)?.classList.remove("fatal"));
+  fatalSeats = new Set();
 }
 
 /* ---------- events from python ---------- */
@@ -417,23 +652,41 @@ window.uiEvent = ({event, payload}) => {
   if (event === "started") {
     transcriptPath = payload.transcript; workspacePath = payload.workspace;
     convProviders = (payload.participants || []).map(p => p.provider);
+    if (payload.mode) $("modeSel").value = payload.mode;
+    setSeated(true);       // roles are now APPLIED (a turn each), not just typed
+    $("openTranscript").style.display = ""; $("openWorkspace").style.display = "";
+    if (payload.session) {                    // rail row for the chat just born
+      activeId = payload.session.id;
+      sessions = [payload.session, ...sessions.filter(s => s.id !== activeId)];
+      renderChats();
+    } else { refreshChats(); }
   } else if (event === "auth_status") {
     renderAccounts(payload);
   } else if (event === "thinking") {
-    $("roundBadge").textContent = `round ${payload.round}/${payload.turns}`;
+    $("roundBadge").textContent = payload.until_done
+      ? `turn ${payload.turn}/${payload.ceiling}`
+      : `round ${payload.round}/${payload.turns}`;
+    markFatal(payload.speaker, false);   // it's alive — that's the evidence
     seatState(payload.speaker, "thinking", "thinking…");
-    showTyping(payload.provider, payload.name);
+    showTyping(payload.speaker, payload.provider, payload.name);
   } else if (event === "thinking_done") {
-    seatState(payload.speaker, "", "ready"); hideTyping();
+    seatState(payload.speaker, "", seatLabel(payload.speaker));
+    hideTyping(payload.speaker);
   } else if (event === "message") {
-    hideTyping();
+    hideTyping(payload.speaker);         // backstop; thinking_done owns it
+    // rows carry their true caption (e.g. "helper for Claude"); fall back to
+    // the round number for payloads that predate stored metas
     addMsg(payload.provider || payload.speaker, payload.name, payload.text,
-           payload.round ? "round " + payload.round : "opening");
+           payload.meta || (payload.round ? "round " + payload.round : "opening"),
+           payload.role);
+  } else if (event === "role_applied") {
+    roleApplied(payload);
   } else if (event === "status") {
     addMsg("system", "relay", payload.text, "");
   } else if (event === "agent_error") {
     addMsg("system", "relay", payload.message, "");
-    seatState(payload.speaker, "", "error");
+    if (payload.fatal) markFatal(payload.speaker, true);
+    seatState(payload.speaker, "", payload.fatal ? "session lost" : "error");
   } else if (event === "error") {
     addMsg("system", "relay", payload.message, "");
     finish();
@@ -443,15 +696,16 @@ window.uiEvent = ({event, payload}) => {
       ? "Conversation paused. Reply to continue it, or start a new one."
       : "Conversation ended. Transcript saved.", "");
     finish();
+    refreshChats();          // updated timestamp / round count / title
   }
 };
 
 function finish() {
-  running = false; hideTyping();
+  running = false; hideAllTyping();
   $("stopBtn").hidden = true;
   $("say").placeholder = canContinue ? CONT_PH : IDLE_PH;
   $("roundBadge").textContent = "";
-  seats.forEach(s => seatState(s.id, "", "ready"));
+  seats.forEach(s => seatState(s.id, "", seatLabel(s.id)));
   applyAuthToSeats();
   if (transcriptPath) $("afterRow").classList.add("show");
   $("say").focus();
@@ -466,25 +720,36 @@ function seatDisplayName(seat) {
   const base = PROVIDER_NAMES[seat.provider];
   return n > 1 ? `${base} ${n}` : base;
 }
+// The auto name is the PLACEHOLDER; anything typed in the box is a custom
+// label sent to the engine (assign_labels treats explicit labels as-is).
 function refreshSeatNames() {
-  seats.forEach(s => { s.el.querySelector(".name").textContent = seatDisplayName(s); });
+  seats.forEach(s => { s.el.querySelector(".name").placeholder = seatDisplayName(s); });
 }
-function addSeat(provider) {
-  const seat = { id: nextSeatId++, provider, el: null };
+function addSeat(provider, forceId) {
+  // forceId: reopening a saved chat rebuilds its seats with their ORIGINAL ids,
+  // so `thinking` events (keyed on the saved seat id) still find the card.
+  const id = (forceId === undefined || forceId === null) ? nextSeatId++ : forceId;
+  if (typeof id === "number" && id >= nextSeatId) nextSeatId = id + 1;
+  const seat = { id, provider, el: null, role: "", roleInst: "" };
   const d = document.createElement("div");
   d.className = "seat";
   d.dataset.provider = provider;
   d.id = "seat-" + seat.id;
   d.innerHTML =
     `<div class="seat-head">
-      <span class="dot"></span><span class="name"></span>
+      <span class="dot"></span><input class="name" type="text" maxlength="24"
+        spellcheck="false" autocomplete="off"
+        title="Seat name — click to rename (blank = automatic)">
       <span class="state">ready</span>
       <input type="checkbox" class="switch" checked>
       <button class="rm" title="Remove seat">✕</button>
     </div>
     <select class="model"></select>
-    <select class="effort"></select>`;
+    <select class="effort"></select>
+    <button class="role-btn" title="Give this seat a role — a public name plus private instructions"></button>`;
   seat.el = d;
+  refreshRoleBtn(seat);
+  d.querySelector(".role-btn").onclick = () => openRole(seat);
   d.querySelector(".switch").onchange = e =>
     d.classList.toggle("off", !e.target.checked);
   d.querySelector(".rm").onclick = () => {
@@ -521,6 +786,113 @@ function fillSeat(seat) {
   }
 }
 
+/* ---------- roles ---------- */
+// Preset NAMES carry their own meaning on purpose: the roster line other seats
+// see is the name alone, so "Graphic designer" works where "Graphic" doesn't.
+const ROLE_PRESETS = [
+  {name: "Researcher",
+   inst: "You research and gather evidence. Cite what you find (file and line, "
+       + "or a source). You don't write the implementation."},
+  {name: "Coder",
+   inst: "You write the implementation. Keep changes minimal and in the "
+       + "existing style. Say which files you changed."},
+  {name: "Code reviewer",
+   inst: "You review code only — never write it. Be specific: file, line, "
+       + "problem, suggested fix."},
+  {name: "Graphic designer",
+   inst: "You own the visual side: layout, colour, typography, spacing. "
+       + "Describe concrete changes, not vibes."},
+  {name: "Skeptic",
+   inst: "You stress-test every claim and proposal. Ask for evidence and name "
+       + "the failure mode you're worried about."},
+];
+let seated = false;         // a conversation exists → roles are applied, not typed
+let roleSeat = null;        // the seat the role modal is currently editing
+
+// Role name + instructions live on the seat OBJECT (seat.role/seat.roleInst);
+// the card shows only a slim button and the shared modal edits them.
+function refreshRoleBtn(seat) {
+  const b = seat.el.querySelector(".role-btn");
+  b.textContent = seat.role ? "Role: " + seat.role : "Role — optional";
+  b.classList.toggle("set", !!seat.role);
+}
+
+ROLE_PRESETS.forEach(p => {          // the modal is shared — chips fill once
+  const b = document.createElement("button");
+  b.type = "button"; b.textContent = p.name; b.title = p.inst;
+  b.onclick = () => { $("roleName").value = p.name; $("roleInst").value = p.inst; };
+  $("roleChips").appendChild(b);
+});
+
+function openRole(seat) {
+  roleSeat = seat;
+  const nameBox = seat.el.querySelector(".name");
+  $("roleTitle").textContent = "Role — " + (nameBox.value.trim() || nameBox.placeholder);
+  $("roleName").value = seat.role;
+  $("roleInst").value = seat.roleInst;
+  $("roleApplyBtn").hidden = !seated;
+  $("roleHint").textContent = seated
+    ? "This seat is live — nothing changes until you hit Apply (costs one agent turn)."
+    : "Free to edit until the conversation starts.";
+  // wear the seat's colour so the modal reads as that seat's editor
+  $("roleModal").style.setProperty("--seat",
+    getComputedStyle(seat.el).getPropertyValue("--seat").trim());
+  $("roleModal").classList.add("show");
+  $("roleName").focus();
+}
+
+function closeRole() {
+  if (roleSeat && !seated) {         // pre-start edits are free — closing commits
+    roleSeat.role = $("roleName").value.trim();
+    roleSeat.roleInst = $("roleInst").value.trim();
+    refreshRoleBtn(roleSeat);
+  }
+  // seated: Python is the authority — only Apply (→ role_applied) changes it
+  roleSeat = null;
+  $("roleModal").classList.remove("show");
+}
+$("roleClose").onclick = closeRole;
+$("roleDone").onclick = closeRole;
+$("roleModal").onclick = e => { if (e.target === $("roleModal")) closeRole(); };
+$("roleApplyBtn").onclick = () => roleSeat && applyRole(roleSeat);
+
+function setSeated(on) {
+  seated = !!on;
+  $("roleApplyBtn").hidden = !seated;  // keep an already-open modal truthful
+  // turn order + end condition + helper budget are baked into the running
+  // conversation; continuing keeps them (the ceiling stepper stays live)
+  $("modeSel").disabled = seated;
+  $("untilDone").disabled = seated;
+  $("spawnSel").disabled = seated;
+  $("teamSel").disabled = seated;
+}
+
+async function applyRole(seat) {
+  const btn = $("roleApplyBtn");
+  const role = $("roleName").value.trim();
+  const inst = $("roleInst").value.trim();
+  btn.disabled = true;
+  try {
+    const r = await pywebview.api.apply_role(seat.id, role, inst);
+    if (r?.error) { addMsg("system", "relay", r.error, ""); return; }
+    if (r?.note) addMsg("system", "relay", r.note, "");
+  } finally { btn.disabled = false; }
+}
+
+// Python is the authority on what a seat's role actually is — including when a
+// change FAILED, so a card can never keep showing one that never landed.
+function roleApplied(p) {
+  const seat = seats.find(s => s.id === p.speaker);
+  if (!seat) return;
+  seat.role = p.role || "";
+  seat.roleInst = p.role_instructions || "";
+  refreshRoleBtn(seat);
+  if (roleSeat === seat) {           // modal open on this seat — mirror the truth
+    $("roleName").value = seat.role;
+    $("roleInst").value = seat.roleInst;
+  }
+}
+
 /* ---------- accounts ---------- */
 let authStatus = {};        // provider id -> latest status dict
 let convProviders = [];     // providers in the current/paused conversation
@@ -530,7 +902,9 @@ function closeAccounts() { $("acctModal").classList.remove("show"); }
 $("acctBtn").onclick = () => { setAcctNote(""); openAccounts(); };
 $("acctClose").onclick = closeAccounts;
 $("acctModal").onclick = e => { if (e.target === $("acctModal")) closeAccounts(); };
-document.addEventListener("keydown", e => { if (e.key === "Escape") closeAccounts(); });
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") { closeAccounts(); closeRole(); }
+});
 
 function setAcctNote(text, danger) {
   const n = $("acctNote");
@@ -562,7 +936,10 @@ function renderAccounts(payload) {
   setAcctNote("");   // status just changed — any pending arm/sign-in note is stale
   payload.providers.forEach(p => {
     authStatus[p.provider] = p;
-    document.documentElement.style.setProperty("--" + p.provider, p.color);
+    // Keep the built-in/fallback colour if an incomplete future registry row
+    // omits color; setting the literal string "undefined" makes every dot
+    // using that custom property silently transparent.
+    if (p.color) document.documentElement.style.setProperty("--" + p.provider, p.color);
     const d = document.createElement("div");
     d.className = "acct";
     d.style.setProperty("--seat", p.color);
@@ -622,7 +999,9 @@ function applyAuthToSeats() {
     const st = authStatus[s.provider];
     const bad = !!st && (st.state === "signed_out" || st.state === "not_installed");
     s.el.classList.toggle("noauth", bad);
-    if (!running) s.el.querySelector(".state").textContent = bad ? "sign-in needed" : "ready";
+    if (!running)
+      s.el.querySelector(".state").textContent =
+        bad ? "sign-in needed" : seatLabel(s.id);
   });
 }
 
@@ -650,31 +1029,101 @@ function cfgFor(seat) {
   const enabled = seat.el.querySelector(".switch").checked;
   const model = seat.el.querySelector(".model").value;
   const effort = seat.el.querySelector(".effort").value;
+  const label = seat.el.querySelector(".name").value.trim() || null;
+  const role = (seat.role || "").trim();
+  const role_instructions = (seat.roleInst || "").trim();
   if (seat.provider === "gemini") {
     // agy model ids carry the thinking level: <family>-<level>
     return { id: seat.id, provider: "gemini", enabled,
-             model: model + "-" + effort, effort: "" };
+             model: model + "-" + effort, effort: "", label,
+             role, role_instructions };
   }
-  return { id: seat.id, provider: seat.provider, enabled, model, effort };
+  return { id: seat.id, provider: seat.provider, enabled, model, effort, label,
+           role, role_instructions };
 }
 let starting = false;
 const IDLE_PH = "Type your opening message — Send starts the conversation";
 const RUN_PH  = "Interject as Josh — delivered at the next turn · /help for commands";
 const CONT_PH = "Reply to continue the conversation · /help for commands";
+// Auto-grow to fit the text, but never below sayMinH — the height Josh set by
+// dragging the box's native resize grip. A pointerup height that differs from
+// what autoGrow just wrote is the only evidence of a manual resize.
+let sayMinH = 0, sayAutoH = 0;
 function autoGrow() {
   const el = $("say");
   el.style.height = "auto";
-  el.style.height = Math.min(el.scrollHeight, Math.round(innerHeight * 0.4)) + "px";
+  const h = Math.max(Math.min(el.scrollHeight, Math.round(innerHeight * 0.4)),
+                     sayMinH);
+  el.style.height = h + "px";
+  sayAutoH = h;
 }
+$("say").addEventListener("pointerup", () => {
+  const h = $("say").offsetHeight;
+  if (Math.abs(h - sayAutoH) > 3) {
+    sayMinH = Math.min(h, Math.round(innerHeight * 0.7));
+    sayAutoH = h;
+  }
+});
 function clearSay() { $("say").value = ""; histIdx = -1; autoGrow(); }
+
+/* ---------- attachments ---------- */
+// Files ride to Python as base64 and land in <workspace>\attachments\ — the
+// one folder every seat's CLI can already read. The message text then carries
+// "[Josh attached a file: <path>]" lines so the agents know to open them.
+const pendingAtt = [];             // {name, data} — data = bare base64
+const ATT_MAX = 15 * 1024 * 1024;
+function renderAtt() {
+  const row = $("attRow");
+  row.innerHTML = "";
+  row.hidden = !pendingAtt.length;
+  pendingAtt.forEach((f, i) => {
+    const c = document.createElement("span");
+    c.className = "att-chip";
+    const x = document.createElement("button");
+    x.type = "button"; x.textContent = "✕"; x.title = "Remove";
+    x.onclick = () => { pendingAtt.splice(i, 1); renderAtt(); };
+    c.append(document.createTextNode("📎 " + f.name), x);
+    row.appendChild(c);
+  });
+}
+function addAttachment(file, fallbackName) {
+  const name = file.name || fallbackName;
+  if (file.size > ATT_MAX) {
+    addMsg("system", "relay", `"${name}" is over 15 MB — attach something smaller.`, "");
+    return;
+  }
+  const rd = new FileReader();
+  rd.onload = () => {
+    pendingAtt.push({ name, data: String(rd.result).split(",", 2)[1] || "" });
+    renderAtt();
+  };
+  rd.readAsDataURL(file);
+}
+$("attachBtn").onclick = () => $("attachInput").click();
+$("attachInput").onchange = e => {
+  [...e.target.files].forEach(f => addAttachment(f, "file"));
+  e.target.value = "";
+};
+let pasteN = 0;
+$("say").addEventListener("paste", e => {
+  const files = [...(e.clipboardData?.items || [])]
+    .filter(it => it.kind === "file").map(it => it.getAsFile()).filter(Boolean);
+  if (!files.length) return;       // plain text pastes stay plain text
+  e.preventDefault();
+  files.forEach(f => {
+    const ext = (f.type.split("/")[1] || "png").replace("jpeg", "jpg");
+    addAttachment(f, `pasted-${++pasteN}.${ext}`);
+  });
+});
 const sayHist = [];          // most-recent-first, ↑ walks back through it
 let histIdx = -1;            // -1 = live text, not browsing history
+function takeAtt() { const a = pendingAtt.splice(0); renderAtt(); return a; }
 async function sendSay() {
   const t = $("say").value.trim();
-  if (!t || starting) return;
-  if (sayHist[0] !== t) sayHist.unshift(t);
+  if ((!t && !pendingAtt.length) || starting) return;
+  if (t && sayHist[0] !== t) sayHist.unshift(t);
   sayHist.length = Math.min(sayHist.length, 50);
-  if (t.startsWith("/")) {
+  if (t.startsWith("/")) {         // commands never take attachments — chips stay
     clearSay();
     addMsg("josh", "Josh", t, "command");
     const r = await pywebview.api.command(t);
@@ -684,16 +1133,24 @@ async function sendSay() {
   }
   if (running) {
     clearSay();
-    await pywebview.api.interject(t);
-    addMsg("josh", "Josh", t, "queued for next turn");
+    const att = takeAtt();
+    const r = await pywebview.api.interject(t, att);
+    if (r?.error) {                // put the chips back — nothing was saved
+      pendingAtt.push(...att); renderAtt();
+      addMsg("system", "relay", r.error, ""); return;
+    }
+    // r.text carries the attachment lines Python appended — show what was sent
+    addMsg("josh", "Josh", r?.text || t, "queued for next turn");
     return;
   }
   if (canContinue) {
     if (authBlocked(convProviders)) return;
     starting = true;
-    const r = await pywebview.api.continue_chat({opener: t, turns: rounds});
+    const r = await pywebview.api.continue_chat(
+      {opener: t, turns: rounds, ceiling: ceiling, attachments: pendingAtt});
     starting = false;
     if (r.error) { addMsg("system", "relay", r.error, ""); return; }
+    takeAtt();
     clearSay();
     running = true;
     $("stopBtn").hidden = false;
@@ -708,16 +1165,25 @@ async function sendSay() {
   }
   if (authBlocked(enabled.map(s => s.provider))) return;
   starting = true;
+  // typing into a reopened view-only chat starts a NEW one — don't leave the
+  // rail highlighting the old row while a fresh session dir fills up
+  activeId = null; $("seatList").classList.remove("locked");
+  clearFatal(); renderChats();
   document.querySelectorAll(".msg").forEach(e => e.remove());
   $("afterRow").classList.remove("show");
   transcriptPath = null;
   const cfg = {
     opener: t, turns: rounds, yolo: $("yolo").checked, workspace: customFolder,
-    seats: seats.map(cfgFor),
+    mode: $("modeSel").value,
+    until_done: untilDoneOn(), ceiling: ceiling,
+    spawn: {tier1: true, max_helpers: parseInt($("spawnSel").value, 10) || 0,
+            max_teams: parseInt($("teamSel").value, 10) || 0},
+    seats: seats.map(cfgFor), attachments: pendingAtt,
   };
   const r = await pywebview.api.start(cfg);
   starting = false;
   if (r.error) { addMsg("system", "relay", r.error, ""); return; }
+  takeAtt();
   clearSay();
   running = true;
   $("stopBtn").hidden = false;
@@ -750,8 +1216,48 @@ $("stopBtn").onclick = async () => {
   addMsg("system", "relay", "Stopping after the current turn…", "");
 };
 
-$("rMinus").onclick = () => { rounds = Math.max(1, rounds - 1); $("rVal").textContent = rounds; };
-$("rPlus").onclick = () => { rounds = Math.min(50, rounds + 1); $("rVal").textContent = rounds; };
+/* ---------- collapsible rails ---------- */
+// localStorage may not persist for every WebView2 origin — treat it as
+// best-effort and never let a storage error break the toggle itself.
+function bindRailToggle(btnId, cls, storeKey, what) {
+  const btn = $(btnId), main = document.querySelector("main");
+  const apply = hidden => {
+    main.classList.toggle(cls, hidden);
+    btn.classList.toggle("off", hidden);
+    btn.title = (hidden ? "Show " : "Hide ") + what;
+    try { localStorage.setItem(storeKey, hidden ? "1" : "0"); } catch (e) {}
+    autoGrow();                    // the stage just changed width
+  };
+  btn.onclick = () => apply(!main.classList.contains(cls));
+  let saved = "0";
+  try { saved = localStorage.getItem(storeKey) || "0"; } catch (e) {}
+  apply(saved === "1");
+}
+bindRailToggle("tglChats", "no-chats", "hideChatRail", "chat history");
+bindRailToggle("tglSeats", "no-seats", "hideSeatRail", "seats & settings");
+
+let ceiling = 60;               // until-done safety ceiling (total turns)
+function untilDoneOn() { return $("untilDone").checked; }
+function syncRoundsCtl() {
+  if (untilDoneOn()) {
+    $("roundsLabel").textContent = "Safety ceiling — hard stop after N turns";
+    $("rVal").textContent = ceiling;
+  } else {
+    $("roundsLabel").textContent = "Rounds — each seat speaks once per round";
+    $("rVal").textContent = rounds;
+  }
+}
+$("rMinus").onclick = () => {
+  if (untilDoneOn()) ceiling = Math.max(5, ceiling - 5);
+  else rounds = Math.max(1, rounds - 1);
+  syncRoundsCtl();
+};
+$("rPlus").onclick = () => {
+  if (untilDoneOn()) ceiling = Math.min(500, ceiling + 5);
+  else rounds = Math.min(50, rounds + 1);
+  syncRoundsCtl();
+};
+$("untilDone").onchange = syncRoundsCtl;
 $("pickFolder").onclick = async () => {
   const f = await pywebview.api.pick_folder();
   if (f) { customFolder = f; $("folderPath").textContent = f; $("folderPath").style.color = "var(--text)"; }
@@ -759,15 +1265,257 @@ $("pickFolder").onclick = async () => {
 $("yolo").onchange = () => { $("yoloNote").style.display = $("yolo").checked ? "block" : "none"; };
 $("openTranscript").onclick = () => pywebview.api.open_path(transcriptPath);
 $("openWorkspace").onclick = () => pywebview.api.open_path(customFolder || workspacePath);
-$("newBtn").onclick = async () => {
-  const r = await pywebview.api.reset_conversation();
+/* ---------- chat rail (history) ---------- */
+let sessions = [], activeId = null;
+
+function relTime(iso) {
+  if (!iso) return "";
+  const t = Date.parse(iso);          // naive ISO from python = local time
+  if (isNaN(t)) return "";
+  const s = Math.max(0, (Date.now() - t) / 1000);
+  if (s < 90) return "just now";
+  if (s < 3600) return Math.round(s / 60) + "m ago";
+  if (s < 86400) return Math.round(s / 3600) + "h ago";
+  if (s < 86400 * 7) return Math.round(s / 86400) + "d ago";
+  return new Date(t).toLocaleDateString();
+}
+
+async function refreshChats() {
+  try { sessions = (await pywebview.api.list_sessions()) || []; }
+  catch (e) { sessions = []; }
+  renderChats();
+}
+
+// Collapsed project groups — remembered best-effort, like the rail toggles.
+let closedGroups = {};
+try { closedGroups = JSON.parse(localStorage.getItem("closedChatGroups") || "{}"); }
+catch (e) { closedGroups = {}; }
+
+function renderChats() {
+  const list = $("chatList");
+  list.innerHTML = "";
+  if (!sessions.length) {
+    list.innerHTML = '<div class="chat-empty">No chats yet. Whatever you start ' +
+                     'shows up here — click one to pick it back up.</div>';
+    return;
+  }
+  // Group by project (custom working folder). sessions arrive newest-first, so
+  // Map insertion order ranks groups by their most recent chat automatically.
+  const groups = new Map();
+  sessions.forEach(s => {
+    const key = s.project || "";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  });
+  groups.forEach((rows, name) => {
+    const g = document.createElement("div");
+    g.className = "chat-group" + (closedGroups[name || "*"] ? " closed" : "");
+    const h = document.createElement("button");
+    h.className = "chat-group-h";
+    h.innerHTML = `<span class="chev">▾</span><span class="gname"></span>`;
+    h.querySelector(".gname").textContent = name || "No project";
+    h.title = name ? "Working folder: " + name : "Chats with their own private folder";
+    h.onclick = () => {
+      closedGroups[name || "*"] = g.classList.toggle("closed") ? 1 : 0;
+      try { localStorage.setItem("closedChatGroups", JSON.stringify(closedGroups)); }
+      catch (e) {}
+    };
+    const body = document.createElement("div");
+    body.className = "chat-group-body";
+    rows.forEach(s => body.appendChild(chatRow(s)));
+    g.append(h, body);
+    list.appendChild(g);
+  });
+}
+
+function chatRow(s) {
+  const d = document.createElement("div");
+  d.className = "chat-row" + (s.legacy ? " legacy" : "") +
+                (s.id === activeId ? " active" : "");
+  // single-line row — time, seats and view-only status live in the tooltip
+  const who = (s.participants || []).map(p => p.name).join(" · ");
+  const spawnedBy = s.parent
+    ? `↳ spawned by ${s.parent.label || "a seat"} in '${s.parent.id}'` : "";
+  d.title = [s.title, [relTime(s.updated), who].filter(Boolean).join(" · "),
+             spawnedBy, s.can_continue_reason].filter(Boolean).join("\n");
+  const dots = (s.participants || [])
+    .map(p => `<i style="background:var(--${p.provider},#6C6677)"></i>`).join("");
+  d.innerHTML =
+    `<span class="who">${dots || '<i style="background:#6C6677"></i>'}</span>
+     <div class="t"></div>
+     <button class="x" title="Delete this chat">✕</button>`;
+  d.querySelector(".t").textContent = (s.parent ? "↳ " : "") + s.title;
+  d.onclick = e => { if (!e.target.closest(".x, input")) openChat(s.id); };
+  d.querySelector(".t").ondblclick = e => { e.stopPropagation(); startRename(d, s); };
+  d.querySelector(".x").onclick = e => { e.stopPropagation(); armDelete(e.currentTarget, s); };
+  return d;
+}
+
+function startRename(row, s) {
+  if (s.legacy) return;
+  const t = row.querySelector(".t");
+  if (!t) return;
+  const inp = document.createElement("input");
+  inp.className = "rename"; inp.value = s.title;
+  t.replaceWith(inp);
+  inp.focus(); inp.select();
+  let settled = false;
+  const commit = async save => {
+    if (settled) return;
+    settled = true;
+    const v = inp.value.trim();
+    if (save && v && v !== s.title) {
+      const r = await pywebview.api.rename_session(s.id, v);
+      if (r?.error) addMsg("system", "relay", r.error, "");
+    }
+    await refreshChats();
+  };
+  inp.onkeydown = e => {
+    if (e.key === "Enter") { e.preventDefault(); commit(true); }
+    else if (e.key === "Escape") { e.preventDefault(); commit(false); }
+  };
+  inp.onblur = () => commit(true);
+  inp.onclick = e => e.stopPropagation();
+}
+
+function armDelete(btn, s) {
+  // same two-step arm as the Accounts log-out button — deleting a chat also
+  // deletes its workspace, so one stray click must not do it
+  if (btn.dataset.arm) { delete btn.dataset.arm; deleteChat(s); return; }
+  btn.dataset.arm = "1"; btn.textContent = "Delete?";
+  setTimeout(() => {
+    if (btn.dataset.arm) { delete btn.dataset.arm; btn.textContent = "✕"; }
+  }, 5000);
+}
+
+async function deleteChat(s) {
+  const r = await pywebview.api.delete_session(s.id);
   if (r?.error) { addMsg("system", "relay", r.error, ""); return; }
+  if (s.id === activeId) { activeId = null; resetStage(); }
+  await refreshChats();
+}
+
+async function openChat(id) {
+  if (running) {
+    addMsg("system", "relay",
+           "Stop the current conversation before opening another chat.", "");
+    return;
+  }
+  if (id === activeId) return;
+  const r = await pywebview.api.open_session(id);
+  if (r?.error) { addMsg("system", "relay", r.error, ""); return; }
+  const s = r.session || {}, msgs = r.messages || [];
+  activeId = s.id;
+  canContinue = !!s.can_continue;
+  workspacePath = s.workspace || null;
+  transcriptPath = s.transcript || null;   // absent today — button hides itself
+  customFolder = null;
+  convProviders = (s.participants || []).map(p => p.provider);
+  $("modeSel").value = s.mode || "round_robin";   // truthful for old chats too
+  $("untilDone").checked = !!s.until_done;
+  const helpers = (s.spawn || {}).max_helpers || 0;
+  $("spawnSel").value = [0, 3, 10].includes(helpers) ? String(helpers) : "10";
+  const teams = (s.spawn || {}).max_teams || 0;
+  $("teamSel").value = [0, 1, 3].includes(teams) ? String(teams) : "3";
+  syncRoundsCtl();
+  clearFatal();
+  restoreSeats(s.participants || []);
+  $("feed").innerHTML = "";
+  msgs.forEach(m => addMsg(m.provider || m.speaker, m.name, m.text,
+                           m.meta || "", m.role));
+  setSeated(!!s.can_continue && (s.participants || []).length > 0);
+  addMsg("system", "relay", canContinue
+    ? "Reopened — the agents still remember this chat. Reply to pick it up."
+    : (s.can_continue_reason || "Reopened for reading."), "");
+  $("say").placeholder = canContinue ? CONT_PH : IDLE_PH;
+  $("openTranscript").style.display = transcriptPath ? "" : "none";
+  $("openWorkspace").style.display = workspacePath ? "" : "none";
+  $("afterRow").classList.toggle("show", !!(transcriptPath || workspacePath));
+  renderChats();
+  $("say").focus();
+}
+
+function restoreSeats(parts) {
+  if (!parts.length) return;            // legacy chat — leave the rail alone
+  seats.forEach(s => s.el.remove());
+  seats = [];
+  parts.forEach(p => {
+    const seat = addSeat(p.provider, p.id);
+    if (uiCfg) applySavedSeat(seat, p);
+  });
+  // saved labels win over the auto ordinals refreshSeatNames() just wrote.
+  // A name matching the auto placeholder stays auto — writing it into the
+  // box would freeze "Claude 2" as an explicit label for the NEXT chat too.
+  parts.forEach((p, i) => {
+    if (!seats[i]) return;
+    const nameBox = seats[i].el.querySelector(".name");
+    if (p.name && p.name !== nameBox.placeholder) nameBox.value = p.name;
+    // roles restore OUTSIDE applySavedSeat on purpose: that function returns
+    // early for default/unmatched models, which would silently drop them
+    seats[i].role = p.role || "";
+    seats[i].roleInst = p.role_instructions || "";
+    refreshRoleBtn(seats[i]);
+  });
+  // models/efforts are baked into the live agents; continuing ignores them
+  $("seatList").classList.add("locked");
+}
+
+function applySavedSeat(seat, p) {
+  const mSel = seat.el.querySelector(".model"), eSel = seat.el.querySelector(".effort");
+  if (!p.model || p.model === "default") return;
+  if (seat.provider === "gemini") {
+    // agy slugs carry the level: <family>-<level>
+    const fam = geminiFamilies.find(f => p.model.startsWith(f.base + "-"));
+    if (!fam) return;
+    mSel.value = fam.base;
+    fillGeminiLevels(eSel, fam.base, p.model.slice(fam.base.length + 1));
+    return;
+  }
+  // A model the picker no longer lists (retired, or the CLI cache is thin) must
+  // still SHOW as what the chat actually ran on — silently falling back to the
+  // default would caption the transcript with the wrong model.
+  if (![...mSel.options].some(o => o.value === p.model)) addOption(mSel, p.model);
+  mSel.value = p.model;
+  if (seat.provider === "gpt") fillGptLevels(eSel, mSel.value, p.effort);
+  if (p.effort) {
+    if (![...eSel.options].some(o => o.value === p.effort))
+      addOption(eSel, p.effort, "Thinking: " + p.effort);
+    eSel.value = p.effort;
+  }
+}
+
+function addOption(sel, value, label) {
+  const o = document.createElement("option");
+  o.value = value; o.textContent = label || value;
+  sel.appendChild(o);
+}
+
+function resetStage() {
   canContinue = false; transcriptPath = null; workspacePath = null;
+  convProviders = []; clearFatal();
   $("afterRow").classList.remove("show");
+  $("openTranscript").style.display = "";
+  $("openWorkspace").style.display = "";
   $("feed").innerHTML = EMPTY_HTML;
   $("say").placeholder = IDLE_PH;
+  $("seatList").classList.remove("locked");
+  setSeated(false);   // no live seats to re-role — roles are typed again
+}
+
+async function newChat() {
+  if (running) {
+    addMsg("system", "relay", "Stop the current conversation first.", "");
+    return;
+  }
+  const r = await pywebview.api.new_conversation();
+  if (r?.error) { addMsg("system", "relay", r.error, ""); return; }
+  activeId = null;
+  resetStage();
+  await refreshChats();
   $("say").focus();
-};
+}
+$("newBtn").onclick = newChat;
+$("newChatBtn").onclick = newChat;
 
 /* ---------- boot ---------- */
 function fill(sel, items, def) {
@@ -802,6 +1550,7 @@ window.addEventListener("pywebviewready", async () => {
   gptModels = uiCfg.gpt_models;
   geminiFamilies = uiCfg.gemini_families;
   seats.forEach(fillSeat);
+  await refreshChats();
   $("say").focus();
 });
 </script>

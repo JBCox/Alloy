@@ -10,18 +10,40 @@ you can jump in anytime.
 
 1. **Desktop app** — double-click **AI Chat** on the Desktop. A native window
    (`app.py`, pywebview/WebView2) with a seat card per participant: toggle who's
-   in, pick each one's model and thinking level, set rounds, choose the working
-   folder they operate in. There's no topic box — type your opening message in
-   the bottom bar and hit **Send** to start the conversation (it's delivered to
-   every seat as your kickoff); anything you type after that joins as an
-   interjection, and the header shows a **Stop** button while it runs. The
+   in, pick each one's model and thinking level, click the seat's name to give
+   it a custom one ("Optimist" instead of "Claude 2"), and the **Role** button
+   opens an editor for an optional role (a public role name plus private
+   instructions only that seat sees — with presets); set rounds and choose the
+   working folder they operate in. The **Conversation** controls below the
+   seats set how the conversation runs: **Turn order** (round-robin, speaker
+   picks next, moderator decides, parallel, free-running), **Until done** —
+   which turns the rounds stepper into a safety ceiling and lets the agents
+   decide when the task is finished — and how many **Helpers** (one-shot AIs
+   a seat can spawn) and **Teams** (whole sub-conversations that report back)
+   they're allowed. These are locked once a conversation starts and restored
+   when you reopen a chat. There's no topic box — type your opening
+   message in the bottom bar and hit **Send** to start the conversation (it's
+   delivered to every seat as your kickoff); anything you type after that joins
+   as an interjection, and the header shows a **Stop** button while it runs.
+   The message box grows as you type and can be dragged taller by its resize
+   grip; the 📎 button (or pasting a screenshot straight into the box) attaches
+   files, which are saved into the working folder and pointed out to every
+   seat. The **Chats** and **Seats** header buttons collapse either sidebar
+   for a full-width transcript. The
    **"+ Add seat"** row adds more seats of any provider (two Claudes,
    2×Claude + 2×GPT, etc. — auto-named "Claude", "Claude 2", …) and the ✕ on a
    card removes it. Live transcript with per-speaker colors; Transcript/Folder
    buttons when it ends. When the rounds run out the conversation only
    **pauses**: type another message to continue it (same participants, same
    memory, another batch of rounds), or hit **New conversation** to start
-   fresh. Slash commands work in the chat bar anytime — see below.
+   fresh. The left chat rail lists every saved conversation on a single line
+   each, grouped under collapsible project headers (chats sharing a picked
+   working folder group together; the rest sit under "No project"); click one
+   to replay it, then reply to resume the agents' saved CLI sessions even after
+   closing and reopening the app. Titles can be renamed in place (double-click)
+   and deletion uses a two-click confirmation. Older transcript-only runs
+   remain available to read but are marked **view only**. Slash commands work
+   in the chat bar anytime — see below.
    The **Accounts** section in the sidebar shows each provider's sign-in state
    (checked at launch, ↻ to re-check): **Sign in** opens a terminal running
    that CLI's own browser login (Claude → Anthropic account, GPT → ChatGPT,
@@ -51,7 +73,15 @@ Options:
 | `--turns N` | 10 | Max rounds (each round = every agent speaks once) |
 | `--agents a,b` | all three | Who's in the room. Each token is `provider[:model[:effort]][=label]` with providers `claude`, `gpt`, `gemini` — repeat a provider for duplicate seats (e.g. `claude:opus:high,claude:haiku:low`, or `"claude=Optimist,claude=Skeptic"`; auto labels: "Claude", "Claude 2") |
 | `--start X` | first listed | Who speaks first: slot number (1-based), label (`"claude 2"`), or provider |
+| `--role "SEAT=NAME"` | none | Public role name for a seat, shown to every seat in the roster line; repeatable. `SEAT` is the same label-or-provider grammar as `/clear`; a typo is a hard error, not a silent no-op |
+| `--role-instructions "SEAT=TEXT"` | none | Private role instructions only that seat sees; repeatable, same `SEAT` grammar |
 | `--yolo` | off | Full autonomy incl. shell access (use with care) |
+| `--mode M` | round-robin | Turn order: `round-robin` (fixed), `speaker` (each reply ends with `[[NEXT: seat]]` naming who goes next), `moderator` (a cheap side call picks each turn), `parallel` (everyone answers at once in simultaneous rounds), `free` (seats reply whenever messages arrive, interleaved live) |
+| `--moderator P` | claude:claude-haiku-4-5:low | Who moderates in `--mode moderator` (`provider[:model[:effort]]`); not a seat — one cheap stateless call per turn, and it can call the conversation DONE |
+| `--until-done` / `--ceiling N` | off / 60 | No round cap: run until a seat wraps (or the moderator says DONE), hard-stopped at N total turns as the spend backstop; `/ceiling N` adjusts mid-run |
+| `--spawn-helpers N` | 0 | Let seats spawn up to N one-shot helper AIs: a reply ending `[[SPAWN: provider[:model[:effort]] \| task]]` runs a helper in the shared workspace while the conversation continues; the result returns only to the requester |
+| `--spawn-teams N` | 0 | Let seats spawn up to N whole sub-conversations: `[[TEAM: seats \| rounds=N mode=m \| task]]` runs a child chat (its own transcript, reopenable from the app's rail, marked ↳) that reports its outcome back to the requester |
+| `--no-native-subagents` | on | Stop telling seats they may use their CLI's built-in subagent tools (Claude's Task tool, Codex multi-agent) |
 | `--claude-model` / `--claude-effort` | Opus 4.8 / high | `claude-fable-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5` (aliases `opus`/`sonnet`/`haiku` also work) · `low\|medium\|high` |
 | `--gpt-model` / `--gpt-effort` | gpt-5.6-sol / high (config.toml) | any Codex model · `low`…`ultra` (model-dependent; app reads the live list from `~\.codex\models_cache.json`) |
 | `--gemini-model` / `--gemini-effort` | gemini-3.7-flash-high / in slug | see `agy models` for slugs |
@@ -60,12 +90,14 @@ The startup banner shows exactly which model each participant is running.
 Example — heavyweight debate: `ai-chat "topic" --claude-effort high --gemini-model gemini-3.1-pro-high`.
 Example — cheap fast chat: `ai-chat "topic" --claude-model haiku --gpt-effort low --gemini-model gemini-3.7-flash-low`.
 Example — Claude vs Claude: `ai-chat "topic" --agents claude:claude-opus-4-8:high,claude:claude-haiku-4-5:low`.
+Example — role team: `ai-chat "build it" --agents "claude=Researcher,gpt=Coder,claude=Reviewer" --role-instructions "Researcher=Find and verify facts; cite them; don't write code" --role-instructions "Coder=Implement the agreed design in the workspace" --role-instructions "Reviewer=Review only: file, line, problem, fix"` (here the seat labels already read as roles; add `--role` as well when you want the explicit "Roles:" roster line in every preamble).
 
 ## While it's running
 
 - **Type anything + Enter** — injected into the conversation as "Josh (human)"
   at the next turn boundary; every participant sees it.
-- **`/stop`** — graceful end. **`/turns N`** — change the round cap mid-run.
+- **`/stop`** — graceful end. **`/turns N`** — change the round cap mid-run
+  (**`/ceiling N`** instead, in an until-done conversation).
 - **`/clear [seat]`** — wipe a seat's context; it rejoins fresh (re-introduced,
   no memory). **`/compact [seat]`** — the seat writes its own summary of the
   conversation, then restarts from just that summary (shrinks a long context
@@ -82,15 +114,28 @@ Each run creates `sessions\<timestamp>-<topic>\` (in the app, the folder is
 named from your opening message):
 
 - `transcript.md` — the whole conversation, appended live.
+- `messages.jsonl` — structured message/system rows used for exact UI replay.
+- `meta.json` — participant settings, pending queues, round state, and each
+  CLI's session id; this is what makes restart-safe continuation possible.
 - `workspace\` — a scratch folder all participants share; they can co-write files
   there (ask them to "write findings.md" etc.).
 
+Terminal-created chats use the same files and appear in the desktop app's chat
+rail, so a terminal conversation can be reopened there too. A conversation
+spawned by a seat (a **team**) is an ordinary session folder as well: it shows
+up in the rail marked **↳** with a "spawned by …" tooltip, and it replays like
+any other chat.
+
 ## How it ends
 
-After `--turns` rounds, or earlier if an agent includes `[[WRAP]]` in a reply
-(the others each get one closing remark), or when you `/stop`. In the app that's
-just a pause — replying continues the same conversation until you press
-**New conversation** (or close the app).
+After `--turns` rounds (in `speaker`/`moderator`/`free` modes that's a budget
+of turns × seats), or earlier if an agent ENDS a reply with `[[WRAP]]` (the
+others each get one closing remark — in parallel mode, one closing round), or
+when you `/stop`. With `--until-done` there's no round cap at all: the agents
+decide when the task is finished, bounded by the `--ceiling` turn limit. In
+the app all of these are just a pause — replying continues the same
+conversation until you press **New conversation**. Closing the app is safe:
+reopen the chat from the left rail and reply to continue it.
 
 ## Tools the agents get
 
@@ -100,6 +145,14 @@ its `workspace-write` sandbox with network on; Gemini runs agy with auto-approve
 tools inside agy's terminal sandbox. `--yolo` removes the guardrails on all of
 them — only for topics where you're happy with them running arbitrary commands.
 
+Seats are also told they may use their own CLI's built-in subagents (Claude's
+Task tool, Codex's multi-agent mode) for small side-tasks inside a turn — but
+only when their configuration actually grants it, so the relay never promises
+a capability a seat doesn't have. Turn that off with `--no-native-subagents`.
+Relay-spawned **helpers** and **teams** are separate and off unless you enable
+them (`--spawn-helpers N` / `--spawn-teams N`, or the sidebar controls), since
+each one spends real account usage.
+
 ## Notes
 
 - **Gemini** rides Google's **Antigravity CLI** (`agy`, installed at
@@ -108,6 +161,10 @@ them — only for topics where you're happy with them running arbitrary commands
   so the adapter uses `--output-format json`, which works.
 - **Usage/cost**: each round spends one invocation per participant (Claude Max,
   ChatGPT Pro, Google free tier). A 10-round chat ≈ a modest coding session on each.
+  Moderator mode adds one cheap call per turn; each spawned helper is one more
+  call, and a spawned team is a whole extra conversation — that's why helpers
+  and teams are off by default and capped, and why `--until-done` always has a
+  turn ceiling.
 - **Auth upkeep**: the app's **Accounts** panel shows each provider's sign-in
   state and has Sign in / Log out buttons (log out + sign in = switch account;
   note logout is machine-wide for that CLI). From a terminal instead:

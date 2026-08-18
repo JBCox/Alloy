@@ -5,31 +5,96 @@ Runs a native window (WebView2) hosting ui/index.html. The conversation loop
 mirrors relay.py's round-robin engine and reuses its Agent adapters verbatim.
 """
 
+import base64
 import datetime
 import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import threading
 
 import webview
 
-from relay import (AGENT_TYPES, PROVIDERS, SESSIONS_DIR,
-                   CLEAR_NOTE, preamble, wrap_called, assign_labels, match_seats,
-                   compact_agent, resolve_cmd, clean_env, logout_gemini)
-
-HELP_TEXT = ("Commands: /clear [seat] · /compact [seat] · /turns N · /stop · "
-             "/help — seat is a name ('claude 2') or a provider "
-             "(claude/gpt/gemini); no seat means every seat.")
+from relay import (AGENT_TYPES, PROVIDERS, SESSIONS_DIR, HELP_TEXT,
+                   MODES, DEFAULT_MODE, IMPLEMENTED_MODES, DEFAULT_CEILING,
+                   assign_labels, compact_agent, resolve_cmd, clean_env,
+                   logout_gemini,
+                   LoopIO, run_rounds, dispatch_command,
+                   SessionStore, make_log, read_meta, read_messages,
+                   session_summary,
+                   list_sessions as stored_sessions, session_path, rehydrate)
 
 AGENT_ORDER = ["claude", "gpt", "gemini"]
+
+
+def save_attachments(files, workspace):
+    """Decode UI attachments ([{name, data-b64}]) into <workspace>/attachments.
+
+    The workspace is the one folder every seat's CLI can already read, so a
+    saved path is all an agent needs to open the file. Returns absolute paths.
+    """
+    if not files:
+        return []
+    att_dir = os.path.join(workspace, "attachments")
+    os.makedirs(att_dir, exist_ok=True)
+    paths = []
+    for f in files:
+        name = re.sub(r"[^\w .()\-]+", "_",
+                      os.path.basename(f.get("name") or "file")) or "file"
+        dest = os.path.join(att_dir, name)
+        root, ext = os.path.splitext(dest)
+        n = 1
+        while os.path.exists(dest):
+            n += 1
+            dest = f"{root}-{n}{ext}"
+        with open(dest, "wb") as fh:
+            fh.write(base64.b64decode(f["data"]))
+        paths.append(dest)
+    return paths
+
+
+def with_attachments(text, paths):
+    """Append '[Josh attached a file: …]' lines so agents know to open them."""
+    if not paths:
+        return text
+    lines = "\n".join(f"[Josh attached a file: {p}]" for p in paths)
+    return f"{text}\n\n{lines}" if text else lines
 
 
 def agy_path():
     import shutil
     return shutil.which("agy") or os.path.join(
         os.environ.get("LOCALAPPDATA", ""), "agy", "bin", "agy.exe")
+
+
+class _AppIO(LoopIO):
+    """LoopIO for the desktop app. A module-level class on purpose: public
+    attributes on the js_api object are walked by the pywebview bridge at page
+    load (deadlock), so this wrapper lives outside Api and holds it privately.
+    """
+
+    def __init__(self, api):
+        self._api = api
+
+    def emit(self, event, payload=None):
+        self._api.emit(event, payload)
+
+    def drain_human(self):
+        out = []
+        while not self._api._human_q.empty():
+            out.append(self._api._human_q.get_nowait())
+        return out
+
+    def should_stop(self):
+        return self._api._stop_flag.is_set()
+
+    def on_turn_boundary(self, state):
+        # a staged role lands here, so the seat about to speak gets its fresh
+        # preamble with the new role rather than switching identity mid-turn
+        if self._api._staged_roles:
+            self._api._commit_roles(state)
 
 
 class Api:
@@ -45,14 +110,30 @@ class Api:
         self._auth_cache = {}          # provider id -> status dict (relay probe)
         self._auth_lock = threading.Lock()
         self._login_procs = {}         # provider id -> Popen of open login console
+        self._staged_roles = {}        # seat index -> staged role change (apply_role)
+        self._roles_lock = threading.Lock()
+        self._roles_busy = False       # an idle-path commit worker is running
+        # Serialized emitter: evaluate_js is only ever called from ONE thread
+        # (pywebview/WebView2 marshalling isn't documented thread-safe, and
+        # parallel modes emit from several seat threads). A single queue also
+        # guarantees FIFO ordering across all producers.
+        self._emit_q = queue.Queue()
+        threading.Thread(target=self._drain_emits, daemon=True).start()
 
     # ---------------------------------------------------------- to the UI --
     def emit(self, event, payload=None):
-        data = json.dumps({"event": event, "payload": payload or {}})
-        try:
-            self._window.evaluate_js(f"uiEvent({data})")
-        except Exception:
-            pass
+        # non-blocking and thread-safe: callers just enqueue
+        self._emit_q.put(json.dumps({"event": event, "payload": payload or {}}))
+
+    def _drain_emits(self):
+        while True:
+            data = self._emit_q.get()
+            try:
+                self._window.evaluate_js(f"uiEvent({data})")
+            except Exception:
+                pass
+            finally:
+                self._emit_q.task_done()   # lets tests flush with q.join()
 
     # ------------------------------------------------------- config for UI --
     def get_config(self):
@@ -81,6 +162,13 @@ class Api:
         }
 
     def precompute_config(self):
+        # warm the codex feature probe off the bridge thread, so the first
+        # preamble build never blocks on a subprocess
+        try:
+            import relay as _relay
+            _relay.codex_multi_agent_enabled()
+        except Exception:
+            pass
         gemini_models = []
         try:
             out = subprocess.run(
@@ -345,6 +433,102 @@ class Api:
                             f"the sidebar has the install command.")
         return msgs
 
+    # ------------------------------------------------------------ history --
+    # These methods are called on pywebview's bridge thread. Keep them to
+    # bounded file I/O and object construction: never probe a CLI here.
+
+    def list_sessions(self):
+        return stored_sessions()
+
+    def open_session(self, session_id):
+        if self._thread and self._thread.is_alive():
+            return {"error": "Stop the current conversation before opening "
+                             "another chat."}
+        path = session_path(session_id)
+        if not path:
+            return {"error": "That chat no longer exists."}
+
+        meta = read_meta(path)
+        summary = session_summary(path, meta)
+        messages = read_messages(path)
+        state = None
+        if summary["can_continue"]:
+            try:
+                state = rehydrate(meta)
+            except (KeyError, TypeError, ValueError) as e:
+                summary["can_continue"] = False
+                summary["can_continue_reason"] = str(e) or \
+                    "Saved chat state is incomplete — view only"
+
+        self._session_dir = path
+        while not self._human_q.empty():
+            self._human_q.get_nowait()
+
+        if state is not None:
+            store = SessionStore(path)
+            state["store"] = store
+            state["transcript"] = store.transcript
+            # same logger the live loops use — a second copy here is how a
+            # reopened chat's rows start drifting from a fresh one's
+            state["log"] = make_log(state, store)
+        self._conv = state
+        return {"ok": True, "session": summary, "messages": messages}
+
+    def rename_session(self, session_id, title):
+        path = session_path(session_id)
+        if not path:
+            return {"error": "That chat no longer exists."}
+        if (self._thread and self._thread.is_alive()
+                and os.path.abspath(path) == os.path.abspath(
+                    self._session_dir or "")):
+            return {"error": "Wait until this conversation pauses before "
+                             "renaming it."}
+        title = " ".join((title or "").split()).strip()
+        if not title:
+            return {"error": "A chat title cannot be empty."}
+        meta = read_meta(path)
+        if not meta:
+            return {"error": "Legacy chats can be viewed but not renamed."}
+        meta["title"] = title
+        target = os.path.join(path, "meta.json")
+        tmp = f"{target}.rename-{os.getpid()}-{threading.get_ident()}"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=1)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, target)
+        except OSError as e:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return {"error": f"Could not rename chat: {e}"}
+        if self._conv and os.path.abspath(path) == os.path.abspath(
+                self._session_dir or ""):
+            self._conv["title"] = title
+        return {"ok": True, "session": session_summary(path, meta)}
+
+    def delete_session(self, session_id):
+        path = session_path(session_id)
+        if not path:
+            return {"error": "That chat no longer exists."}
+        active = os.path.abspath(path) == os.path.abspath(
+            self._session_dir or "")
+        if active and self._thread and self._thread.is_alive():
+            return {"error": "Stop this conversation before deleting it."}
+        if active:
+            self._conv = None
+            self._session_dir = None
+        try:
+            shutil.rmtree(path)
+        except OSError as e:
+            return {"error": f"Could not delete chat: {e}"}
+        return {"ok": True, "id": session_id}
+
+    def new_conversation(self):
+        return self.reset_conversation()
+
     # ------------------------------------------------------- conversation --
     def start(self, cfg):
         if self._thread and self._thread.is_alive():
@@ -372,18 +556,29 @@ class Api:
             return {"error": "Stop the conversation first."}
         if self._conv:
             try:
+                # `ended` is display state only — continue_block never gates on
+                # it, so a closed chat reopens and can still take a message
+                self._conv["store"].save(self._conv, ended=True)
                 with open(self._conv["transcript"], "a", encoding="utf-8") as f:
                     f.write("\n*conversation ended*\n")
-            except OSError:
+            except (OSError, KeyError):
                 pass
         self._conv = None
         return {"ok": True}
 
-    def interject(self, text):
+    def interject(self, text, files=None):
         text = (text or "").strip()
+        if files:
+            ws = (self._conv or {}).get("workspace")
+            if not ws:
+                return {"error": "No conversation workspace to attach files to."}
+            try:  # plain file IO — safe on the bridge thread (no subprocess)
+                text = with_attachments(text, save_attachments(files, ws))
+            except (OSError, ValueError) as e:
+                return {"error": f"Could not save attachment: {e}"}
         if text:
             self._human_q.put(text)
-        return {"ok": True}
+        return {"ok": True, "text": text}
 
     def command(self, text):
         text = (text or "").strip()
@@ -403,6 +598,141 @@ class Api:
         threading.Thread(target=self._do_command, args=(self._conv, text),
                          daemon=True).start()
         return {"ok": True}
+
+    def apply_role(self, seat_id, role, instructions):
+        """Stage one seat's role change; it lands at the next turn boundary.
+
+        Deliberately NOT an autosaving field. Applying costs that seat a full
+        CLI turn (it compacts, so the new role arrives with the seat's memory
+        intact instead of amnesia) and queues a roster note to every other
+        seat, so each apply has to be an explicit act — an autosaving textbox
+        would spend a turn and broadcast a notice per keystroke pause.
+
+        Bridge-thread safe: this only stages and returns. The work happens on
+        the loop thread (running) or on a spawned worker (idle) — never here,
+        where a subprocess would deadlock pywebview.
+        """
+        state = self._conv
+        if not state:
+            return {"error": "No conversation yet — set roles on the seat "
+                             "cards, then send your opening message."}
+        try:
+            idx = list(state["slot_ids"]).index(seat_id)
+        except ValueError:
+            return {"error": "That seat isn't part of this conversation."}
+        role = " ".join((role or "").split())
+        instructions = (instructions or "").strip()
+        agent = state["agents"][idx]
+        if (role == (agent.role or "")
+                and instructions == (agent.role_instructions or "")):
+            return {"error": f"That's already {agent.name}'s role."}
+        with self._roles_lock:
+            self._staged_roles[idx] = (role or None, instructions or None)
+            running = bool(self._thread and self._thread.is_alive())
+            spawn = not running and not self._roles_busy
+            if spawn:
+                self._roles_busy = True
+        if spawn:
+            threading.Thread(target=self._commit_roles_idle, args=(state,),
+                             daemon=True).start()
+        return {"ok": True,
+                "note": (f"Queued — {agent.name} switches at the next turn "
+                         f"boundary." if running
+                         else f"Applying {agent.name}'s new role…")}
+
+    def _commit_roles_idle(self, state):
+        try:
+            # A bridge call can stage another edit after _commit_roles sees an
+            # empty dict but before this worker clears _roles_busy: the stager
+            # reads busy=True, doesn't spawn, and the edit would sit unapplied
+            # while the UI says "Applying…". Recheck under the same lock the
+            # stager uses so that edit either spawns its own worker (it saw
+            # busy=False) or is drained by this loop — never stranded.
+            while True:
+                self._commit_roles(state)
+                with self._roles_lock:
+                    if not self._staged_roles:
+                        self._roles_busy = False
+                        return
+        except Exception as e:                       # never strand the flag
+            self.emit("status", {"text": f"Role change failed: {str(e)[:200]}"})
+            with self._roles_lock:
+                self._roles_busy = False
+
+    def _commit_roles(self, state):
+        """Apply staged role changes by riding the /compact path.
+
+        The seat summarizes itself, its session resets, `introduced` flips
+        False — so its next turn opens with a fresh preamble carrying the NEW
+        role plus its own summary. Role change without amnesia.
+
+        The new role is committed ONLY after compaction succeeds: a half-
+        applied change would leave the seat card claiming one role while the
+        live model still believes another.
+        """
+        while True:
+            with self._roles_lock:
+                if not self._staged_roles:
+                    return
+                i = sorted(self._staged_roles)[0]
+                role, instructions = self._staged_roles.pop(i)
+            agent = state["agents"][i]
+            key = state["slot_ids"][i]
+            old, new = agent.role or "no role", role or "no role"
+            # An instructions-only edit keeps the public name: the seat itself
+            # must know, but broadcasting "X is now <same role>" to the others
+            # would be noise AND a tell that private instructions changed.
+            public_changed = (agent.role or "") != (role or "")
+            note = f"Applying {agent.name}'s role change ({old} → {new})…"
+            self.emit("status", {"text": note})
+            state["store"].system(note, round=state["rnd"])
+            try:
+                summary = compact_agent(agent)
+            except Exception as e:
+                note = (f"{agent.name}'s role change failed "
+                        f"({str(e)[:160]}) — it stays {old}.")
+                self.emit("status", {"text": note})
+                state["store"].system(note, round=state["rnd"])
+                self._emit_role(key, agent, ok=False)
+                continue
+            # log BEFORE committing: the summary was written in the old role,
+            # and make_log stamps rows with the role the seat had when it spoke
+            state["log"](agent.name, summary,
+                         meta=f"role change: {old} → {new} — self-summary")
+            agent.role, agent.role_instructions = role, instructions
+            state["introduced"][i] = False
+            change_note = (
+                f"Josh changed your role from {old} to {new}"
+                if public_changed else
+                f"Josh updated the private instructions for your {new} role")
+            state["pending"][i].insert(
+                0, f"({change_note}. Your summary of the conversation so far, "
+                   f"written before that change:)\n\n{summary}")
+            # Every other seat still holds the roster from its own preamble, so
+            # it would keep addressing this seat by the old role. Telling them
+            # goes through pending on purpose, and that's safe: it is only the
+            # immediate courtesy. Config stays authoritative and any later
+            # preamble rebuilds the roster from it (ROLES_DESIGN.md).
+            if public_changed:
+                for j in range(len(state["agents"])):
+                    if j != i:
+                        state["pending"][j].append(
+                            f"(Roster update from Josh: {agent.name} is now "
+                            f"{new}.)")
+            note = (f"{agent.name} is now {new}." if public_changed else
+                    f"{agent.name}'s {new} instructions were updated.")
+            self.emit("status", {"text": note})
+            state["store"].system(note, round=state["rnd"])
+            self._emit_role(key, agent, ok=True)
+            state["store"].save(state)
+
+    def _emit_role(self, key, agent, ok):
+        """Tell the UI what the seat's role ACTUALLY is now — on failure too,
+        so a card can never keep showing a change that didn't land."""
+        self.emit("role_applied", {
+            "speaker": key, "ok": bool(ok), "name": agent.name,
+            "role": agent.role or "",
+            "role_instructions": agent.role_instructions or ""})
 
     def stop(self):
         self._stop_flag.set()
@@ -429,6 +759,28 @@ class Api:
         opener = (cfg.get("opener") or "").strip()
         turns = max(1, int(cfg.get("turns", 10)))
         yolo = bool(cfg.get("yolo"))
+        mode = (cfg.get("mode") or DEFAULT_MODE).replace("-", "_")
+        if mode not in MODES:
+            self.emit("error", {"message": f"Unknown mode {mode!r}."})
+            self.emit("done", {"transcript": None})
+            return
+        if mode not in IMPLEMENTED_MODES:
+            self.emit("error", {"message": f"Mode '{mode}' isn't available "
+                                           f"yet."})
+            self.emit("done", {"transcript": None})
+            return
+        moderator_spec = None
+        if mode == "moderator":
+            m = cfg.get("moderator") or {}
+            provider = (m.get("provider") or "claude").lower()
+            if provider not in AGENT_TYPES:
+                self.emit("error", {"message": f"Unknown moderator provider "
+                                               f"{provider!r}."})
+                self.emit("done", {"transcript": None})
+                return
+            moderator_spec = {"provider": provider,
+                              "model": m.get("model") or None,
+                              "effort": m.get("effort") or None}
         seats_cfg = cfg.get("seats")
         if seats_cfg is None:  # legacy shape: {"agents": {provider: {...}}}
             seats_cfg = [dict(id=i, provider=k, **cfg["agents"][k])
@@ -455,12 +807,17 @@ class Api:
             return
 
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        title_src = topic or opener
+        attachments = cfg.get("attachments") or []
+        title_src = topic or opener or \
+            (attachments[0].get("name", "") if attachments else "")
         slug = re.sub(r"[^a-z0-9]+", "-", title_src.lower())[:40].strip("-") or "chat"
         self._session_dir = os.path.join(SESSIONS_DIR, f"{stamp}-{slug}")
         workspace = cfg.get("workspace") or os.path.join(self._session_dir, "workspace")
         os.makedirs(self._session_dir, exist_ok=True)
         os.makedirs(workspace, exist_ok=True)
+        # attachment lines join the opener AFTER the title is set — the rail
+        # title should stay the words Josh typed, not a wall of file paths
+        opener = with_attachments(opener, save_attachments(attachments, workspace))
         transcript = os.path.join(self._session_dir, "transcript.md")
 
         agents = []
@@ -468,41 +825,59 @@ class Api:
             agents.append(AGENT_TYPES[s["provider"]](
                 workspace, yolo=yolo,
                 model=s.get("model") or None, effort=s.get("effort") or None,
-                name=label))
+                name=label,
+                role=s.get("role") or None,
+                role_instructions=s.get("role_instructions") or None))
         slot_ids = [s.get("id", i) for i, s in enumerate(picked)]
         providers = [s["provider"] for s in picked]
 
-        title = title_src if len(title_src) <= 80 else title_src[:77] + "…"
-        with open(transcript, "w", encoding="utf-8") as f:
-            f.write(f"# AI Chat — {title}\n\n"
-                    f"*{datetime.datetime.now():%Y-%m-%d %H:%M} · "
-                    f"{' ↔ '.join(a.name for a in agents)} · "
-                    f"max {turns} rounds*\n")
+        # Full opener text is the title — the rail ellipsizes in CSS and uses
+        # the rest as a tooltip, so truncating here would throw it away.
+        store = SessionStore(self._session_dir)
+        store.open_transcript(title_src, agents, turns)
 
-        def log(speaker, text, meta=""):
-            with open(transcript, "a", encoding="utf-8") as f:
-                f.write(f"\n## {speaker}{f'  · {meta}' if meta else ''}\n\n{text}\n")
+        state = {
+            "agents": agents, "slot_ids": slot_ids, "providers": providers,
+            "transcript": store.transcript, "workspace": workspace,
+            "topic": topic, "title": title_src, "created": store.created,
+            "yolo": yolo, "turns": turns, "store": store, "ended": False,
+            "pending": {i: [] for i in range(len(agents))},
+            "introduced": [False] * len(agents),
+            "rnd": 0, "max": turns, "mode": mode,
+            "moderator": moderator_spec,
+            "until_done": bool(cfg.get("until_done")),
+            "turn_ceiling": (max(1, int(cfg.get("ceiling")
+                                        or DEFAULT_CEILING))
+                             if cfg.get("until_done") else None),
+            "spawn": {"tier1": bool((cfg.get("spawn") or {})
+                                    .get("tier1", True)),
+                      "max_helpers": max(0, int((cfg.get("spawn") or {})
+                                                .get("max_helpers") or 0)),
+                      "helpers_used": 0,
+                      "max_teams": max(0, int((cfg.get("spawn") or {})
+                                              .get("max_teams") or 0)),
+                      "teams_used": 0},
+        }
+        state["log"] = log = make_log(state, store)
+        self._conv = state
+        # Persist before the first turn: if the app dies here, Josh's opener is
+        # the only content that exists and it must still be resumable.
+        store.save(state)
 
         self.emit("started", {
             "session_dir": self._session_dir, "workspace": workspace,
-            "transcript": transcript,
+            "transcript": store.transcript, "mode": mode,
+            "session": session_summary(self._session_dir),
             "participants": [
                 {"id": slot_ids[i], "provider": providers[i],
                  "name": agents[i].name,
                  "model": picked[i].get("model") or "default",
-                 "effort": picked[i].get("effort") or ""}
+                 "effort": picked[i].get("effort") or "",
+                 "role": agents[i].role or "",
+                 "role_instructions": agents[i].role_instructions or ""}
                 for i in range(len(picked))],
         })
 
-        state = {
-            "agents": agents, "slot_ids": slot_ids, "providers": providers,
-            "transcript": transcript, "workspace": workspace, "topic": topic,
-            "turns": turns, "log": log,
-            "pending": {i: [] for i in range(len(agents))},
-            "introduced": [False] * len(agents),
-            "rnd": 0, "max": turns,
-        }
-        self._conv = state
         if opener:
             log("Josh (human)", opener)
             self.emit("message", {"speaker": "josh", "name": "Josh",
@@ -510,6 +885,7 @@ class Api:
             for j in state["pending"]:
                 state["pending"][j].append(
                     f"Josh (human) opens the conversation: {opener}")
+            store.save(state)
         self._rounds(state)
 
     def _continue(self, cfg):
@@ -522,170 +898,53 @@ class Api:
                                "can_continue": True})
             return
         opener = (cfg.get("opener") or "").strip()
+        opener = with_attachments(
+            opener, save_attachments(cfg.get("attachments"), state["workspace"]))
         turns = max(1, int(cfg.get("turns", state["turns"])))
-        state["max"] = state["rnd"] + turns
+        if state.get("until_done"):
+            # extend the safety ceiling instead of the round cap
+            extra = max(1, int(cfg.get("ceiling") or DEFAULT_CEILING))
+            state["turn_ceiling"] = state.get("turn", 0) + extra
+        else:
+            state["max"] = state["rnd"] + turns
+        # Josh's fresh message revives the chat: a wrap-in-progress or a stale
+        # [[NEXT:]] pick from the previous run is off. (Matches the old loop-
+        # local closing_left, which never survived a process anyway.)
+        state["closing"] = None
+        state["next_speaker"] = None
         if opener:
             state["log"]("Josh (human)", opener)
             self.emit("message", {"speaker": "josh", "name": "Josh",
                                   "text": opener, "round": state["rnd"]})
             for j in state["pending"]:
                 state["pending"][j].append(f"Josh (human) says: {opener}")
+            state["store"].save(state)
         self._rounds(state)
 
     def _rounds(self, state):
-        """Run rounds until state['max'], a wrap, or a stop. Leaves state
-        intact so the conversation can be continued later."""
-        agents, log = state["agents"], state["log"]
-        slot_ids, providers = state["slot_ids"], state["providers"]
-        pending, introduced = state["pending"], state["introduced"]
-        closing_left = None
-        stopping = False
-        while (state["rnd"] < state["max"] and not stopping
-               and not self._stop_flag.is_set()):
-            state["rnd"] += 1
-            rnd = state["rnd"]
-            for i, agent in enumerate(agents):
-                if self._stop_flag.is_set():
-                    stopping = True
-                    break
-                while not self._human_q.empty():
-                    h = self._human_q.get_nowait()
-                    if h.startswith("/"):
-                        if self._do_command(state, h):
-                            stopping = True
-                        continue
-                    log("Josh (human)", h)
-                    self.emit("message", {"speaker": "josh", "name": "Josh",
-                                          "text": h, "round": rnd})
-                    for j in range(len(agents)):
-                        pending[j].append(f"Josh (human) interjects: {h}")
-                if stopping:
-                    break
+        """Run the shared loop, then the app's epilogue: paused footer + done.
 
-                parts = []
-                first_turn = not introduced[i]
-                if first_turn:
-                    parts.append(preamble(agent,
-                                          [a for a in agents if a is not agent],
-                                          state["topic"], state["turns"],
-                                          state["workspace"]))
-                    if i == 0 and rnd == 1 and not pending[i]:
-                        parts.append("You open the conversation. Go.")
-                queued = pending[i]
-                pending[i] = []
-                if queued:
-                    parts.append("\n\n".join(queued))
-                message = "\n\n".join(parts)
-
-                key = slot_ids[i]
-                self.emit("thinking", {"speaker": key, "provider": providers[i],
-                                       "name": agent.name, "round": rnd,
-                                       "turns": state["max"]})
-                try:
-                    reply = agent.turn(message)
-                except Exception:
-                    try:
-                        reply = agent.turn(message)
-                    except Exception as e2:
-                        self.emit("agent_error", {
-                            "speaker": key, "provider": providers[i],
-                            "message": f"{agent.name} failed twice; skipping "
-                                       f"this round. ({str(e2)[:200]})"})
-                        # Restore only consumed queue entries. The preamble and
-                        # opener are generated prompt scaffolding, not messages.
-                        pending[i] = queued + pending[i]
-                        continue
-                finally:
-                    self.emit("thinking_done", {"speaker": key})
-
-                # Never forge a turn — see the matching backstop in relay._rounds.
-                if not (reply or "").strip():
-                    self.emit("agent_error", {
-                        "speaker": key, "provider": providers[i],
-                        "message": f"{agent.name} returned an empty reply; "
-                                   f"skipping this round (nothing sent to the "
-                                   f"others)."})
-                    pending[i] = queued + pending[i]
-                    continue
-
-                if first_turn:
-                    introduced[i] = True
-                log(agent.name, reply, meta=f"round {rnd}")
-                self.emit("message", {"speaker": key, "provider": providers[i],
-                                      "name": agent.name,
-                                      "text": reply, "round": rnd})
-                for j, other in enumerate(agents):
-                    if other is not agent:
-                        pending[j].append(f"{agent.name} said:\n{reply}")
-
-                if closing_left is None and wrap_called(reply):
-                    closing_left = len(agents) - 1
-                    self.emit("status", {"text": f"{agent.name} called it — "
-                                                 f"closing remarks…"})
-                elif closing_left is not None:
-                    closing_left -= 1
-                    if closing_left <= 0:
-                        stopping = True
-                        break
-
+        The loop itself lives in relay.run_rounds — anything loop-shaped goes
+        there, once, for both front ends."""
+        run_rounds(state, _AppIO(self))
+        store = state["store"]
+        store.save(state)
         with open(state["transcript"], "a", encoding="utf-8") as f:
             f.write("\n---\n*paused — reply in the app to continue*\n")
+        summary = session_summary(self._session_dir)
         self.emit("done", {"transcript": state["transcript"],
                            "session_dir": self._session_dir,
-                           "can_continue": True})
+                           "session": summary,
+                           # read back from what was actually persisted rather
+                           # than asserted — if a seat's id didn't save, the
+                           # composer must say so instead of promising a resume
+                           "can_continue": summary["can_continue"],
+                           "can_continue_reason": summary["can_continue_reason"]})
 
     # --------------------------------------------------- slash commands --
     def _do_command(self, state, text):
-        """Handle a /command. Returns True if the conversation should stop."""
-        cmd, _, arg = text.partition(" ")
-        cmd, arg = cmd.lower().lstrip("/"), arg.strip()
-        if cmd == "stop":
-            return True
-        if cmd == "turns":
-            if arg.isdigit():
-                state["max"] = max(state["rnd"], int(arg))
-                self.emit("status", {"text": f"Round cap is now {state['max']}."})
-            else:
-                self.emit("status", {"text": "Usage: /turns N"})
-        elif cmd in ("clear", "compact"):
-            self._seat_command(state, cmd, arg)
-        elif cmd == "help":
-            self.emit("status", {"text": HELP_TEXT})
-        else:
-            self.emit("status", {"text": f"Unknown command /{cmd}. {HELP_TEXT}"})
-        return False
-
-    def _seat_command(self, state, cmd, arg):
-        idxs = match_seats(state["agents"], arg)
-        if not idxs:
-            self.emit("status", {"text": f"No seat matches '{arg}'. {HELP_TEXT}"})
-            return
-        for i in idxs:
-            agent = state["agents"][i]
-            if cmd == "compact":
-                self.emit("status", {"text": f"Compacting {agent.name}'s "
-                                             f"context…"})
-                try:
-                    summary = compact_agent(agent)
-                except Exception as e:
-                    self.emit("status", {"text": f"{agent.name} compact failed: "
-                                                 f"{str(e)[:200]}"})
-                    continue
-                state["introduced"][i] = False
-                state["pending"][i].insert(0, "(Josh compacted your context. "
-                                              "Your own summary of the "
-                                              "conversation so far:)\n\n"
-                                              + summary)
-                state["log"](agent.name, summary,
-                             meta="context compacted — self-summary")
-                self.emit("status", {"text": f"{agent.name}'s context "
-                                             f"compacted."})
-            else:
-                agent.session_id = None
-                state["introduced"][i] = False
-                state["pending"][i].insert(0, CLEAR_NOTE)
-                self.emit("status", {"text": f"{agent.name}'s context "
-                                             f"cleared."})
+        """Idle-path shim: the shared dispatcher does the work (relay.py)."""
+        return dispatch_command(state, text, _AppIO(self))
 
 
 def main():
