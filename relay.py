@@ -568,11 +568,11 @@ def wrap_called(reply):
 
     This used to be a bare `WRAP_TOKEN in reply`, which meant a seat that merely
     *mentioned* the token -- e.g. while discussing how wrapping works -- ended the
-    conversation by accident. Requiring it in the last non-empty line keeps the
-    natural usage (sign off with the token) and ignores the discussion of it.
+    conversation by accident. Requiring it to be the entire last non-empty line
+    keeps the natural usage and makes quoted discussion safe everywhere.
     """
     lines = [l.strip() for l in (reply or "").strip().splitlines() if l.strip()]
-    return bool(lines) and WRAP_TOKEN in lines[-1]
+    return bool(lines) and lines[-1] == WRAP_TOKEN
 
 
 def preamble(agent, others, topic, turns, workspace):
@@ -600,9 +600,8 @@ def preamble(agent, others, topic, turns, workspace):
         f"participant(s) -- you may read/write files there if useful, e.g. to "
         f"co-write a document.\n"
         f"- The conversation runs at most {turns} rounds. If the topic feels "
-        f"genuinely exhausted, END a reply with the token {WRAP_TOKEN} on its "
-        f"last line to wind down. Only the last line counts, so you can discuss "
-        f"the token mid-reply without triggering it.\n"
+        f"genuinely exhausted, put the token {WRAP_TOKEN} by itself on the last "
+        f"line of a reply to wind down. A quoted mention does not trigger it.\n"
         f"- Be yourself; disagree freely; build on each other's points.\n"
     )
 
