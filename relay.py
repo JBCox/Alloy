@@ -37,8 +37,8 @@ TURN_TIMEOUT = 300  # seconds per agent turn (base; scaled by effort below)
 # Where agy parks everything a conversation produces, including generated
 # images (one folder per conversation id). It writes here regardless of the
 # process cwd — see GeminiAgent.harvest_images.
-GEMINI_BRAIN = os.path.join(os.path.expanduser("~"), ".gemini",
-                            "antigravity-cli", "brain")
+HOME = os.path.expanduser("~")
+GEMINI_BRAIN = os.path.join(HOME, ".gemini", "antigravity-cli", "brain")
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 # High reasoning efforts do real multi-minute work on real repos; give them
 # room instead of killing legitimate turns at the base window.
@@ -1064,18 +1064,32 @@ PROVIDERS = {
                    login_argv=["claude", "auth", "login"],
                    logout_argv=["claude", "auth", "logout"],
                    login_strip_env=True,
+                   skills_dir=os.path.join(HOME, ".claude", "skills"),
+                   # `claude mcp list` prints "<name>: <target> - <status>"
+                   mcp=dict(kind="cli", argv=["claude", "mcp"], fmt="lines"),
                    install_hint="npm install -g @anthropic-ai/claude-code"),
     "gpt": dict(label="GPT", cli="codex", agent=CodexAgent,
                 color="#2EAE8B", probe=probe_codex,
                 login_argv=["codex", "login"],
                 logout_argv=["codex", "logout"],
                 login_strip_env=False,
+                skills_dir=os.path.join(HOME, ".codex", "skills"),
+                # codex prints a COLUMN TABLE; --json is exact (a naive
+                # split on ":" ate the C:\ drive letter of the command)
+                mcp=dict(kind="cli", argv=["codex", "mcp"], fmt="json"),
                 install_hint="npm install -g @openai/codex"),
     "gemini": dict(label="Gemini", cli="agy", agent=GeminiAgent,
                    color="#5B7FE8", probe=probe_gemini,
                    login_argv=["agy"],  # interactive first run triggers OAuth
                    logout_argv=None,    # file-move: logout_gemini()
                    login_strip_env=False,
+                   # agy's machine-local customization root. Verified live
+                   # 2026-08-17: a skill written here was resolved by agy.
+                   skills_dir=os.path.join(HOME, ".gemini", "config", "skills"),
+                   # agy has no mcp subcommand — servers live in a JSON file
+                   mcp=dict(kind="file",
+                            path=os.path.join(HOME, ".gemini", "config",
+                                              "mcp_config.json")),
                    install_hint="Antigravity CLI installer "
                                 "(installs to %LOCALAPPDATA%\\agy)"),
     "grok": dict(label="Grok", cli="grok", agent=None,  # adapter not built yet
@@ -1083,14 +1097,485 @@ PROVIDERS = {
                  login_argv=["grok", "login"],
                  logout_argv=None,  # hidden until the adapter task verifies it
                  login_strip_env=False,
+                 skills_dir=None,   # no CLI installed: nothing to manage
+                 mcp=None,
                  install_hint="irm https://x.ai/cli/install.ps1 | iex"),
 }
+
+# Providers whose skills/MCP the app can manage: those with a real CLI on disk.
+def manageable_providers():
+    return [p for p, m in PROVIDERS.items() if m.get("skills_dir")]
 
 AGENT_TYPES = {k: v["agent"] for k, v in PROVIDERS.items() if v["agent"]}
 
 
 def probe_all(home=None):
     return {pid: meta["probe"](home=home) for pid, meta in PROVIDERS.items()}
+
+
+# ------------------------------------------------------------- skills ----
+# A skill is a folder holding SKILL.md: YAML frontmatter (name, description)
+# then a markdown body. The format is IDENTICAL across claude, codex and agy
+# (verified 2026-08-17 by reading the shipped ai-chat skill in two of them and
+# resolving a probe skill in the third), which is the whole reason this
+# feature is small: ONE file installs verbatim everywhere. Neither claude nor
+# codex has a skills subcommand — files are the only mechanism.
+
+SKILL_FILE = "SKILL.md"
+SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+SKILL_MAX_BYTES = 256 * 1024
+# A skill is a FOLDER, not a file: 5 of 6 real skills on this machine carry
+# scripts/, references/ or assets/ next to the markdown, and the markdown
+# links to them. Copying SKILL.md alone installs a skill whose every
+# reference dangles — broken in a way that only shows up when it runs.
+SKILL_TREE_MAX_FILES = 200
+SKILL_TREE_MAX_BYTES = 5 * 1024 * 1024
+
+
+def skill_file_in(folder):
+    """The skill markdown inside `folder`, whatever its case (5 of 6 use
+    lowercase `skill.md`; only one uses `SKILL.md`), else None."""
+    try:
+        for n in os.listdir(folder):
+            if n.lower() == "skill.md" and os.path.isfile(
+                    os.path.join(folder, n)):
+                return os.path.join(folder, n)
+    except OSError:
+        pass
+    return None
+
+
+def valid_skill_name(name):
+    """Skill names come from the UI and become DIRECTORY names. Reject rather
+    than sanitize — the posture session_path() already uses for untrusted ids,
+    because a silently-rewritten name writes a skill nobody can find again
+    (and a quietly-normalized '../x' is how a path escape ships)."""
+    return bool(isinstance(name, str) and len(name) <= 64
+                and SKILL_NAME_RE.match(name))
+
+
+def skill_path(provider, name):
+    meta = PROVIDERS.get(provider) or {}
+    root = meta.get("skills_dir")
+    if not root or not valid_skill_name(name):
+        return None
+    return os.path.join(root, name, SKILL_FILE)
+
+
+def parse_skill(text):
+    """(description, body) from SKILL.md. Tolerant: a file without usable
+    frontmatter still yields a body, so a hand-written skill is never lost."""
+    desc, body = "", text
+    text = text.lstrip("﻿")        # a BOM makes the '---' test fail, and
+    body = text                         # the description reads back as '---'
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            front, body = text[3:end], text[end + 4:].lstrip("\n")
+            m = re.search(r"^description:\s*(.+?)\s*$", front,
+                          re.M | re.S)
+            if m:
+                desc = m.group(1).strip()
+                # YAML block scalars ('>-' / '|') put the text on the
+                # following indented lines
+                if desc in (">-", ">", "|", "|-"):
+                    lines = []
+                    for ln in front[m.end():].splitlines():
+                        if ln.strip() and not ln.startswith((" ", "\t")):
+                            break
+                        if ln.strip():
+                            lines.append(ln.strip())
+                    desc = " ".join(lines)
+                desc = desc.strip().strip('"').strip("'")
+    return desc, body
+
+
+def render_skill(name, description, body):
+    """The canonical SKILL.md text. Description is folded onto one line: a raw
+    newline there would break the frontmatter for every CLI that reads it."""
+    desc = " ".join((description or "").split())
+    body = (body or "").strip("\n")
+    return (f"---\nname: {name}\ndescription: {desc}\n---\n\n{body}\n")
+
+
+def list_skills():
+    """{provider: [{name, description, sha, error}]} for every manageable
+    provider. A broken SKILL.md is REPORTED, never raised — same posture as
+    read_messages: one bad file must not hide every other skill."""
+    out = {}
+    for pid in manageable_providers():
+        root = PROVIDERS[pid]["skills_dir"]
+        rows = []
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            names = []                      # not created yet — not an error
+        for n in names:
+            if n.startswith("."):           # codex keeps .system in here
+                continue
+            folder = os.path.join(root, n)
+            path = skill_file_in(folder)
+            if not path:
+                continue                # a folder with no SKILL.md isn't one
+            row = {"name": n, "description": "", "sha": "", "error": None,
+                   "extras": 0}
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    text = f.read(SKILL_MAX_BYTES)
+                row["description"], _body = parse_skill(text)
+                # hash the NORMALIZED text: CRLF-vs-LF and a BOM are not a
+                # content difference, and treating them as one would report
+                # a permanent phantom conflict between two identical copies
+                norm = text.lstrip("﻿").replace("\r\n", "\n").rstrip()
+                row["sha"] = hashlib.sha256(
+                    norm.encode("utf-8")).hexdigest()[:16]
+                row["extras"] = max(0, _tree_stats(folder)[0] - 1)
+            except OSError as e:
+                row["error"] = str(e)
+            rows.append(row)
+        out[pid] = rows
+    return out
+
+
+def read_skill(provider, name):
+    """(description, body) of one installed skill, or None."""
+    path = skill_path(provider, name)
+    path = skill_file_in(os.path.dirname(path)) if path else None
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return parse_skill(f.read(SKILL_MAX_BYTES))
+    except OSError:
+        return None
+
+
+def _tree_stats(folder):
+    """(files, bytes, has_link) for a skill folder. Symlinks/junctions are
+    flagged, never followed: copying through one lies about what landed on
+    the other side (the realpath lesson confine_to_workspace already encodes)."""
+    files = total = 0
+    has_link = False
+    for root, dirs, names in os.walk(folder):
+        for d in list(dirs):
+            if os.path.islink(os.path.join(root, d)):
+                has_link = True
+                dirs.remove(d)
+        for n in names:
+            p = os.path.join(root, n)
+            if os.path.islink(p):
+                has_link = True
+                continue
+            files += 1
+            try:
+                total += os.path.getsize(p)
+            except OSError:
+                pass
+    return files, total, has_link
+
+
+def write_skill(name, description, body, providers, source=None):
+    """Install a skill into each provider's skills dir.
+
+    `source` is a provider that already has it; when given, that provider's
+    WHOLE FOLDER is copied (scripts/, references/, assets/) and only then is
+    SKILL.md overwritten with the edited text. Without this a synced skill
+    arrives with every link in its markdown dangling.
+
+    Returns {provider: None | "error text"} — partial success is real and is
+    reported per provider rather than collapsed into one boolean."""
+    if not valid_skill_name(name):
+        raise ValueError("Skill names must be lowercase letters, numbers and "
+                         "hyphens (e.g. release-checklist).")
+    text = render_skill(name, description, body)
+    src_dir = None
+    if source:
+        cand = skill_path(source, name)
+        cand = os.path.dirname(cand) if cand else None
+        if cand and os.path.isdir(cand):
+            files, total, has_link = _tree_stats(cand)
+            if has_link:
+                return {p: "the source skill contains a symlink — copy it by "
+                            "hand" for p in providers}
+            if files > SKILL_TREE_MAX_FILES or total > SKILL_TREE_MAX_BYTES:
+                return {p: f"skill folder is too large to copy "
+                            f"({files} files, {total // 1024} KB)"
+                        for p in providers}
+            src_dir = cand
+    results = {}
+    for pid in providers:
+        path = skill_path(pid, name)
+        if not path:
+            results[pid] = "unknown provider"
+            continue
+        dest = os.path.dirname(path)
+        if src_dir and os.path.normcase(src_dir) == os.path.normcase(dest):
+            src_dir_here = None          # don't copy a folder onto itself
+        else:
+            src_dir_here = src_dir
+        tmp = dest + f".alloy-tmp{os.getpid()}"
+        old = dest + f".alloy-old{os.getpid()}"
+        try:
+            shutil.rmtree(tmp, ignore_errors=True)
+            if src_dir_here:
+                # build the new folder COMPLETE, then swap it in: a partially
+                # copied skill must never be visible to a CLI
+                shutil.copytree(src_dir_here, tmp, symlinks=False)
+                stale = skill_file_in(tmp)
+                if stale:
+                    os.remove(stale)     # rewrite under the canonical name
+            else:
+                os.makedirs(tmp, exist_ok=True)
+                existing = skill_file_in(dest) if os.path.isdir(dest) else None
+                if existing:             # keep this provider's sidecars
+                    for n in os.listdir(dest):
+                        s = os.path.join(dest, n)
+                        if os.path.normcase(s) == os.path.normcase(existing):
+                            continue
+                        (shutil.copytree if os.path.isdir(s) else shutil.copy2)(
+                            s, os.path.join(tmp, n))
+            _atomic_write(os.path.join(tmp, SKILL_FILE), text)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            if os.path.isdir(dest):
+                os.replace(dest, old)
+            os.replace(tmp, dest)
+            shutil.rmtree(old, ignore_errors=True)
+            results[pid] = None
+        except (OSError, shutil.Error) as e:
+            shutil.rmtree(tmp, ignore_errors=True)
+            if os.path.isdir(old) and not os.path.isdir(dest):
+                try:
+                    os.replace(old, dest)      # put it back exactly as found
+                except OSError:
+                    pass
+            results[pid] = str(e)
+    return results
+
+
+def delete_skill(name, providers):
+    """Remove a skill folder — but ONLY one that actually holds a SKILL.md, so
+    a wrong name can never take out an unrelated directory."""
+    if not valid_skill_name(name):
+        raise ValueError("Invalid skill name.")
+    results = {}
+    for pid in providers:
+        path = skill_path(pid, name)
+        if not path:
+            results[pid] = "unknown provider"
+            continue
+        folder = os.path.dirname(path)
+        if not (os.path.isdir(folder) and skill_file_in(folder)):
+            results[pid] = "not installed"
+            continue
+        try:
+            shutil.rmtree(folder)
+            results[pid] = None
+        except OSError as e:
+            results[pid] = str(e)
+    return results
+
+
+# --------------------------------------------------------------- MCP ----
+# claude and codex expose `mcp add|remove|list`; agy has no such subcommand
+# and keeps servers in a JSON file. Both shapes live in the PROVIDERS entry
+# so adding a provider stays one entry.
+# THREADING: the CLI paths spend a subprocess — worker threads only, never
+# the pywebview bridge thread.
+
+def _mcp_cli(pid):
+    meta = (PROVIDERS.get(pid) or {}).get("mcp") or {}
+    return list(meta["argv"]) if meta.get("kind") == "cli" else None
+
+
+def _mcp_file(pid):
+    meta = (PROVIDERS.get(pid) or {}).get("mcp") or {}
+    return meta.get("path") if meta.get("kind") == "file" else None
+
+
+def _read_mcp_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _run_mcp(argv, timeout=60):
+    r = subprocess.run(resolve_cmd(argv), capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=timeout,
+                       shell=False, stdin=subprocess.DEVNULL, env=clean_env(),
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return r
+
+
+def _parse_mcp_line_list(stdout):
+    """claude: "<name>: <url-or-command> - <status>". The name may itself
+    contain colons ("plugin:superpowers-chrome:chrome"), so split on the LAST
+    ": " before the target rather than the first colon."""
+    servers = []
+    for line in (stdout or "").splitlines():
+        if not line.strip() or line.startswith(" ") \
+                or line.lower().startswith(("checking", "no mcp")):
+            continue
+        head = line.rsplit(" - ", 1)[0]
+        if ": " not in head:
+            continue
+        name, _, detail = head.rpartition(": ")
+        name = name.strip()
+        if name:
+            servers.append({"name": name, "detail": detail.strip()[:120]})
+    return servers
+
+
+def _parse_mcp_json_list(stdout):
+    """codex --json. Accepts either {name: spec} or a list of {name, …}."""
+    try:
+        data = json.loads((stdout or "").strip() or "{}")
+    except ValueError:
+        return []
+    rows = []
+    items = (data.get("mcpServers") or data) if isinstance(data, dict) else data
+    if isinstance(items, dict):
+        items = [dict(spec or {}, name=n) for n, spec in items.items()]
+    for spec in items or []:
+        if not isinstance(spec, dict):
+            continue
+        name = spec.get("name") or ""
+        # codex nests the real target under "transport"
+        tr = spec.get("transport") if isinstance(spec.get("transport"), dict) \
+            else {}
+        target = (tr.get("command") or tr.get("url")
+                  or spec.get("command") or spec.get("url") or "")
+        if name:
+            row = {"name": str(name), "detail": str(target)[:120]}
+            if spec.get("enabled") is False:
+                row["detail"] = ("(disabled) " + row["detail"])[:120]
+            rows.append(row)
+    return rows
+
+
+def list_mcp():
+    """{provider: {"servers": [{name, detail}], "error": str|None}}.
+
+    Never raises: a missing CLI or unreadable file is reported as that
+    provider's error while every other provider still lists."""
+    out = {}
+    for pid in manageable_providers():
+        row = {"servers": [], "error": None}
+        argv = _mcp_cli(pid)
+        path = _mcp_file(pid)
+        try:
+            if argv:
+                fmt = (PROVIDERS[pid]["mcp"] or {}).get("fmt", "lines")
+                if fmt == "json":
+                    r = _run_mcp(argv + ["list", "--json"])
+                    row["servers"] = _parse_mcp_json_list(r.stdout)
+                else:
+                    r = _run_mcp(argv + ["list"])
+                    row["servers"] = _parse_mcp_line_list(r.stdout)
+            elif path:
+                for name, spec in (_read_mcp_json(path)
+                                   .get("mcpServers") or {}).items():
+                    cmd = (spec or {}).get("command") or (spec or {}).get("url") or ""
+                    row["servers"].append({"name": name,
+                                           "detail": str(cmd)[:120]})
+        except Exception as e:                      # missing CLI, timeout, …
+            row["error"] = error_excerpt(e)
+        out[pid] = row
+    return out
+
+
+def add_mcp(provider, name, command, args=None, env=None, transport="stdio",
+            url=None):
+    """Register an MCP server with one provider. Returns None on success or an
+    error string. A stdio server records a command that will RUN LOCALLY, so
+    the caller must have confirmed with Josh first."""
+    if not name or not re.match(r"^[A-Za-z0-9][\w.-]*$", name):
+        return "Server names must be letters, numbers, dots, dashes."
+    # validate BEFORE dispatching: the file backend would otherwise happily
+    # record a server with an empty command that fails only at first use
+    if transport in ("http", "sse"):
+        if not url:
+            return "An http/sse server needs a URL."
+    elif not command:
+        return "A stdio server needs a command."
+    args = list(args or [])
+    env = dict(env or {})
+    argv = _mcp_cli(provider)
+    path = _mcp_file(provider)
+    try:
+        if argv:
+            cmd = argv + ["add"]
+            if provider == "claude":
+                # `claude mcp add` defaults to scope=local, i.e. only for the
+                # directory it was run in — a server added from the app would
+                # silently not exist for seats running anywhere else.
+                cmd += ["-s", "user"]
+            if transport in ("http", "sse"):
+                cmd += ["--transport", transport, name, url]
+            else:
+                for k, v in env.items():
+                    cmd += ["-e", f"{k}={v}"]
+                cmd += [name, "--", command] + args
+            r = _run_mcp(cmd, timeout=120)
+            if r.returncode != 0:
+                return error_excerpt((r.stderr or r.stdout or "").strip()
+                                     or f"exited {r.returncode}")
+        elif path:
+            data = _read_mcp_json(path)
+            servers = data.setdefault("mcpServers", {})
+            if transport in ("http", "sse"):
+                servers[name] = {"type": transport, "url": url or ""}
+            else:
+                spec = {"type": "stdio", "command": command or ""}
+                if args:
+                    spec["args"] = args
+                if env:
+                    spec["env"] = env
+                servers[name] = spec
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            # read-modify-write: unrelated servers must survive untouched
+            _atomic_write(path, json.dumps(data, indent=1))
+        else:
+            return "That provider has no MCP support."
+    except Exception as e:
+        return error_excerpt(e)
+    invalidate_mcp_cache()
+    return None
+
+
+def remove_mcp(provider, name):
+    argv = _mcp_cli(provider)
+    path = _mcp_file(provider)
+    try:
+        if argv:
+            r = _run_mcp(argv + ["remove", name], timeout=60)
+            if r.returncode != 0:
+                return error_excerpt((r.stderr or r.stdout or "").strip()
+                                     or f"exited {r.returncode}")
+        elif path:
+            data = _read_mcp_json(path)
+            servers = data.get("mcpServers") or {}
+            if name not in servers:
+                return "No such server."
+            servers.pop(name)
+            data["mcpServers"] = servers
+            _atomic_write(path, json.dumps(data, indent=1))
+        else:
+            return "That provider has no MCP support."
+    except Exception as e:
+        return error_excerpt(e)
+    invalidate_mcp_cache()
+    return None
+
+
+def invalidate_mcp_cache():
+    """claude_mcp_prefixes() caches for the process lifetime, so a server
+    added or removed mid-session would otherwise stay invisible to the
+    `connectors` switch until the app restarted."""
+    global _CLAUDE_MCP
+    _CLAUDE_MCP = None
 
 
 # ------------------------------------------------------- slash commands ----

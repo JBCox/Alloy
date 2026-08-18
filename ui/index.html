@@ -296,24 +296,26 @@
     color: var(--muted); user-select: all; overflow-wrap: anywhere;
   }
   .btn-sm.danger { border-color: var(--danger); color: var(--danger); }
-  #acctBtn {
+  #acctBtn, #skillBtn {
     width: 100%; display: flex; align-items: center; gap: 8px;
     background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
     color: var(--text); padding: 9px 12px; margin-top: 16px; cursor: pointer;
     font-family: Bahnschrift, sans-serif; font-size: 12px; letter-spacing: .14em;
     text-transform: uppercase;
   }
-  #acctBtn:hover { border-color: rgba(255,255,255,.25); }
+  #skillBtn { margin-top: 16px; font-size: 11px; }
+  #acctBtn { margin-top: 6px; }
+  #acctBtn:hover, #skillBtn:hover { border-color: rgba(255,255,255,.25); }
   #acctBadge {
     margin-left: auto; background: var(--danger); color: #fff; border-radius: 999px;
     font: 11px "Cascadia Mono", Consolas, monospace; padding: 1px 7px;
   }
-  #acctModal, #roleModal, #askModal {
+  #acctModal, #roleModal, #askModal, #skillModal {
     position: fixed; inset: 0; z-index: 50; display: none;
     align-items: flex-start; justify-content: center; padding-top: 9vh;
     background: rgba(10,8,14,.6);
   }
-  #acctModal.show, #roleModal.show, #askModal.show { display: flex; }
+  #acctModal.show, #roleModal.show, #askModal.show, #skillModal.show { display: flex; }
   .modal {
     background: #1A1720; border: 1px solid var(--line); border-radius: 12px;
     width: min(460px, 92vw); max-height: 78vh; overflow-y: auto;
@@ -329,6 +331,93 @@
     font-size: 16px; line-height: 1; padding: 2px 4px;
   }
   .modal-head .close:hover { color: var(--text); }
+
+  /* ---------- skills & connections ---------- */
+  .modal.wide {
+    width: min(940px, 94vw); max-height: 84vh;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  #skTabs { display: flex; gap: 4px; }
+  .sk-tab {
+    border: 1px solid var(--line); background: none; color: var(--muted);
+    border-radius: 7px; padding: 3px 12px; cursor: pointer; font-size: 12px;
+  }
+  .sk-tab.on { color: var(--text); background: var(--surface2); }
+  #skNote {
+    font-size: 12px; color: var(--muted); margin-bottom: 10px;
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px;
+  }
+  #skNote.danger { color: var(--danger); border-color: var(--danger); }
+  #skPane { display: flex; gap: 14px; min-height: 0; flex: 1; }
+  #skListWrap { width: 240px; flex: 0 0 auto; display: flex;
+    flex-direction: column; gap: 6px; min-height: 0; }
+  #skList { overflow-y: auto; min-height: 0; flex: 1; }
+  .sk-row {
+    border: 1px solid transparent; border-radius: 9px; padding: 6px 8px;
+    cursor: pointer; margin-bottom: 2px;
+  }
+  .sk-row:hover { background: var(--surface); }
+  .sk-row.on { background: var(--surface2); border-color: rgba(255,255,255,.10); }
+  .sk-row .sk-nm { font-size: 12.5px; display: flex; align-items: center; gap: 6px; }
+  .sk-row .sk-ds {
+    font-size: 11px; color: var(--muted); margin-top: 2px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .sk-dots { display: flex; gap: 3px; margin-left: auto; flex: 0 0 auto; }
+  .sk-dots i {
+    width: 7px; height: 7px; border-radius: 50%; display: block;
+    border: 1px solid var(--line);
+  }
+  .sk-dots i.has { border-color: transparent; }
+  .sk-warn { color: var(--alloy); font-size: 11px; }
+  #skEditor { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  #skName, #skDesc, #skBody {
+    width: 100%; background: var(--surface); color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px;
+    font: 13px inherit; resize: vertical;
+  }
+  #skBody { font: 12px "Cascadia Mono", Consolas, monospace; flex: 1; min-height: 160px; }
+  #skProvs { display: flex; gap: 14px; flex-wrap: wrap; }
+  #skProvs label { display: flex; align-items: center; gap: 6px; font-size: 12px;
+    color: var(--muted); cursor: pointer; }
+  #skProvs i { width: 8px; height: 8px; border-radius: 50%; display: block; }
+  #skExtras, #skHint { font-size: 11px; color: var(--muted); }
+  #skFoot { display: flex; align-items: center; gap: 8px; }
+  #skFoot #skHint { flex: 1; }
+  /* connections */
+  #connPane { overflow-y: auto; min-height: 0; flex: 1; }
+  .conn-prov { margin-bottom: 16px; }
+  .conn-prov h3 {
+    font: 12px Bahnschrift, sans-serif; letter-spacing: .12em;
+    text-transform: uppercase; margin-bottom: 6px; display: flex;
+    align-items: center; gap: 7px;
+  }
+  .conn-prov h3 i { width: 8px; height: 8px; border-radius: 50%; display: block; }
+  .conn-row {
+    display: flex; align-items: center; gap: 9px; padding: 5px 8px;
+    border: 1px solid var(--line); border-radius: 8px; margin-bottom: 3px;
+  }
+  .conn-row .cn { font: 12px "Cascadia Mono", Consolas, monospace; flex: 0 0 auto; }
+  .conn-row .cd {
+    font-size: 11px; color: var(--muted); flex: 1; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .conn-empty { font-size: 11.5px; color: var(--muted); padding: 3px 2px 6px; }
+  .conn-add { margin-top: 6px; display: grid; gap: 6px; }
+  .conn-add input, .conn-add select, .conn-add textarea {
+    background: var(--surface); color: var(--text); border: 1px solid var(--line);
+    border-radius: 7px; padding: 6px 8px; font: 12px inherit; width: 100%;
+  }
+  .conn-add textarea { font: 11.5px "Cascadia Mono", Consolas, monospace; resize: vertical; }
+  .conn-warn {
+    font-size: 11.5px; color: var(--danger); border: 1px solid var(--danger);
+    border-radius: 8px; padding: 7px 9px;
+  }
+  .conn-cmd {
+    font: 11px "Cascadia Mono", Consolas, monospace; color: var(--muted);
+    user-select: all; word-break: break-all;
+  }
   #acctNote {
     font-size: 12px; color: var(--muted); margin-bottom: 10px;
     border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px;
@@ -738,6 +827,9 @@
       <div class="yolo-note" id="connNote">Seats can act in those accounts unattended — including sending mail. Skills, shell and document building work without this.</div>
     </div>
 
+    <button id="skillBtn" title="Write skills once and give them to every seat; manage MCP servers">
+      <span>Skills &amp; Connections</span>
+    </button>
     <button id="acctBtn" title="Sign in and out of the AI accounts">
       <span>Accounts</span><span id="acctBadge" hidden></span>
     </button>
@@ -805,6 +897,45 @@
     </div>
     <div id="acctNote" hidden></div>
     <div id="acctList"></div>
+  </div>
+</div>
+
+<div id="skillModal">
+  <div class="modal wide">
+    <div class="modal-head">
+      <h2>Skills &amp; Connections</h2>
+      <div id="skTabs">
+        <button class="sk-tab on" id="skTabSkills">Skills</button>
+        <button class="sk-tab" id="skTabConn">Connections</button>
+      </div>
+      <button class="close" id="skClose" title="Close">✕</button>
+    </div>
+    <div id="skNote" hidden></div>
+
+    <div id="skPane">
+      <div id="skListWrap">
+        <button class="btn-sm" id="skNewBtn">+ New skill</button>
+        <div id="skList"></div>
+      </div>
+      <div id="skEditor">
+        <input id="skName" type="text" maxlength="64" spellcheck="false"
+               placeholder="skill-name (lowercase, hyphens)">
+        <textarea id="skDesc" rows="3" spellcheck="false"
+                  placeholder="When should an AI reach for this? e.g. &quot;Use when the user asks to check a manuscript for continuity errors.&quot;"></textarea>
+        <textarea id="skBody" rows="14" spellcheck="false"
+                  placeholder="# Skill&#10;&#10;Step-by-step instructions for the AI."></textarea>
+        <div id="skProvs"></div>
+        <div id="skExtras" hidden></div>
+        <div id="skFoot">
+          <span id="skHint"></span>
+          <button class="btn-sm" id="skSyncBtn" hidden></button>
+          <button class="btn-sm danger" id="skDelBtn" hidden>Delete</button>
+          <button class="btn-sm" id="skSaveBtn">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="connPane" hidden></div>
   </div>
 </div>
 
@@ -1156,6 +1287,8 @@ window.uiEvent = ({event, payload}) => {
     } else { refreshChats(); }
   } else if (event === "auth_status") {
     renderAccounts(payload);
+  } else if (event === "mcp_status") {
+    renderConns(payload);
   } else if (event === "thinking") {
     $("roundBadge").textContent = payload.until_done
       ? `turn ${payload.turn}/${payload.ceiling}`
@@ -1539,6 +1672,348 @@ async function answerAsk(text) {
   } finally { clearAsk(); }
 }
 $("askPill").onclick = openAsk;
+
+/* ---------- skills & connections ---------- */
+// Skills are folders holding SKILL.md, and the format is identical for all
+// three CLIs — so one skill written here installs verbatim everywhere. The
+// providers' directories ARE the source of truth; Alloy edits them in place
+// and keeps no master copy (a second copy would only invent drift).
+let skSkills = [], skProviders = [], skSel = null, skIsNew = false;
+let mcpCache = null;
+
+function skDot(pid, has) {
+  const i = document.createElement("i");
+  if (has) { i.classList.add("has"); i.style.background = `var(--${pid})`; }
+  return i;
+}
+function setSkNote(text, danger) {
+  const n = $("skNote");
+  n.hidden = !text; n.textContent = text || "";
+  n.classList.toggle("danger", !!danger);
+}
+async function openSkills() {
+  setSkNote(""); showSkTab("skills");
+  $("skillModal").classList.add("show");
+  await refreshSkills();
+  refreshConns();
+}
+function closeSkills() { $("skillModal").classList.remove("show"); }
+function showSkTab(which) {
+  const on = which === "skills";
+  $("skTabSkills").classList.toggle("on", on);
+  $("skTabConn").classList.toggle("on", !on);
+  $("skPane").hidden = !on;
+  $("connPane").hidden = on;
+}
+$("skillBtn").onclick = openSkills;
+$("skClose").onclick = closeSkills;
+$("skTabSkills").onclick = () => showSkTab("skills");
+$("skTabConn").onclick = () => showSkTab("conn");
+$("skillModal").onclick = e => { if (e.target === $("skillModal")) closeSkills(); };
+
+async function refreshSkills() {
+  let r;
+  try { r = await pywebview.api.get_skills(); }
+  catch (e) { setSkNote(String(e), true); return; }
+  skProviders = r.providers || [];
+  skSkills = r.skills || [];
+  renderSkillList();
+}
+function renderSkillList() {
+  const list = $("skList");
+  list.innerHTML = "";
+  if (!skSkills.length) {
+    list.innerHTML = '<div class="conn-empty">No skills yet. A skill is a ' +
+      'folder with a SKILL.md telling an AI how to do one job.</div>';
+  }
+  skSkills.forEach(s => {
+    const d = document.createElement("div");
+    d.className = "sk-row" + (skSel === s.name ? " on" : "");
+    const nm = document.createElement("div");
+    nm.className = "sk-nm";
+    const label = document.createElement("span");
+    label.textContent = s.name;                      // never innerHTML
+    nm.appendChild(label);
+    if (s.diverged) {
+      const w = document.createElement("span");
+      w.className = "sk-warn"; w.textContent = "⚠";
+      w.title = "The installed copies differ";
+      nm.appendChild(w);
+    }
+    const dots = document.createElement("div");
+    dots.className = "sk-dots";
+    skProviders.forEach(p => dots.appendChild(
+      skDot(p.id, s.providers.includes(p.id))));
+    dots.title = skProviders.map(p =>
+      `${p.label} ${s.providers.includes(p.id) ? "✓" : "—"}`).join(" · ");
+    nm.appendChild(dots);
+    const ds = document.createElement("div");
+    ds.className = "sk-ds";
+    ds.textContent = s.description || "(no description)";
+    d.appendChild(nm); d.appendChild(ds);
+    d.onclick = () => openSkill(s.name);
+    list.appendChild(d);
+  });
+}
+async function openSkill(name) {
+  const s = skSkills.find(x => x.name === name);
+  if (!s) return;
+  skSel = name; skIsNew = false;
+  const from = s.providers[0];
+  let got = {};
+  try { got = await pywebview.api.read_skill(from, name); } catch (e) {}
+  $("skName").value = name;
+  $("skName").readOnly = true;      // renaming is a folder move — out of v1
+  $("skDesc").value = got.description || s.description || "";
+  $("skBody").value = got.body || "";
+  renderSkProvs(s);
+  $("skDelBtn").hidden = false;
+  $("skExtras").hidden = !s.extras;
+  $("skExtras").textContent = s.extras
+    ? `${s.extras} extra file${s.extras === 1 ? "" : "s"} (scripts/, ` +
+      `references/…) travel with this skill when you install it elsewhere.`
+    : "";
+  $("skHint").textContent = s.diverged
+    ? "The copies differ — saving overwrites the others with this text."
+    : "";
+  setSkNote(s.diverged
+    ? `"${name}" is installed more than once and the copies are not identical. ` +
+      `Editing here and saving replaces the others.` : "");
+  renderSkSync(s);
+  renderSkillList();
+}
+function renderSkProvs(s) {
+  const box = $("skProvs");
+  box.innerHTML = "";
+  skProviders.forEach(p => {
+    const lab = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.dataset.pid = p.id;
+    cb.checked = s ? s.providers.includes(p.id) : true;
+    const dot = document.createElement("i");
+    dot.style.background = `var(--${p.id})`;
+    lab.appendChild(cb); lab.appendChild(dot);
+    lab.appendChild(document.createTextNode(p.label));
+    box.appendChild(lab);
+  });
+}
+function renderSkSync(s) {
+  const btn = $("skSyncBtn");
+  const missing = (s && s.missing) || [];
+  btn.hidden = !missing.length;
+  if (!missing.length) return;
+  const names = missing.map(m =>
+    (skProviders.find(p => p.id === m) || {}).label || m);
+  btn.textContent = "Install to " + names.join(" and ");
+  btn.onclick = () => {
+    // tick the missing boxes and save — the same path as checkbox+Save, so
+    // there is no second implementation to keep honest
+    $("skProvs").querySelectorAll("input").forEach(cb => {
+      if (missing.includes(cb.dataset.pid)) cb.checked = true;
+    });
+    saveSkill();
+  };
+}
+function newSkill() {
+  skSel = null; skIsNew = true;
+  $("skName").value = ""; $("skName").readOnly = false;
+  $("skDesc").value = ""; $("skBody").value = "";
+  renderSkProvs(null);
+  $("skDelBtn").hidden = true; $("skSyncBtn").hidden = true;
+  $("skExtras").hidden = true;
+  $("skHint").textContent = "Installs to every ticked seat.";
+  setSkNote(""); renderSkillList();
+  $("skName").focus();
+}
+function skTargets() {
+  return [...$("skProvs").querySelectorAll("input")]
+    .filter(cb => cb.checked).map(cb => cb.dataset.pid);
+}
+async function saveSkill() {
+  const name = $("skName").value.trim();
+  const targets = skTargets();
+  if (!targets.length) { setSkNote("Tick at least one seat.", true); return; }
+  const cur = skSkills.find(x => x.name === (skSel || name));
+  // copy the folder (scripts/, references/) from a provider that already has
+  // it — a SKILL.md-only copy leaves every link in the markdown dangling
+  const source = cur && cur.providers.length ? cur.providers[0] : null;
+  const btn = $("skSaveBtn");
+  btn.disabled = true;
+  try {
+    const r = await pywebview.api.save_skill(
+      name, $("skDesc").value.trim(), $("skBody").value, targets, source);
+    if (r?.error) { setSkNote(r.error, true); return; }
+    // unticking a seat means "remove it from there"
+    const drop = cur ? cur.providers.filter(p => !targets.includes(p)) : [];
+    if (drop.length) await pywebview.api.remove_skill(name, drop);
+    await refreshSkills();
+    skSel = name; skIsNew = false;
+    const s = skSkills.find(x => x.name === name);
+    if (s) openSkill(name);
+    setSkNote(`Saved "${name}".`);
+  } finally { btn.disabled = false; }
+}
+$("skSaveBtn").onclick = saveSkill;
+$("skNewBtn").onclick = newSkill;
+// two-step arm, same muscle memory as Log out
+$("skDelBtn").onclick = async () => {
+  const b = $("skDelBtn"), name = skSel;
+  if (!name) return;
+  const s = skSkills.find(x => x.name === name);
+  if (!b.dataset.arm) {
+    b.dataset.arm = "1";
+    b.textContent = `Delete from ${(s ? s.providers.length : 1)} seat(s)?`;
+    setTimeout(() => { delete b.dataset.arm; b.textContent = "Delete"; }, 8000);
+    return;
+  }
+  delete b.dataset.arm; b.textContent = "Delete";
+  const r = await pywebview.api.remove_skill(name, s ? s.providers : []);
+  if (r?.error) { setSkNote(r.error, true); return; }
+  skSel = null; await refreshSkills(); newSkill();
+  setSkNote(`Deleted "${name}".`);
+};
+
+/* ---------- connections (MCP) ---------- */
+// Per-provider sections on purpose: the backends genuinely differ (two CLIs,
+// one JSON file), and a merged list would invite a "sync everywhere" action
+// that is actively wrong — the same server three times means three copies of
+// a local process and three sign-ins.
+function refreshConns() {
+  if (!mcpCache) $("connPane").innerHTML =
+    '<div class="conn-empty">Reading connected servers…</div>';
+  pywebview.api.get_mcp();          // answers via the mcp_status event
+}
+function renderConns(payload) {
+  mcpCache = payload && payload.providers || {};
+  const pane = $("connPane");
+  pane.innerHTML = "";
+  skProviders.forEach(p => {
+    const row = mcpCache[p.id] || {servers: [], error: null};
+    const box = document.createElement("div");
+    box.className = "conn-prov";
+    const h = document.createElement("h3");
+    const dot = document.createElement("i");
+    dot.style.background = `var(--${p.id})`;
+    h.appendChild(dot);
+    h.appendChild(document.createTextNode(p.label));
+    box.appendChild(h);
+    if (row.error) {
+      const e = document.createElement("div");
+      e.className = "conn-empty"; e.textContent = row.error;
+      box.appendChild(e);
+    }
+    if (!row.servers.length && !row.error) {
+      const e = document.createElement("div");
+      e.className = "conn-empty"; e.textContent = "No servers.";
+      box.appendChild(e);
+    }
+    row.servers.forEach(s => box.appendChild(connRow(p, s)));
+    box.appendChild(addServerForm(p));
+    pane.appendChild(box);
+  });
+}
+function connRow(p, s) {
+  const d = document.createElement("div");
+  d.className = "conn-row";
+  const n = document.createElement("span");
+  n.className = "cn"; n.textContent = s.name;
+  const c = document.createElement("span");
+  c.className = "cd"; c.textContent = s.detail || ""; c.title = s.detail || "";
+  const rm = document.createElement("button");
+  rm.className = "btn-sm"; rm.textContent = "Remove";
+  rm.onclick = async () => {
+    if (!rm.dataset.arm) {
+      rm.dataset.arm = "1"; rm.textContent = "Really remove?";
+      rm.classList.add("danger");
+      setTimeout(() => {
+        delete rm.dataset.arm; rm.textContent = "Remove";
+        rm.classList.remove("danger");
+      }, 8000);
+      return;
+    }
+    rm.disabled = true;
+    const r = await pywebview.api.remove_mcp(p.id, s.name);
+    if (r?.error) { setSkNote(r.error, true); rm.disabled = false; }
+  };
+  d.appendChild(n); d.appendChild(c); d.appendChild(rm);
+  return d;
+}
+function addServerForm(p) {
+  const f = document.createElement("div");
+  f.className = "conn-add";
+  const name = document.createElement("input");
+  name.placeholder = "server name";
+  const tr = document.createElement("select");
+  ["stdio", "http", "sse"].forEach(t => {
+    // codex has no SSE — disable it here rather than fail at exec
+    if (t === "sse" && p.id === "gpt") return;
+    const o = document.createElement("option");
+    o.value = t; o.textContent = t;
+    tr.appendChild(o);
+  });
+  const cmd = document.createElement("input");
+  cmd.placeholder = "command to run (e.g. npx)";
+  const args = document.createElement("textarea");
+  args.rows = 2;
+  args.placeholder = "arguments — one per line";
+  const env = document.createElement("textarea");
+  env.rows = 2;
+  env.placeholder = "environment — KEY=value per line (kept out of chats)";
+  const warn = document.createElement("div");
+  warn.className = "conn-warn";
+  warn.textContent = "This runs a program on your PC. Any seat in a "
+    + "conversation can start it and talk to it. Only add servers you trust.";
+  const preview = document.createElement("div");
+  preview.className = "conn-cmd";
+  const add = document.createElement("button");
+  add.className = "btn-sm";
+  add.textContent = "Add server";
+  const sync = () => {
+    const stdio = tr.value === "stdio";
+    cmd.placeholder = stdio ? "command to run (e.g. npx)" : "https://…/mcp";
+    args.hidden = !stdio; env.hidden = !stdio; warn.hidden = !stdio;
+    preview.textContent = stdio && cmd.value
+      ? [cmd.value].concat(args.value.split("\n").filter(Boolean)).join(" ")
+      : "";
+    // reset the arm whenever what would run changes
+    delete add.dataset.arm; add.textContent = "Add server";
+    add.classList.remove("danger");
+  };
+  tr.onchange = sync; cmd.oninput = sync; args.oninput = sync;
+  add.onclick = async () => {
+    const stdio = tr.value === "stdio";
+    // the arm exists only where something will execute locally; for http/sse
+    // a confirm would be noise, and noise is what makes confirms ignored
+    if (stdio && !add.dataset.arm) {
+      add.dataset.arm = "1";
+      add.textContent = "Add and allow it to run?";
+      add.classList.add("danger");
+      setTimeout(() => {
+        delete add.dataset.arm; add.textContent = "Add server";
+        add.classList.remove("danger");
+      }, 8000);
+      return;
+    }
+    const envMap = {};
+    env.value.split("\n").forEach(l => {
+      const i = l.indexOf("=");
+      if (i > 0) envMap[l.slice(0, i).trim()] = l.slice(i + 1).trim();
+    });
+    add.disabled = true;
+    const r = await pywebview.api.add_mcp(
+      p.id, name.value.trim(), stdio ? cmd.value.trim() : null,
+      args.value.split("\n").map(s => s.trim()).filter(Boolean),
+      envMap, tr.value, stdio ? null : cmd.value.trim());
+    add.disabled = false;
+    delete add.dataset.arm; add.textContent = "Add server";
+    add.classList.remove("danger");
+    if (r?.error) setSkNote(r.error, true);
+    else { name.value = ""; cmd.value = ""; args.value = ""; env.value = ""; sync(); }
+  };
+  [name, tr, cmd, args, env, warn, preview, add].forEach(el => f.appendChild(el));
+  sync();
+  return f;
+}
 $("askHide").onclick = hideAsk;
 $("askModal").onclick = e => { if (e.target === $("askModal")) hideAsk(); };
 $("askSkip").onclick = () => answerAsk("");
@@ -1560,7 +2035,9 @@ $("acctBtn").onclick = () => { setAcctNote(""); openAccounts(); };
 $("acctClose").onclick = closeAccounts;
 $("acctModal").onclick = e => { if (e.target === $("acctModal")) closeAccounts(); };
 document.addEventListener("keydown", e => {
-  if (e.key === "Escape") { closeAccounts(); closeRole(); hideAsk(); closeLightbox(); }
+  if (e.key === "Escape") {
+    closeAccounts(); closeRole(); hideAsk(); closeLightbox(); closeSkills();
+  }
 });
 
 function setAcctNote(text, danger) {

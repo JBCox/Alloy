@@ -19,6 +19,7 @@ import threading
 
 import webview
 
+import relay
 from relay import (AGENT_TYPES, PROVIDERS, SESSIONS_DIR, HELP_TEXT,
                    MODES, DEFAULT_MODE, IMPLEMENTED_MODES, DEFAULT_CEILING,
                    assign_labels, compact_agent, resolve_cmd, clean_env,
@@ -603,6 +604,108 @@ class Api:
                 msgs.append(f"The {label} CLI isn't installed — Accounts in "
                             f"the sidebar has the install command.")
         return msgs
+
+    # ------------------------------------------------------------- skills --
+    # Skills are plain files, so these stay on the bridge thread like the
+    # history methods below. MCP is different — it shells out to the CLIs, so
+    # those methods hand off to a worker and answer with an `mcp_status`
+    # event (the recheck_auth shape).
+
+    def get_skills(self):
+        """One row per skill NAME across providers: which have it, which are
+        missing it, and whether the installed copies have drifted apart."""
+        per = relay.list_skills()
+        managed = relay.manageable_providers()
+        merged = {}
+        for pid, rows in per.items():
+            for r in rows:
+                m = merged.setdefault(r["name"], {
+                    "name": r["name"], "description": "",
+                    "providers": [], "missing": [], "shas": [],
+                    "extras": 0, "diverged": False, "error": None})
+                m["providers"].append(pid)
+                m["shas"].append(r["sha"])
+                m["extras"] = max(m["extras"], r.get("extras") or 0)
+                m["description"] = m["description"] or r["description"]
+                m["error"] = m["error"] or r["error"]
+        for m in merged.values():
+            m["missing"] = [p for p in managed if p not in m["providers"]]
+            # same name, different bytes: report it, never silently pick one
+            m["diverged"] = len(set(m["shas"])) > 1
+            m.pop("shas")
+        return {"providers": [{"id": p, "label": PROVIDERS[p]["label"],
+                               "color": PROVIDERS[p]["color"]}
+                              for p in managed],
+                "skills": sorted(merged.values(), key=lambda m: m["name"])}
+
+    def read_skill(self, provider, name):
+        got = relay.read_skill(provider, name)
+        if got is None:
+            return {"error": "not installed"}
+        return {"ok": True, "description": got[0], "body": got[1]}
+
+    def save_skill(self, name, description, body, providers, source=None):
+        """`source` = a provider that already has this skill; its whole folder
+        (scripts/, references/, assets/) is copied to the others. Without it a
+        synced skill arrives with every link in its markdown dangling."""
+        try:
+            res = relay.write_skill(name, description, body,
+                                    list(providers or []), source=source)
+        except ValueError as e:
+            return {"error": str(e)}
+        failed = {p: e for p, e in res.items() if e}
+        if failed:
+            return {"error": "; ".join(f"{p}: {e}" for p, e in failed.items())}
+        return {"ok": True}
+
+    def remove_skill(self, name, providers):
+        try:
+            res = relay.delete_skill(name, list(providers or []))
+        except ValueError as e:
+            return {"error": str(e)}
+        failed = {p: e for p, e in res.items()
+                  if e and e != "not installed"}
+        if failed:
+            return {"error": "; ".join(f"{p}: {e}" for p, e in failed.items())}
+        return {"ok": True}
+
+    # --------------------------------------------------------------- MCP --
+    # Every one of these spends a subprocess for claude/codex, so the bridge
+    # thread only ever starts a worker and returns immediately.
+
+    def get_mcp(self):
+        def work():
+            self.emit("mcp_status", {"providers": relay.list_mcp()})
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True}
+
+    def add_mcp(self, provider, name, command, args=None, env=None,
+                transport="stdio", url=None):
+        if provider not in relay.manageable_providers():
+            return {"error": "Unknown provider."}
+
+        def work():
+            err = relay.add_mcp(provider, name, command, args=args, env=env,
+                                transport=transport, url=url)
+            self.emit("status", {"text": err
+                                 or f"Added MCP server '{name}' to "
+                                    f"{PROVIDERS[provider]['label']}."})
+            self.emit("mcp_status", {"providers": relay.list_mcp()})
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True}
+
+    def remove_mcp(self, provider, name):
+        if provider not in relay.manageable_providers():
+            return {"error": "Unknown provider."}
+
+        def work():
+            err = relay.remove_mcp(provider, name)
+            self.emit("status", {"text": err
+                                 or f"Removed MCP server '{name}' from "
+                                    f"{PROVIDERS[provider]['label']}."})
+            self.emit("mcp_status", {"providers": relay.list_mcp()})
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True}
 
     # ------------------------------------------------------------ history --
     # These methods are called on pywebview's bridge thread. Keep them to
