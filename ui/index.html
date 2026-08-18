@@ -910,18 +910,38 @@ function md(s) {
 // prose mentioning "logo.png" doesn't sprout a placeholder.
 const IMG_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|ico)$/i;
 function findImageRefs(text) {
-  const refs = [], seen = new Set();
-  const push = p => {
-    p = (p || "").trim().replace(/^["'<`]+|[>"'`,.;:!?)]+$/g, "");
-    if (p && IMG_EXT_RE.test(p) && !seen.has(p.toLowerCase())) {
-      seen.add(p.toLowerCase()); refs.push(p);
-    }
+  // Returns [{path, strict}]. strict = the text pointed at a FILE (a real
+  // path or an explicit attachment/markdown image), so a failure to load is
+  // worth a visible placeholder. Loose = a bare name mentioned in prose,
+  // where a failure is probably just a model talking about "logo.png" and
+  // must vanish silently rather than leave a broken cell.
+  const refs = [], seen = new Set(), seenBase = new Set();
+  const push = (p, strict) => {
+    p = (p || "").trim().replace(/^["'<`(]+|[>"'`,.;:!?)]+$/g, "");
+    if (!p || !IMG_EXT_RE.test(p) || seen.has(p.toLowerCase())) return;
+    const base = p.split(/[\\/]/).pop().toLowerCase();
+    // a reply usually names the file BOTH ways ("saved as [x.png](C:\..\x.png)")
+    // — the bare-name pass must not add a second thumbnail of the same image
+    if (!strict && seenBase.has(base)) return;
+    seen.add(p.toLowerCase()); seenBase.add(base);
+    refs.push({path: p, strict: strict});
   };
-  for (const m of text.matchAll(/!\[[^\]]*\]\(([^)\n]+)\)/g)) push(m[1]);
-  for (const m of text.matchAll(/\[Josh attached a file:\s*([^\]\n]+)\]/g)) push(m[1]);
+  for (const m of text.matchAll(/!\[[^\]]*\]\(([^)\n]+)\)/g)) push(m[1], true);
+  for (const m of text.matchAll(/\[Josh attached a file:\s*([^\]\n]+)\]/g))
+    push(m[1], true);
+  // A path with separators. The drive letter must consume its OWN slash:
+  // "C:\Users\x.png" previously matched from "Users" (the optional [A-Za-z]:
+  // could not be followed by \, so the engine restarted mid-path), producing
+  // a relative path that resolved nowhere — GPT saves images and reports
+  // absolute paths, so this broke the common case.
   for (const m of text.matchAll(
-    /(?:[A-Za-z]:)?(?:[\w.\-]+[\\/])+[\w.\-]+\.(?:png|jpe?g|gif|webp|bmp|ico)\b/gi))
-    push(m[0]);
+    /(?:[A-Za-z]:[\\/])?(?:[\w.\-]+[\\/])+[\w.\-]+\.(?:png|jpe?g|gif|webp|bmp|ico)\b/gi))
+    push(m[0], true);
+  // A bare filename in prose — how a seat naturally names a file it just
+  // made in the shared folder ("saved it as lemon_marble.jpg").
+  for (const m of text.matchAll(
+    /\b[\w.\-]+\.(?:png|jpe?g|gif|webp|bmp|ico)\b/gi))
+    push(m[0], false);
   return refs.slice(0, 8);
 }
 // One fetch per path per chat: replaying a long chat re-adds many rows, and
@@ -948,12 +968,18 @@ function attachThumbs(container, refs) {
   const strip = document.createElement("div");
   strip.className = "msg-imgs";
   container.appendChild(strip);
-  refs.forEach(async path => {
+  refs.forEach(async ref => {
+    const path = ref.path, strict = ref.strict;
     const cell = document.createElement("div");
     cell.className = "img-thumb";
     strip.appendChild(cell);
     const r = await fetchImage(path, false);
-    if (!r || !r.ok) { missingCell(cell, path); return; }
+    if (!r || !r.ok) {
+      // a bare name that resolves to nothing was probably just prose
+      if (!strict) { cell.remove(); if (!strip.children.length) strip.remove(); }
+      else missingCell(cell, path);
+      return;
+    }
     const img = document.createElement("img");
     img.alt = r.name || path; img.title = path;
     img.onerror = () => missingCell(cell, path);   // corrupt bytes, not a broken tag
