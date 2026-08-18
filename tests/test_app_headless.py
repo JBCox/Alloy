@@ -191,6 +191,48 @@ class HeadlessAppTests(unittest.TestCase):
         self.assertEqual(api.list_workspace_files(chat_id="no-such-chat"),
                          {"workspace": None, "files": []})
 
+    def test_new_chat_does_not_stop_a_running_one(self):
+        """Josh's actual ask. reset_conversation used to answer "Stop the
+        conversation first", which made the whole run registry unreachable."""
+        api = self._stopped_api()
+        run = api._runs.focused()
+        run.thread = threading.Thread(target=lambda: time.sleep(5),
+                                      daemon=True)
+        run.thread.start()
+        r = api.reset_conversation()
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["backgrounded"], run.id)
+        self.assertIsNotNone(run.state, "the running chat was torn down")
+        self.assertIsNone(api._runs.focused().id, "no fresh stage to type in")
+
+    def test_opening_another_chat_leaves_the_running_one_alone(self):
+        api = self._stopped_api()
+        first = api._runs.focused()
+        first.thread = threading.Thread(target=lambda: time.sleep(5),
+                                        daemon=True)
+        first.thread.start()
+        # reopening the SAME chat focuses it rather than rebuilding its agents
+        # (two Agent objects on one CLI session id shred continuity)
+        agents_before = first.state["agents"]
+        r = api.open_session(first.id)
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["live"])
+        self.assertIs(api._conv["agents"], agents_before, "agents rebuilt")
+
+    def test_interject_and_command_reach_the_named_chat(self):
+        api = self._stopped_api()
+        first = api._runs.focused()
+        api._runs.new_draft()                 # Josh is composing a new chat
+        api.interject("for the background chat", None, first.id)
+        self.assertEqual(first.human_q.get_nowait(),
+                         "for the background chat")
+        first.thread = threading.Thread(target=lambda: time.sleep(5),
+                                        daemon=True)
+        first.thread.start()
+        api.command("/compact", first.id)
+        self.assertEqual(first.human_q.get_nowait(), "/compact")
+        self.assertTrue(api._runs.focused().human_q.empty())
+
     def test_approve_plan_wakes_the_blocked_loop(self):
         """approve_plan must ANSWER the question the loop sleeps on. Flipping
         capability flags directly left the card saying "Executing" while the

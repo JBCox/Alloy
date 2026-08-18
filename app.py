@@ -140,6 +140,7 @@ class Run:
         self.session_dir = None
         self.view_workspace = None   # reopened view-only chat's workspace
         self.staged_roles = {}       # seat index -> staged role change
+        self.roles_busy = False      # idle role worker belongs to this run
         # Per-run on purpose: a global one made a question in chat B queue
         # invisibly behind an unanswered question in chat A.
         self.ask_lock = threading.Lock()
@@ -256,7 +257,7 @@ class _AppIO(LoopIO):
         # a staged role lands here, so the seat about to speak gets its fresh
         # preamble with the new role rather than switching identity mid-turn
         if self._run.staged_roles:
-            self._api._commit_roles(state)
+            self._api._commit_roles(state, self._run)
 
     def ask_human(self, payload, abort=None):
         # Runs on the conversation worker / a seat thread, NEVER the bridge
@@ -302,7 +303,6 @@ class Api:
         # runs; the LOCK is what had to become per-run (see Run.ask_lock).
         self._ask_waiters = {}         # qid -> Queue awaiting answer_question
         self._roles_lock = threading.Lock()
-        self._roles_busy = False       # an idle-path commit worker is running
         # Serialized emitter: evaluate_js is only ever called from ONE thread
         # (pywebview/WebView2 marshalling isn't documented thread-safe, and
         # parallel modes emit from several seat threads). A single queue also
@@ -624,7 +624,10 @@ class Api:
                 "data_uri": f"data:{mime};base64,"
                             f"{base64.b64encode(data).decode('ascii')}"}
 
-    def read_text(self, path, max_bytes=None, chat_id=None):
+    # chat_id comes SECOND: the UI calls read_text(path, activeId), and with
+    # max_bytes in that slot a chat id was silently used as the byte cap —
+    # no error, just a wrong limit. Argument order is part of the contract.
+    def read_text(self, path, chat_id=None, max_bytes=None):
         """Text of a workspace file for the live code viewer. Mirrors
         read_image's posture exactly: confined path, and forbidden/missing
         are the IDENTICAL quiet error (no existence disclosure)."""
@@ -944,12 +947,32 @@ class Api:
         return stored_sessions()
 
     def open_session(self, session_id):
-        if self._thread and self._thread.is_alive():
-            return {"error": "Stop the current conversation before opening "
-                             "another chat."}
+        """Show another chat. Opening one no longer stops the running one —
+        it is a FOCUS switch, which is the whole point of the run registry.
+
+        The one thing it must refuse is loading a session that is already
+        live in this window a SECOND time: two Agent objects carrying the
+        same CLI session id shred continuity, because `claude -p --resume`
+        mints a new id on every call and whichever thread writes last wins.
+        So an already-open chat is focused, never rebuilt.
+        """
+        # The registry is consulted FIRST, and an already-open chat is served
+        # from its own run's validated session_dir rather than a path rebuilt
+        # from the id — the same rule read_image and friends follow.
+        existing = self._runs.get(session_id)
+        if existing is not None and existing.state is not None \
+                and existing.session_dir:
+            self._runs.focus(session_id)
+            return {"ok": True,
+                    "session": session_summary(existing.session_dir),
+                    "messages": read_messages(existing.session_dir),
+                    "live": existing.is_running()}
         path = session_path(session_id)
         if not path:
             return {"error": "That chat no longer exists."}
+        # a chat this window has not loaded yet gets its own run; the focused
+        # one keeps its thread, queue and stop flag untouched
+        self._runs.focus(os.path.basename(os.path.normpath(path)))
 
         meta = read_meta(path)
         summary = session_summary(path, meta)
@@ -982,17 +1005,22 @@ class Api:
             # session_dir and deliberately refuses to trust meta["id"] as a
             # path, while open_session already holds the validated one.
             state["brief"] = read_project_context(path, meta)
-        state["_run"] = self._runs.focused()
+            # INSIDE the guard: a legacy view-only chat rehydrates to None,
+            # and pinning the run on None crashed every one of them.
+            state["_run"] = self._runs.focused()
         self._conv = state
-        return {"ok": True, "session": summary, "messages": messages}
+        return {"ok": True, "session": summary, "messages": messages,
+                "live": False}
 
     def rename_session(self, session_id, title):
         path = session_path(session_id)
         if not path:
             return {"error": "That chat no longer exists."}
-        if (self._thread and self._thread.is_alive()
-                and os.path.abspath(path) == os.path.abspath(
-                    self._session_dir or "")):
+        # Resolve by id, not by the focused-run compatibility properties. A
+        # background chat is still live even while Josh is viewing another
+        # one, and renaming its files underneath the loop is unsafe.
+        run = self._runs.get(session_id)
+        if run is not None and run.is_running():
             return {"error": "Wait until this conversation pauses before "
                              "renaming it."}
         title = " ".join((title or "").split()).strip()
@@ -1016,43 +1044,46 @@ class Api:
             except OSError:
                 pass
             return {"error": f"Could not rename chat: {e}"}
-        if self._conv and os.path.abspath(path) == os.path.abspath(
-                self._session_dir or ""):
-            self._conv["title"] = title
+        if run is not None and run.state:
+            run.state["title"] = title
         return {"ok": True, "session": session_summary(path, meta)}
 
     def delete_session(self, session_id):
         path = session_path(session_id)
         if not path:
             return {"error": "That chat no longer exists."}
-        active = os.path.abspath(path) == os.path.abspath(
-            self._session_dir or "")
-        if active and self._thread and self._thread.is_alive():
+        # The target may be running in the background. Never derive this from
+        # focus: deleting that folder while its loop persists would strand the
+        # store and CLI session beneath a live worker.
+        run = self._runs.get(session_id)
+        if run is not None and run.is_running():
             return {"error": "Stop this conversation before deleting it."}
-        if active:
-            self._conv = None
-            self._session_dir = None
-            self._view_workspace = None
         try:
             shutil.rmtree(path)
         except OSError as e:
             return {"error": f"Could not delete chat: {e}"}
+        self._runs.forget(session_id)
         return {"ok": True, "id": session_id}
 
     def new_conversation(self):
         return self.reset_conversation()
 
-    def submit_feedback(self, rating, reasons=None, note=""):
-        """Persist the optional end-card response for the active chat.
+    def submit_feedback(self, rating, reasons=None, note="", chat_id=None):
+        """Persist the optional end-card response for ONE chat.
+
+        Chat-scoped: rating the chat you are looking at must not write into
+        whichever run happens to be focused when several are open.
 
         Bridge-thread safe: this is one bounded, atomic JSON update.  The UI
         never writes outcome.json itself, so outcome.set_feedback remains the
         single validator and owner of the v1 vocabulary.
         """
-        if not self._session_dir or not os.path.isdir(self._session_dir):
+        run = self._runs.get(chat_id) if chat_id else self._runs.focused()
+        session_dir = run.session_dir if run else None
+        if not session_dir or not os.path.isdir(session_dir):
             return {"error": "There is no active conversation to rate."}
         try:
-            rec = outcome.set_feedback(self._session_dir, rating,
+            rec = outcome.set_feedback(session_dir, rating,
                                        reasons or [], note or "")
         except ValueError as e:
             return {"error": str(e)}
@@ -1072,19 +1103,36 @@ class Api:
         return {"ok": True}
 
     def continue_chat(self, cfg):
-        if self._thread and self._thread.is_alive():
-            return {"error": "A conversation is already running."}
-        if not self._conv:
+        """Resume ONE paused chat. `cfg["session_id"]` picks it; without one
+        it is the focused chat. Another chat running elsewhere is irrelevant —
+        only THIS chat already running would be a double-start."""
+        chat_id = (cfg or {}).get("session_id")
+        run = self._runs.get(chat_id) if chat_id else self._runs.focused()
+        if run is None:
+            return {"error": "No such chat in this window."}
+        if run.is_running():
+            return {"error": "That conversation is already running."}
+        if not run.state:
             return {"error": "No conversation to continue."}
-        self._stop_flag.clear()
-        self._thread = threading.Thread(target=self._run_continue, args=(cfg,),
-                                        daemon=True)
-        self._thread.start()
+        self._runs.focus(run.id) if run.id else None
+        run.stop_flag.clear()
+        run.thread = threading.Thread(target=self._run_continue, args=(cfg,),
+                                      daemon=True)
+        run.thread.start()
         return {"ok": True}
 
     def reset_conversation(self):
-        if self._thread and self._thread.is_alive():
-            return {"error": "Stop the conversation first."}
+        """Clear the stage for a new chat.
+
+        A RUNNING chat is left alone and simply loses focus — Josh asked to
+        start a new conversation without stopping the old one, and refusing
+        here is what made the run registry unreachable from the UI. Only an
+        idle chat gets closed out, because only an idle chat is finished.
+        """
+        run = self._runs.focused()
+        if run.is_running():
+            self._runs.new_draft()          # it keeps running in the background
+            return {"ok": True, "backgrounded": run.id}
         if self._conv:
             try:
                 # `ended` is display state only — continue_block never gates on
@@ -1096,12 +1144,25 @@ class Api:
                 pass
         self._conv = None
         self._view_workspace = None
+        # A fresh stage rather than reusing the closed chat's Run: that Run is
+        # still registered under its old id, and starting a new conversation
+        # on it would leave the map pointing two ids at one object.
+        self._runs.new_draft()
         return {"ok": True}
 
-    def interject(self, text, files=None):
+    def interject(self, text, files=None, chat_id=None):
+        """Send Josh's message into ONE chat's queue.
+
+        Chat-scoped: with several chats live, an interjection typed into the
+        visible one must not land in whichever run was focused last, and an
+        attachment must be saved into THAT chat's workspace.
+        """
+        run, err = self._resolve_chat(chat_id)
+        if err:
+            return {"error": err}
         text = (text or "").strip()
         if files:
-            ws = (self._conv or {}).get("workspace")
+            ws = (run.state or {}).get("workspace")
             if not ws:
                 return {"error": "No conversation workspace to attach files to."}
             try:  # plain file IO — safe on the bridge thread (no subprocess)
@@ -1109,11 +1170,17 @@ class Api:
             except (OSError, ValueError) as e:
                 return {"error": f"Could not save attachment: {e}"}
         if text:
-            self._human_q.put(text)
+            run.human_q.put(text)
         return {"ok": True, "text": text}
 
-    def answer_question(self, qid, text):
+    def answer_question(self, qid, text, chat_id=None):
         """Answer (or skip, with empty text) a seat's [[ASK]] question.
+
+        `chat_id` is accepted and ignored on purpose: qids are globally
+        unique, so the waiter map alone routes the answer correctly. The UI
+        passes it for symmetry with every other chat-scoped call, and a
+        signature that silently rejected it would break the ask modal.
+
         Bridge-thread safe: a pure queue put, like interject."""
         q = self._ask_waiters.get(qid)
         if not q:
@@ -1121,14 +1188,22 @@ class Api:
         q.put((text or "").strip())
         return {"ok": True}
 
-    def command(self, text):
+    def command(self, text, chat_id=None):
+        """Run a slash command against ONE chat.
+
+        Scoped for the same reason as interject: /clear or /compact must hit
+        the chat Josh is looking at, never whichever run was focused last.
+        """
         text = (text or "").strip()
         if not text.startswith("/"):
             return {"error": "Commands start with /."}
-        if self._thread and self._thread.is_alive():
-            self._human_q.put(text)
+        run = self._runs.get(chat_id) if chat_id else self._runs.focused()
+        if run is None:
+            return {"error": "No such chat in this window."}
+        if run.is_running():
+            run.human_q.put(text)
             return {"ok": True, "note": "Queued — runs before the next turn."}
-        if not self._conv:
+        if not run.state:
             return {"error": "No conversation yet — start one first. " + HELP_TEXT}
         head = text[1:].partition(" ")[0].lower()
         if head in ("stop", "turns"):
@@ -1136,11 +1211,11 @@ class Api:
                              f"is running."}
         # idle: run directly on a worker thread (threads *spawned* by a bridge
         # call are safe for subprocess.run; the bridge thread itself is not)
-        threading.Thread(target=self._do_command, args=(self._conv, text),
+        threading.Thread(target=self._do_command, args=(run.state, text),
                          daemon=True).start()
         return {"ok": True}
 
-    def apply_role(self, seat_id, role, instructions):
+    def apply_role(self, seat_id, role, instructions, chat_id=None):
         """Stage one seat's role change; it lands at the next turn boundary.
 
         Deliberately NOT an autosaving field. Applying costs that seat a full
@@ -1153,7 +1228,8 @@ class Api:
         the loop thread (running) or on a spawned worker (idle) — never here,
         where a subprocess would deadlock pywebview.
         """
-        state = self._conv
+        run = self._runs.get(chat_id) if chat_id else self._runs.focused()
+        state = run.state if run else None
         if not state:
             return {"error": "No conversation yet — set roles on the seat "
                              "cards, then send your opening message."}
@@ -1168,39 +1244,39 @@ class Api:
                 and instructions == (agent.role_instructions or "")):
             return {"error": f"That's already {agent.name}'s role."}
         with self._roles_lock:
-            self._staged_roles[idx] = (role or None, instructions or None)
-            running = bool(self._thread and self._thread.is_alive())
-            spawn = not running and not self._roles_busy
+            run.staged_roles[idx] = (role or None, instructions or None)
+            running = run.is_running()
+            spawn = not running and not run.roles_busy
             if spawn:
-                self._roles_busy = True
+                run.roles_busy = True
         if spawn:
-            threading.Thread(target=self._commit_roles_idle, args=(state,),
+            threading.Thread(target=self._commit_roles_idle, args=(state, run),
                              daemon=True).start()
         return {"ok": True,
                 "note": (f"Queued — {agent.name} switches at the next turn "
                          f"boundary." if running
                          else f"Applying {agent.name}'s new role…")}
 
-    def _commit_roles_idle(self, state):
+    def _commit_roles_idle(self, state, run):
         try:
             # A bridge call can stage another edit after _commit_roles sees an
-            # empty dict but before this worker clears _roles_busy: the stager
+            # empty dict but before this worker clears run.roles_busy: the stager
             # reads busy=True, doesn't spawn, and the edit would sit unapplied
             # while the UI says "Applying…". Recheck under the same lock the
             # stager uses so that edit either spawns its own worker (it saw
             # busy=False) or is drained by this loop — never stranded.
             while True:
-                self._commit_roles(state)
+                self._commit_roles(state, run)
                 with self._roles_lock:
-                    if not self._staged_roles:
-                        self._roles_busy = False
+                    if not run.staged_roles:
+                        run.roles_busy = False
                         return
         except Exception as e:                       # never strand the flag
             self.emit("status", {"text": f"Role change failed: {error_excerpt(e)}"})
             with self._roles_lock:
-                self._roles_busy = False
+                run.roles_busy = False
 
-    def _commit_roles(self, state):
+    def _commit_roles(self, state, run):
         """Apply staged role changes by riding the /compact path.
 
         The seat summarizes itself, its session resets, `introduced` flips
@@ -1213,10 +1289,10 @@ class Api:
         """
         while True:
             with self._roles_lock:
-                if not self._staged_roles:
+                if not run.staged_roles:
                     return
-                i = sorted(self._staged_roles)[0]
-                role, instructions = self._staged_roles.pop(i)
+                i = sorted(run.staged_roles)[0]
+                role, instructions = run.staged_roles.pop(i)
             agent = state["agents"][i]
             key = state["slot_ids"][i]
             old, new = agent.role or "no role", role or "no role"
