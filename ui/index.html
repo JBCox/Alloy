@@ -565,6 +565,7 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.6;
   }
   .act-line.k-reasoning { font-style: italic; }
+  .act-line.k-progress { color: var(--who, var(--muted)); opacity: .75; }
   .act-line.k-edit { color: var(--text); opacity: .8; }
   .think-block { margin: 0 0 8px; }
   .think-block summary {
@@ -1056,11 +1057,26 @@ function typingActivity(speakerId, payload) {
     log.className = "act-log";
     el.appendChild(log);
   }
+  if (payload.kind === "progress") {
+    // a ticking counter, not a step: keep ONE line and update it in place
+    let p = log.querySelector(".k-progress");
+    if (!p) {
+      p = document.createElement("div");
+      p.className = "act-line k-progress";
+      log.appendChild(p);
+    }
+    p.textContent = payload.text || "";
+    log.appendChild(p);                  // stays at the bottom
+    $("feed").scrollTop = $("feed").scrollHeight;
+    return;
+  }
   const ln = document.createElement("div");
   ln.className = "act-line k-" + (payload.kind || "note");
   ln.textContent = payload.text || "";
   ln.title = payload.text || "";
   log.appendChild(ln);
+  const prog = log.querySelector(".k-progress");
+  if (prog) log.appendChild(prog);       // counter stays last
   while (log.children.length > 6) log.firstChild.remove();
   $("feed").scrollTop = $("feed").scrollHeight;
 }

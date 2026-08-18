@@ -83,6 +83,13 @@ class StreamingRunnerTests(unittest.TestCase):
         self.assertIn("exited 3", str(ctx.exception))
         self.assertIn("boom-detail", str(ctx.exception))
 
+    def test_adapter_describes_its_own_failure(self):
+        agent = PythonAgent(self.tmp, "import sys; sys.exit(1)")
+        agent.describe_failure = lambda out, err: "the CLI's own sentence"
+        with self.assertRaises(RuntimeError) as ctx:
+            agent.turn("go")
+        self.assertIn("the CLI's own sentence", str(ctx.exception))
+
     def test_exit_zero_empty_output_raises_no_reply(self):
         agent = PythonAgent(self.tmp, "pass")
         with self.assertRaises(RuntimeError) as ctx:
@@ -196,6 +203,42 @@ class ClaudeMappingTests(unittest.TestCase):
     def test_parse_no_result_object_is_empty(self):
         self.assertEqual(self.a.parse("garbage\n{\"type\": \"system\"}"), "")
 
+    def test_failed_result_is_never_relayed_as_a_reply(self):
+        # the CLI puts its own error sentence in `result`; returning it would
+        # send "API Error…" to every other seat as if Claude had said it
+        for bad in (claude_line(type="result", is_error=True,
+                                subtype="error_during_execution",
+                                result="API Error: 529 overloaded",
+                                session_id="s"),
+                    claude_line(type="result", subtype="error_max_turns",
+                                result="Reached max turns", session_id="s")):
+            self.assertEqual(self.a.parse(bad), "")
+
+    def test_describe_failure_pulls_the_error_sentence(self):
+        line = claude_line(type="result", is_error=True,
+                           subtype="error_during_execution",
+                           api_error_status=529,
+                           result="API Error: overloaded_error",
+                           session_id="s",
+                           usage={"ephemeral_1h_input_tokens": 0})
+        msg = self.a.describe_failure(line, "")
+        self.assertIn("API Error: overloaded_error", msg)
+        self.assertIn("error_during_execution", msg)
+        self.assertIn("529", msg)
+        self.assertNotIn("ephemeral_1h_input_tokens", msg)   # no JSON soup
+
+    def test_describe_failure_falls_back_to_stderr(self):
+        self.assertIn("boom", self.a.describe_failure("", "boom happened"))
+
+    def test_thinking_tokens_become_a_progress_act(self):
+        line = claude_line(type="system", subtype="thinking_tokens",
+                           estimated_tokens=1240)
+        self.assertEqual(self.a.activity(line),
+                         [{"kind": "progress", "text": "thinking… 1,240 tokens"}])
+        zero = claude_line(type="system", subtype="thinking_tokens",
+                           estimated_tokens=0)
+        self.assertEqual(self.a.activity(zero), ())
+
 
 def codex_line(typ, item):
     return json.dumps({"type": typ, "item": item})
@@ -236,6 +279,15 @@ class CodexMappingTests(unittest.TestCase):
         self.assertEqual([a["kind"] for a in acts], ["edit", "edit"])
         self.assertEqual([a["path_raw"] for a in acts],
                          [r"C:\ws\a.py", r"C:\ws\b.py"])
+
+    def test_describe_failure_pulls_error_events(self):
+        out = "\n".join([
+            json.dumps({"type": "thread.started", "thread_id": "t"}),
+            json.dumps({"type": "error",
+                        "message": "stream disconnected before completion"}),
+        ])
+        self.assertEqual(self.a.describe_failure(out, ""),
+                         "stream disconnected before completion")
 
     def test_ignores_lifecycle_and_garbage(self):
         for line in ("", "nope", "{bad",
@@ -300,6 +352,24 @@ class SinkTests(unittest.TestCase):
             cb({"kind": "edit", "text": "editing evil", "path_raw": raw})
         self.assertEqual(acts, [])
         self.assertEqual(self.acts_events(), [])
+
+    def test_progress_acts_are_live_only(self):
+        cb, acts = self.sink()
+        cb({"kind": "progress", "text": "thinking… 100 tokens"})
+        cb({"kind": "progress", "text": "thinking… 100 tokens"})   # dedupe
+        cb({"kind": "progress", "text": "thinking… 900 tokens"})
+        cb({"kind": "command", "text": "$ go"})
+        # emitted live, but NEVER persisted onto the row
+        self.assertEqual(acts, [{"kind": "command", "text": "$ go"}])
+        kinds = [p["kind"] for p in self.acts_events()]
+        self.assertEqual(kinds, ["progress", "progress", "command"])
+
+    def test_progress_does_not_spend_the_cap(self):
+        cb, acts = self.sink()
+        for i in range(ACTIVITY_MAX + 20):
+            cb({"kind": "progress", "text": f"thinking… {i} tokens"})
+        cb({"kind": "note", "text": "real step"})
+        self.assertEqual(acts, [{"kind": "note", "text": "real step"}])
 
     def test_blank_and_malformed_acts_ignored(self):
         cb, acts = self.sink()

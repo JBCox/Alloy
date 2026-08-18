@@ -251,7 +251,7 @@ class Agent:
         if rc != 0:
             raise RuntimeError(
                 f"{self.name} exited {rc}: "
-                f"{(stderr or stdout or '').strip()[-500:]}"
+                f"{self.describe_failure(stdout, stderr) or 'no detail'}"
             )
         reply = self.parse(stdout)
         if not reply:
@@ -262,9 +262,20 @@ class Agent:
             # every other agent's context and burns the round silently.
             raise RuntimeError(
                 f"{self.name} exited 0 but produced no reply: "
-                f"{(stderr or stdout or '').strip()[-300:] or 'no output'}"
+                f"{self.describe_failure(stdout, stderr) or 'no output'}"
             )
         return reply
+
+    def describe_failure(self, stdout, stderr):
+        """Human-readable reason a turn failed, from THIS CLI's output format.
+
+        The generic fallback is the tail of stderr/stdout, which for a
+        structured-output CLI is JSON soup: a real claude failure showed up
+        in the app as `exited 1: n":{"ephemeral_1h_input_tokens":0,…` —
+        every legible word (the CLI's own error sentence) truncated away.
+        Adapters override to pull the sentence out; keep it SHORT, the loop
+        excerpts it again for the UI."""
+        return (stderr or stdout or "").strip()[-300:] or None
 
     def _run_streaming(self, cmd, env, on_line=None):
         """Run the CLI reading stdout line-by-line ON THE CALLING THREAD
@@ -388,12 +399,12 @@ class ClaudeAgent(Agent):
             ]
         return cmd
 
-    def parse(self, stdout):
-        # stream-json: the result object is documented as the LAST line, but
-        # scan backwards for the first object carrying "result" so trailing
-        # diagnostics in a future CLI can't break the parse.
-        data = None
-        for line in reversed(stdout.strip().splitlines()):
+    @staticmethod
+    def _result_object(stdout):
+        """The stream's final result event. Documented as the LAST line, but
+        scan backwards for the first object carrying "result" so trailing
+        diagnostics in a future CLI can't break the parse."""
+        for line in reversed((stdout or "").strip().splitlines()):
             line = line.strip()
             if not line.startswith("{"):
                 continue
@@ -402,13 +413,34 @@ class ClaudeAgent(Agent):
             except ValueError:
                 continue
             if isinstance(obj, dict) and "result" in obj:
-                data = obj
-                break
+                return obj
+        return None
+
+    def parse(self, stdout):
+        data = self._result_object(stdout)
         if data is None:
             return ""       # turn() raises the no-reply error with the tail
         # -p --resume forks to a fresh session id each call; track the newest
         self.session_id = data.get("session_id", self.session_id)
+        if data.get("is_error") or (data.get("subtype") or "success") != "success":
+            # A FAILED result still carries `result` — but it holds the CLI's
+            # error sentence ("API Error: …"), not the model's turn. Returning
+            # it would relay an error to every other seat as if Claude had
+            # said it. Empty ⇒ turn() raises ⇒ retry-then-skip. Never forge.
+            return ""
         return (data.get("result") or "").strip()
+
+    def describe_failure(self, stdout, stderr):
+        data = self._result_object(stdout)
+        if data is not None:
+            sub = data.get("subtype") or ""
+            text = (data.get("result") or "").strip()
+            api = data.get("api_error_status")
+            bits = [b for b in (sub if sub != "success" else "",
+                                f"HTTP {api}" if api else "", text) if b]
+            if bits:
+                return " · ".join(bits)[:300]
+        return super().describe_failure(stdout, stderr)
 
     def activity(self, line):
         line = line.strip()
@@ -418,7 +450,20 @@ class ClaudeAgent(Agent):
             evt = json.loads(line)
         except ValueError:
             return ()
-        if not isinstance(evt, dict) or evt.get("type") != "assistant":
+        if not isinstance(evt, dict):
+            return ()
+        if evt.get("type") == "system" \
+                and evt.get("subtype") == "thinking_tokens":
+            # Opus streams thinking VOLUME but no thinking CONTENT (verified
+            # 2026-08-17: opus-4-8 --effort high emitted thinking_tokens
+            # events and zero `thinking` blocks). Without this the UI shows
+            # bare dots through a multi-minute silent reasoning stretch.
+            # kind "progress" = live-only, never persisted (see the sink).
+            n = evt.get("estimated_tokens")
+            if isinstance(n, int) and n > 0:
+                return [{"kind": "progress", "text": f"thinking… {n:,} tokens"}]
+            return ()
+        if evt.get("type") != "assistant":
             return ()
         content = (evt.get("message") or {}).get("content") or []
         acts = []
@@ -562,6 +607,31 @@ class CodexAgent(Agent):
                 if found:
                     return found
         return None
+
+    def describe_failure(self, stdout, stderr):
+        # codex reports failures as `error` events / error-typed items on the
+        # same JSONL stream; the raw tail would be event soup like claude's.
+        msgs = []
+        for line in (stdout or "").splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                evt = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(evt, dict):
+                continue
+            for cand in (evt.get("error"), evt.get("message")):
+                if isinstance(cand, str) and cand.strip():
+                    msgs.append(cand.strip())
+                elif isinstance(cand, dict):
+                    m = cand.get("message") or cand.get("error")
+                    if isinstance(m, str) and m.strip():
+                        msgs.append(m.strip())
+        if msgs:
+            return " · ".join(msgs[-2:])[:300]
+        return super().describe_failure(stdout, stderr)
 
     def activity(self, line):
         # Already-streaming --json vocabulary, verified live 2026-08-16:
@@ -2532,12 +2602,25 @@ def make_activity_sink(io, key, provider, name, workspace):
     app.read_image), and a surviving one becomes a workspace-relative `path`
     matching the Files-rail row keys."""
     acts = []
+    last_progress = [None]
 
     def cb(act):
         if not isinstance(act, dict):
             return
         text = (act.get("text") or "").strip()[:160]
         if not text:
+            return
+        if (act.get("kind") or "") == "progress":
+            # A ticking counter ("thinking… 1,240 tokens"), not a step: emit
+            # it live (the UI replaces the line in place) but never persist
+            # it and never spend cap budget on it — a finished reply's
+            # activity list must read as what the seat DID, not a stopwatch.
+            if text == last_progress[0]:
+                return
+            last_progress[0] = text
+            io.emit("activity", {"speaker": key, "provider": provider,
+                                 "name": name, "kind": "progress",
+                                 "text": text})
             return
         if len(acts) >= ACTIVITY_MAX:
             if len(acts) == ACTIVITY_MAX:
