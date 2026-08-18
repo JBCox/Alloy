@@ -731,6 +731,12 @@
       </label>
       <div class="yolo-note" id="yoloNote">They can run any command in the working folder. Only for topics you trust.</div>
     </div>
+    <div class="ctl">
+      <label style="display:flex;align-items:center;gap:8px;margin:0">
+        <input type="checkbox" id="connectors"> Connected apps (Gmail, Drive, Calendar…)
+      </label>
+      <div class="yolo-note" id="connNote">Seats can act in those accounts unattended — including sending mail. Skills, shell and document building work without this.</div>
+    </div>
 
     <button id="acctBtn" title="Sign in and out of the AI accounts">
       <span>Accounts</span><span id="acctBadge" hidden></span>
@@ -1452,6 +1458,10 @@ function setSeated(on) {
   // the project context is injected in each seat's FIRST preamble, so it is
   // settled the moment a conversation exists
   $("projBrief").disabled = seated;
+  // permissions are baked into every seat's argv when the chat starts, so
+  // flipping them mid-conversation would be a lie until the next /clear
+  $("yolo").disabled = seated;
+  $("connectors").disabled = seated;
 }
 
 async function applyRole(seat) {
@@ -1842,7 +1852,8 @@ async function sendSay() {
   $("afterRow").classList.remove("show");
   transcriptPath = null;
   const cfg = {
-    opener: t, turns: rounds, yolo: $("yolo").checked, workspace: customFolder,
+    opener: t, turns: rounds, yolo: $("yolo").checked,
+    connectors: $("connectors").checked, workspace: customFolder,
     brief: $("projBrief").checked,
     mode: $("modeSel").value,
     moderator: moderatorCfg(),
@@ -2164,6 +2175,7 @@ $("pickFolder").onclick = async () => {
   if (f) { customFolder = f; $("folderPath").textContent = f; $("folderPath").style.color = "var(--text)"; }
 };
 $("yolo").onchange = () => { $("yoloNote").style.display = $("yolo").checked ? "block" : "none"; };
+$("connectors").onchange = () => { $("connNote").style.display = $("connectors").checked ? "block" : "none"; };
 $("openTranscript").onclick = () => pywebview.api.open_path(transcriptPath);
 $("openWorkspace").onclick = () => pywebview.api.open_path(customFolder || workspacePath);
 /* ---------- chat rail (history) ---------- */

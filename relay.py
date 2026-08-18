@@ -191,7 +191,7 @@ class Agent:
         return None
 
     def __init__(self, workspace, yolo=False, model=None, effort=None, name=None,
-                 role=None, role_instructions=None):
+                 role=None, role_instructions=None, connectors=False):
         self.workspace = workspace
         self.yolo = yolo
         self.model = model
@@ -212,6 +212,12 @@ class Agent:
         # instead would silently evaporate at the first compact (ROLES_DESIGN.md).
         self.role = (role or "").strip() or None
         self.role_instructions = (role_instructions or "").strip() or None
+        # Connected apps (MCP). OFF unless Josh turns it on for the whole
+        # conversation: these are his real Gmail / Drive / Calendar / M365 /
+        # ERP, and seats run unattended for many turns. Skills, shell and
+        # document building need no such gate — they stay inside the
+        # workspace; a connector reaches the outside world.
+        self.connectors = bool(connectors)
 
     def turn(self, message, on_activity=None):
         """One CLI call. `on_activity`, when given, receives {kind, text[, …]}
@@ -407,6 +413,13 @@ class ClaudeAgent(Agent):
         if self.yolo:
             cmd += ["--dangerously-skip-permissions"]
         else:
+            allowed = ["WebSearch", "WebFetch", "Read", "Write", "Edit",
+                       "Glob", "Grep", "Task"]
+            # MCP servers are the one capability this list actually gates
+            # (everything else is auto-approved anyway) — off unless Josh
+            # switched connectors on for the conversation.
+            if self.connectors:
+                allowed += claude_mcp_prefixes()
             cmd += [
                 "--permission-mode", "acceptEdits",
                 # equals form: --allowedTools is variadic and would otherwise
@@ -414,7 +427,7 @@ class ClaudeAgent(Agent):
                 # Task = built-in subagents (tier-1 spawning): a Task subagent
                 # inherits this same permission mode/allowlist/cwd, so it adds
                 # parallelism within a turn, never new effective capability.
-                "--allowedTools=WebSearch,WebFetch,Read,Write,Edit,Glob,Grep,Task",
+                "--allowedTools=" + ",".join(allowed),
             ]
         return cmd
 
@@ -537,11 +550,17 @@ class ClaudeAgent(Agent):
         return [{"kind": "tool", "text": "tool: " + _clip(name, 60)}] if name else []
 
     def capability_note(self):
-        # Tracks build_cmd's two branches: the non-yolo allowlist has no
-        # Bash, so this seat genuinely cannot run anything it writes.
-        can = ["web search", "reading and writing files in the shared folder"]
-        if self.yolo:
-            can.append("running shell commands")
+        # --allowedTools is an AUTO-APPROVE list, not a whitelist: verified
+        # live 2026-08-17 that a non-yolo seat still ran Bash and loaded a
+        # Skill (only MCP tools came back denied). An earlier version of this
+        # note said non-yolo "cannot run shell commands" — false, and the
+        # worst kind of false, since peers route work by these sentences.
+        can = ["web search", "running shell commands",
+               "reading and writing files in the shared folder",
+               "using its Skills (which is how it builds real Word, PDF, "
+               "Excel and PowerPoint files)"]
+        if self.connectors:
+            can.append("its connected apps over MCP")
         return (f"{', '.join(can)}. CANNOT generate images "
                 f"(no image tool exists on this CLI)")
 
@@ -711,7 +730,9 @@ class CodexAgent(Agent):
 
     def capability_note(self):
         can = ["web search", "running shell commands",
-               "reading and writing files in the shared folder"]
+               "reading and writing files in the shared folder",
+               "building real Word, PDF, Excel and PowerPoint files with its "
+               "bundled document plugins"]
         if codex_image_gen_enabled():
             # verified end-to-end through this exact adapter, 2026-08-17:
             # the PNG lands in the shared workspace, non-yolo included
@@ -727,6 +748,50 @@ class CodexAgent(Agent):
 
 
 _CODEX_FEATURES = None
+
+
+_CLAUDE_MCP = None
+
+
+def claude_mcp_prefixes():
+    """Tool-name prefixes for the MCP servers this claude install has.
+
+    `--allowedTools` is an auto-approve list and MCP tools are the ONE thing
+    it does not cover implicitly: verified live 2026-08-17 that a non-yolo
+    seat ran Bash and loaded a Skill unprompted, while an MCP call came back
+    "you haven't granted it yet" and landed in the result's
+    permission_denials. Naming the SERVER (mcp__<server>) grants all of its
+    tools — also verified. Spends no tokens; cached; any failure -> [].
+
+    The prefix is the display name with '.', ':' and whitespace turned into
+    '_' and hyphens LEFT ALONE ("claude.ai Corvaer Epicor" ->
+    mcp__claude_ai_Corvaer_Epicor; "plugin:superpowers-chrome:chrome" ->
+    mcp__plugin_superpowers-chrome_chrome), matching the real tool names."""
+    global _CLAUDE_MCP
+    if _CLAUDE_MCP is None:
+        found = []
+        try:
+            r = subprocess.run(
+                resolve_cmd(["claude", "mcp", "list"]),
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=60, shell=False,
+                stdin=subprocess.DEVNULL, env=clean_env(),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            for line in (r.stdout or "").splitlines():
+                name, sep, _rest = line.partition(":")
+                if not sep or not name.strip() or line.startswith(" "):
+                    continue
+                # "plugin:superpowers-chrome:chrome: node …" — the name runs
+                # to the LAST colon that is followed by a space+command
+                head = line.rsplit(" - ", 1)[0]
+                name = head.rsplit(": ", 1)[0].strip() if ": " in head else name
+                if not name or name.lower().startswith("checking"):
+                    continue
+                found.append("mcp__" + re.sub(r"[.\s:]", "_", name))
+        except Exception:
+            found = []
+        _CLAUDE_MCP = sorted(set(found))
+    return _CLAUDE_MCP
 
 
 def codex_features():
@@ -1270,6 +1335,9 @@ class SessionStore:
             "workspace": state["workspace"],
             "topic": state.get("topic", ""),
             "yolo": bool(state.get("yolo")),
+            # additive like brief/ask: old code ignoring this merely reopens
+            # the chat without connectors, never with them on by surprise
+            "connectors": bool(state.get("connectors")),
             "turns": state["turns"],
             "rnd": state["rnd"],
             "max": state["max"],
@@ -1989,7 +2057,8 @@ def rehydrate(meta, workspace=None):
             model=s.get("model") or None, effort=s.get("effort") or None,
             name=s.get("label") or None,
             role=s.get("role") or None,
-            role_instructions=s.get("role_instructions") or None)
+            role_instructions=s.get("role_instructions") or None,
+            connectors=bool(meta.get("connectors")))
         a.session_id = s.get("session_id") or None
         agents.append(a)
     return {
@@ -4295,6 +4364,10 @@ def main():
                          "(e.g. \"claude 2\"), or provider name")
     ap.add_argument("--yolo", action="store_true",
                     help="full autonomy incl. shell access (use with care)")
+    ap.add_argument("--connectors", action="store_true",
+                    help="let seats use your connected apps over MCP (Gmail, "
+                         "Drive, Calendar, M365, ERP…). They can then act in "
+                         "those accounts unattended — off by default")
     ap.add_argument("--workspace", default=None, metavar="PATH",
                     help="run the seats in an existing project folder instead "
                          "of a fresh scratch dir; its AI docs become shared "
@@ -4437,7 +4510,8 @@ def main():
     say_file = os.path.join(session_dir, "say.txt")
 
     agents = [AGENT_TYPES[p](workspace, yolo=args.yolo,
-                             model=m, effort=e, name=lb)
+                             model=m, effort=e, name=lb,
+                             connectors=args.connectors)
               for p, m, e, lb in seats]
     for a in agents:  # suffixed/custom labels inherit the provider's color
         COLORS.setdefault(a.name, COLORS.get(type(a).name, ""))
@@ -4488,7 +4562,8 @@ def main():
              "providers": [p for p, _, _, _ in seats],
              "workspace": workspace, "transcript": transcript,
              "topic": args.topic, "title": args.topic, "created": store.created,
-             "yolo": bool(args.yolo), "turns": args.turns,
+             "yolo": bool(args.yolo), "connectors": bool(args.connectors),
+             "turns": args.turns,
              "rnd": 0, "max": args.turns, "ended": False, "mode": mode,
              "moderator": moderator_spec,
              "until_done": bool(args.until_done),

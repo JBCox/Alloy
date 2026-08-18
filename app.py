@@ -949,6 +949,9 @@ class Api:
         opener = (cfg.get("opener") or "").strip()
         turns = max(1, int(cfg.get("turns", 10)))
         yolo = bool(cfg.get("yolo"))
+        # Connected apps (MCP) — Josh's real Gmail/Drive/Calendar/M365/ERP.
+        # Explicit per-conversation opt-in; never inferred from yolo.
+        connectors = bool(cfg.get("connectors"))
         mode = (cfg.get("mode") or DEFAULT_MODE).replace("-", "_")
         if mode not in MODES:
             self.emit("error", {"message": f"Unknown mode {mode!r}."})
@@ -1018,7 +1021,8 @@ class Api:
                 model=s.get("model") or None, effort=s.get("effort") or None,
                 name=label,
                 role=s.get("role") or None,
-                role_instructions=s.get("role_instructions") or None))
+                role_instructions=s.get("role_instructions") or None,
+                connectors=connectors))
         slot_ids = [s.get("id", i) for i, s in enumerate(picked)]
         providers = [s["provider"] for s in picked]
 
@@ -1031,7 +1035,8 @@ class Api:
             "agents": agents, "slot_ids": slot_ids, "providers": providers,
             "transcript": store.transcript, "workspace": workspace,
             "topic": topic, "title": title_src, "created": store.created,
-            "yolo": yolo, "turns": turns, "store": store, "ended": False,
+            "yolo": yolo, "connectors": connectors,
+            "turns": turns, "store": store, "ended": False,
             "pending": {i: [] for i in range(len(agents))},
             "introduced": [False] * len(agents),
             "rnd": 0, "max": turns, "mode": mode,

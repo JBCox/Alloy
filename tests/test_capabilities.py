@@ -12,6 +12,7 @@ Run:  python tests/test_capabilities.py
 
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -41,11 +42,13 @@ class CapabilityNoteTests(CapabilityBase):
         note = ClaudeAgent(self.tmp).capability_note()
         self.assertIn("CANNOT generate images", note)
         self.assertIn("web search", note)
-        # non-yolo has no Bash in the allowlist, so it must not claim shell
-        self.assertNotIn("shell", note)
 
-    def test_claude_claims_shell_only_in_yolo(self):
-        self.assertIn("shell", ClaudeAgent(self.tmp, yolo=True).capability_note())
+    def test_claude_claims_shell_in_both_modes(self):
+        # --allowedTools is an auto-approve list, NOT a whitelist: a non-yolo
+        # seat really did run Bash and load a Skill in the live probe, so the
+        # note must not deny capability the seat demonstrably has
+        for a in (ClaudeAgent(self.tmp), ClaudeAgent(self.tmp, yolo=True)):
+            self.assertIn("shell", a.capability_note())
 
     def test_codex_claims_images_when_the_flag_is_on(self):
         note = CodexAgent(self.tmp).capability_note()
@@ -66,6 +69,69 @@ class CapabilityNoteTests(CapabilityBase):
         note = GeminiAgent(self.tmp).capability_note()
         self.assertIn("GENERATING IMAGES", note)
         self.assertIn("shared folder", note)
+
+
+class ConnectorGateTests(CapabilityBase):
+    """MCP is the ONE thing --allowedTools actually gates (Bash and Skill run
+    without being listed — verified live), and it reaches Josh's real Gmail /
+    Drive / Calendar / ERP, so it stays off unless he opts in."""
+
+    def setUp(self):
+        super().setUp()
+        self._old_mcp = relay._CLAUDE_MCP
+        relay._CLAUDE_MCP = ["mcp__claude_ai_Gmail",
+                             "mcp__plugin_superpowers-chrome_chrome"]
+
+    def tearDown(self):
+        relay._CLAUDE_MCP = self._old_mcp
+        super().tearDown()
+
+    def allowlist(self, agent):
+        for c in agent.build_cmd("hi"):
+            if str(c).startswith("--allowedTools="):
+                return str(c).split("=", 1)[1].split(",")
+        return None
+
+    def test_off_by_default(self):
+        allowed = self.allowlist(ClaudeAgent(self.tmp))
+        self.assertNotIn("mcp__claude_ai_Gmail", allowed)
+        self.assertIn("Task", allowed)          # the old list is untouched
+
+    def test_on_adds_every_server(self):
+        allowed = self.allowlist(ClaudeAgent(self.tmp, connectors=True))
+        self.assertIn("mcp__claude_ai_Gmail", allowed)
+        self.assertIn("mcp__plugin_superpowers-chrome_chrome", allowed)
+
+    def test_yolo_needs_no_allowlist_at_all(self):
+        self.assertIsNone(self.allowlist(ClaudeAgent(self.tmp, yolo=True)))
+
+    def test_capability_note_only_claims_connectors_when_on(self):
+        self.assertNotIn("connected apps",
+                         ClaudeAgent(self.tmp).capability_note())
+        self.assertIn("connected apps",
+                      ClaudeAgent(self.tmp, connectors=True).capability_note())
+
+    def test_note_no_longer_denies_shell_or_skills(self):
+        # the earlier note claimed non-yolo "CANNOT run shell commands";
+        # live probe: Bash ran and a Skill loaded with neither in the list
+        note = ClaudeAgent(self.tmp).capability_note()
+        self.assertIn("running shell commands", note)
+        self.assertIn("Skills", note)
+        self.assertIn("Word, PDF", note)
+
+    def test_probe_failure_grants_nothing(self):
+        relay._CLAUDE_MCP = []
+        allowed = self.allowlist(ClaudeAgent(self.tmp, connectors=True))
+        self.assertTrue(all(not a.startswith("mcp__") for a in allowed))
+
+    def test_prefix_spelling_matches_real_tool_names(self):
+        # dots/colons/spaces -> _, hyphens preserved (verified against the
+        # live `claude mcp list` output and real tool names)
+        self.assertEqual(re.sub(r"[.\s:]", "_", "claude.ai Corvaer Epicor"),
+                         "claude_ai_Corvaer_Epicor")
+        self.assertEqual(re.sub(r"[.\s:]", "_",
+                                "plugin:superpowers-chrome:chrome"),
+                         "plugin_superpowers-chrome_chrome")
 
 
 class GeminiImageHarvestTests(unittest.TestCase):
