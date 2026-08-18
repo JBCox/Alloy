@@ -568,11 +568,19 @@ def wrap_called(reply):
 
     This used to be a bare `WRAP_TOKEN in reply`, which meant a seat that merely
     *mentioned* the token -- e.g. while discussing how wrapping works -- ended the
-    conversation by accident. Requiring it to be the entire last non-empty line
-    keeps the natural usage and makes quoted discussion safe everywhere.
+    conversation by accident.
+
+    The rule is that the token must TERMINATE the reply. Requiring it to be the
+    entire last line was too strict in the other direction: seats overwhelmingly
+    play it by closing a sentence with it ("Good place to stop. [[WRAP]]"), and
+    that form would never have fired -- a silent false negative that leaves the
+    wrap mechanic looking implemented while conversations always run to the round
+    cap. Ending on the token covers both that and the on-its-own-line form, while
+    every mid-reply mention still has text after it. Quoted or code-span mentions
+    (`[[WRAP]]`, "[[WRAP]]") end on the closing mark, not the token, so they are
+    safe even in the last position.
     """
-    lines = [l.strip() for l in (reply or "").strip().splitlines() if l.strip()]
-    return bool(lines) and lines[-1] == WRAP_TOKEN
+    return (reply or "").rstrip().endswith(WRAP_TOKEN)
 
 
 def preamble(agent, others, topic, turns, workspace):
@@ -600,8 +608,9 @@ def preamble(agent, others, topic, turns, workspace):
         f"participant(s) -- you may read/write files there if useful, e.g. to "
         f"co-write a document.\n"
         f"- The conversation runs at most {turns} rounds. If the topic feels "
-        f"genuinely exhausted, put the token {WRAP_TOKEN} by itself on the last "
-        f"line of a reply to wind down. A quoted mention does not trigger it.\n"
+        f"genuinely exhausted, END a reply with the token {WRAP_TOKEN} to wind "
+        f"down -- it must be the very last thing you write. Mentioning it "
+        f"anywhere earlier, or in quotes/backticks, does not trigger it.\n"
         f"- Be yourself; disagree freely; build on each other's points.\n"
     )
 

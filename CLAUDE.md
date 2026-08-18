@@ -88,9 +88,15 @@ accepted by `app.Api._conversation`).
   both `_rounds` copies skip the round + restore `queued` instead of inventing
   "(no reply)" (sink). A fake turn hid the bug above from three agents for six
   rounds.
-- **Wrap token**: `wrap_called(reply)` fires only if `[[WRAP]]` is the ENTIRE
-  last non-empty line. A substring check let a seat end the conversation by
-  merely discussing the token. The preamble wording must stay in sync.
+- **Wrap token**: `wrap_called(reply)` fires only if the reply ENDS with
+  `[[WRAP]]` (`rstrip().endswith`). A bare substring check let a seat end the
+  conversation by merely discussing the token; requiring the token to be the
+  entire last line overcorrected — seats play it by closing a sentence
+  ("Good place to stop. [[WRAP]]"), so that form silently never fired and the
+  mechanic looked implemented while every conversation ran to the round cap.
+  Ending-on-the-token accepts both real forms; mentions have text after them,
+  and quoted/code-span mentions end on the closing mark. The preamble wording
+  must stay in sync.
 - **Two loops**: `relay._rounds`-equivalent and `app.Api._rounds` are duplicated
   round-robin implementations. Adapter fixes propagate for free; anything
   loop-shaped must be written TWICE or it only works in the terminal. Extracting
