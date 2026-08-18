@@ -21,10 +21,12 @@ from test_loop import run_rounds
 class NoteGatingTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="ai-chat-t1-")
-        self._old_probe = relay._CODEX_MULTI_AGENT
+        # one cache for every `codex features list` flag (multi_agent,
+        # image_generation, …) — stub it so no CLI is invoked
+        self._old_probe = relay._CODEX_FEATURES
 
     def tearDown(self):
-        relay._CODEX_MULTI_AGENT = self._old_probe
+        relay._CODEX_FEATURES = self._old_probe
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def pre(self, agent, spawn):
@@ -55,10 +57,10 @@ class NoteGatingTests(unittest.TestCase):
         self.assertNotIn("Delegation", self.pre(a, {"tier1": False}))
 
     def test_codex_note_follows_the_probe(self):
-        relay._CODEX_MULTI_AGENT = True
+        relay._CODEX_FEATURES = {"multi_agent": True}
         self.assertIn("multi-agent",
                       self.pre(CodexAgent(self.tmp), {"tier1": True}))
-        relay._CODEX_MULTI_AGENT = False
+        relay._CODEX_FEATURES = {"multi_agent": False}
         self.assertNotIn("Delegation",
                          self.pre(CodexAgent(self.tmp), {"tier1": True}))
 

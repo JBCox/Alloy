@@ -334,6 +334,19 @@ class Agent:
                                             output=stdout, stderr=stderr)
         return rc, stdout, stderr
 
+    def capability_note(self):
+        """One short clause: what THIS seat can actually do that matters when
+        the group decides who should take a task, or None.
+
+        Same hard contract as native_spawn_note() — it must describe what
+        build_cmd actually grants on THIS install, because a seat that is
+        told a peer can do something it can't will hand off into silence.
+        Equally, staying silent has a cost: with no capability line at all,
+        every seat assumes it must attempt everything itself (Claude drawing
+        an image in code while GPT, which has a real image tool, waits its
+        turn — the bug this exists to fix)."""
+        return None
+
     def activity(self, line):
         """Hook: map ONE raw stdout line to zero or more activity dicts
         ({kind, text[, path_raw]}). Best-effort narration only — unknown
@@ -517,6 +530,15 @@ class ClaudeAgent(Agent):
             return [{"kind": "tool", "text": "subagent: " + d}] if d else []
         return [{"kind": "tool", "text": "tool: " + _clip(name, 60)}] if name else []
 
+    def capability_note(self):
+        # Tracks build_cmd's two branches: the non-yolo allowlist has no
+        # Bash, so this seat genuinely cannot run anything it writes.
+        can = ["web search", "reading and writing files in the shared folder"]
+        if self.yolo:
+            can.append("running shell commands")
+        return (f"{', '.join(can)}. CANNOT generate images "
+                f"(no image tool exists on this CLI)")
+
     def native_spawn_note(self):
         # true for BOTH build_cmd branches: yolo allows everything, non-yolo
         # has Task in the allowlist
@@ -681,6 +703,16 @@ class CodexAgent(Agent):
             return [{"kind": "tool", "text": "tool: " + nm}] if nm else ()
         return ()
 
+    def capability_note(self):
+        can = ["web search", "running shell commands",
+               "reading and writing files in the shared folder"]
+        if codex_image_gen_enabled():
+            # verified end-to-end through this exact adapter, 2026-08-17:
+            # the PNG lands in the shared workspace, non-yolo included
+            can.append("GENERATING IMAGES with a built-in image tool, saved "
+                       "straight into the shared folder")
+        return ", ".join(can)
+
     def native_spawn_note(self):
         if codex_multi_agent_enabled():
             return ("You may use your built-in multi-agent/collab tools for "
@@ -688,18 +720,19 @@ class CodexAgent(Agent):
         return None
 
 
-_CODEX_MULTI_AGENT = None
+_CODEX_FEATURES = None
 
 
-def codex_multi_agent_enabled():
-    """Is codex's native multi-agent feature enabled on this install?
+def codex_features():
+    """Every flag from `codex features list` ("<name> <status> <bool>").
 
-    `codex features list` spends no tokens; cached for the process lifetime.
-    Any failure -> False: never tell a seat it can spawn on a guess. Call from
-    loop/worker threads only — never the pywebview bridge thread."""
-    global _CODEX_MULTI_AGENT
-    if _CODEX_MULTI_AGENT is None:
-        enabled = False
+    Spends no tokens; cached for the process lifetime. Any failure -> {}, so
+    every caller degrades to "not available": a preamble must never promise a
+    capability the CLI doesn't grant. Call from loop/worker threads only —
+    never the pywebview bridge thread (subprocess there deadlocks)."""
+    global _CODEX_FEATURES
+    if _CODEX_FEATURES is None:
+        flags = {}
         try:
             r = subprocess.run(
                 resolve_cmd(["codex", "features", "list"]),
@@ -709,13 +742,28 @@ def codex_multi_agent_enabled():
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             for line in (r.stdout or "").splitlines():
                 toks = line.split()
-                if toks and toks[0] == "multi_agent":
-                    enabled = toks[-1].lower() == "true"
-                    break
+                if len(toks) >= 2:
+                    flags[toks[0]] = toks[-1].lower() == "true"
         except Exception:
-            enabled = False
-        _CODEX_MULTI_AGENT = enabled
-    return _CODEX_MULTI_AGENT
+            flags = {}
+        _CODEX_FEATURES = flags
+    return _CODEX_FEATURES
+
+
+def codex_multi_agent_enabled():
+    """Is codex's native multi-agent feature enabled on this install?"""
+    return codex_features().get("multi_agent", False)
+
+
+def codex_image_gen_enabled():
+    """Does this codex install expose the built-in image tool?
+
+    Verified live 2026-08-17: with `image_generation` stable/true, `codex
+    exec` in the relay's own non-yolo sandbox generated a photorealistic PNG
+    and wrote it INTO the shared workspace. This is the capability the app
+    was silently failing to use — Claude would attempt an image in code
+    because nothing told it GPT could simply make one."""
+    return codex_features().get("image_generation", False)
 
 
 class GeminiAgent(Agent):
@@ -744,6 +792,17 @@ class GeminiAgent(Agent):
             # can't answer interactive permission prompts, it would just stall
             cmd += ["--dangerously-skip-permissions", "--sandbox"]
         return cmd
+
+    def capability_note(self):
+        # agy HAS a generate_image tool, deliberately NOT claimed here:
+        # verified twice (sandboxed and yolo, 2026-08-17) it writes the file
+        # into agy's OWN scratch dir (~/.gemini/antigravity-cli/scratch) and
+        # then reports it as "the current working directory" — agy ignores
+        # the process cwd for file writes. An image nobody else can see is
+        # not a capability the group can route work to.
+        return ("web search and web browsing. Can generate images, but they "
+                "land in a private folder the others cannot see, so it is "
+                "NOT the seat for an image the group needs")
 
     def parse(self, stdout):
         data = json.loads(stdout[stdout.find("{"):])
@@ -2127,6 +2186,26 @@ def preamble(agent, others, topic, turns, workspace, roster=None,
             "back.\n")
     if role_block:
         role_block += "\n"
+    # Who can do what. Without this every seat assumed it had to attempt
+    # everything itself: asked for an image in a Claude+GPT chat, Claude drew
+    # one in code because nothing told it GPT has a real image tool, and the
+    # turn order gave Claude the floor first. Names alone are not a
+    # capability map, and a model guessing from brand knowledge guesses
+    # wrong (it would defer image work to whichever name it associates with
+    # pictures, not to the seat whose CLI actually ships the tool).
+    cap_lines = [f"- {a.name}: {a.capability_note()}."
+                 for a in seated if a.capability_note()]
+    cap_block = ""
+    if len(cap_lines) > 1:
+        cap_block = (
+            "What each participant can actually do here (their CLIs differ "
+            "-- do not assume from the model name):\n"
+            + "\n".join(cap_lines)
+            + "\n- If a request needs something you cannot do and another "
+              "participant can, say so plainly and let them do it instead of "
+              "approximating it yourself. If it is your turn and the work "
+              "belongs to someone else, hand it over in one short line "
+              "rather than half-doing it.\n\n")
     # Tier-1 spawning (ORCHESTRATION_DESIGN.md): the note and the capability
     # toggle together — native_spawn_note() reflects what build_cmd actually
     # grants, and the policy gate hides it entirely when tier1 is off.
@@ -2280,6 +2359,7 @@ def preamble(agent, others, topic, turns, workspace, roster=None,
         f"{role_block}"
         f"{topic_line}"
         f"{brief_preamble_block(brief, agent)}"
+        f"{cap_block}"
         f"{spawn_block}"
         f"{ask_block}"
         f"Ground rules:\n"
