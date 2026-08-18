@@ -1969,7 +1969,7 @@ $("filesRefresh").onclick = e => { e.stopPropagation(); refreshFiles(); };
 // writers with no event stream (Gemini). Changed lines highlight in the
 // editing seat's color — the previous snapshot lives here in JS.
 const editing = new Map();     // lowercased relpath -> {provider, timer}
-let codeFile = null, codeProv = null, codeLines = null, codeMtime = null;
+let codeFile = null, codeProv = null, codeLines = null, codeText = null;
 let codeBusy = false, codePoll = null;
 
 function onEditActivity(path, provider) {
@@ -1998,7 +1998,7 @@ function onEditActivity(path, provider) {
 }
 
 function openCode(path, provider, absFallback) {
-  if (codeFile !== path) { codeLines = null; codeMtime = null; }
+  if (codeFile !== path) { codeLines = null; codeText = null; }
   codeFile = path;
   if (provider) codeProv = provider;
   $("fileRail").classList.add("code-open");
@@ -2033,8 +2033,11 @@ async function fetchCode(absFallback) {
     body.appendChild(n);
     return;
   }
-  if (r.mtime !== null && r.mtime === codeMtime) return;   // unchanged
-  codeMtime = r.mtime;
+  // Compare CONTENT, not mtime: the poll and the edit event race for the
+  // same write, and a second render of identical text would erase the
+  // highlight the first one just drew (the change would flash and vanish).
+  if (r.text === codeText) return;
+  codeText = r.text;
   const lines = r.text.split("\n");
   // cheap change detection: common prefix + suffix vs the last snapshot;
   // the middle band is "what just changed"
@@ -2070,7 +2073,7 @@ async function fetchCode(absFallback) {
 }
 
 function closeCode() {
-  codeFile = null; codeProv = null; codeLines = null; codeMtime = null;
+  codeFile = null; codeProv = null; codeLines = null; codeText = null;
   $("fileRail").classList.remove("code-open");
   $("codeBody").innerHTML = "";
   if (codePoll) { clearInterval(codePoll); codePoll = null; }

@@ -420,6 +420,103 @@ class LoopActivityTests(unittest.TestCase):
                          f"n{ACTIVITY_KEEP + 29}")
 
 
+class HeadlessAppActivityTests(unittest.TestCase):
+    """The full chain the UI depends on: a seat's activity -> the sink ->
+    Api.emit's queue -> the window. RecordingIO tests stop at the engine;
+    this one asserts what the browser layer actually receives."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ai-chat-appact-test-")
+        self._old_sessions = app.SESSIONS_DIR
+        app.SESSIONS_DIR = self.tmp
+        self._old_types = dict(relay.AGENT_TYPES)
+
+    def tearDown(self):
+        app.SESSIONS_DIR = self._old_sessions
+        relay.AGENT_TYPES.clear()
+        relay.AGENT_TYPES.update(self._old_types)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def agent_class(self, name_, acts):
+        class Scripted(Agent):
+            name = name_
+            cli = "fake"
+
+            def turn(self, message, on_activity=None):
+                self.session_id = f"fake-session-{self.uid}"
+                if on_activity:
+                    for a in acts:
+                        on_activity(dict(a))
+                return f"{name_} done"
+        return Scripted
+
+    def test_edit_activity_reaches_the_window_with_a_relative_path(self):
+        proj = os.path.join(self.tmp, "proj")
+        os.makedirs(os.path.join(proj, "src"))
+        edited = os.path.join(proj, "src", "main.py")
+        with open(edited, "w", encoding="utf-8") as f:
+            f.write("x = 1\n")
+        relay.AGENT_TYPES["claude"] = self.agent_class("Claude", [
+            {"kind": "progress", "text": "thinking… 40 tokens"},
+            {"kind": "command", "text": "$ pytest"},
+            # absolute path, exactly as a CLI stream reports it
+            {"kind": "edit", "text": "editing main.py", "path_raw": edited},
+            # an escape attempt in the same turn must vanish entirely
+            {"kind": "edit", "text": "editing hosts",
+             "path_raw": r"..\..\Windows\System32\drivers\etc\hosts"},
+        ])
+        relay.AGENT_TYPES["gpt"] = self.agent_class("GPT", [])
+        api = app.Api()
+        api._window = FakeWindow()
+        api._conversation({"opener": "go", "turns": 1, "workspace": proj,
+                           "brief": False,
+                           "seats": [{"id": 0, "provider": "claude",
+                                      "enabled": True},
+                                     {"id": 1, "provider": "gpt",
+                                      "enabled": True}]})
+        api._emit_q.join()
+        events = api._window.events()
+
+        acts = [e["payload"] for e in events if e["event"] == "activity"]
+        self.assertEqual([a["kind"] for a in acts],
+                         ["progress", "command", "edit"])
+        edit = acts[-1]
+        # the UI keys rail rows by workspace-relative path
+        self.assertEqual(edit["path"], os.path.join("src", "main.py"))
+        self.assertEqual(edit["speaker"], 0)
+        self.assertEqual(edit["provider"], "claude")
+        # ...and the escape produced NO event at all
+        self.assertTrue(all("hosts" not in a["text"] for a in acts))
+
+        # the landed message carries the persisted steps (progress excluded)
+        msg = [e["payload"] for e in events
+               if e["event"] == "message" and e["payload"].get("name") == "Claude"][-1]
+        self.assertEqual([a["kind"] for a in msg["activity"]],
+                         ["command", "edit"])
+        self.assertIn("ts", msg)
+
+        # and the viewer can actually read the file the UI was told about
+        self.assertEqual(api.read_text(edit["path"])["text"], "x = 1\n")
+
+    def test_activity_events_precede_the_message_event(self):
+        relay.AGENT_TYPES["claude"] = self.agent_class(
+            "Claude", [{"kind": "read", "text": "reading a.txt"}])
+        relay.AGENT_TYPES["gpt"] = self.agent_class("GPT", [])
+        api = app.Api()
+        api._window = FakeWindow()
+        api._conversation({"opener": "go", "turns": 1,
+                           "seats": [{"id": 0, "provider": "claude",
+                                      "enabled": True},
+                                     {"id": 1, "provider": "gpt",
+                                      "enabled": True}]})
+        api._emit_q.join()
+        names = [e["event"] for e in api._window.events()]
+        # FIFO across producers: narration lands while the seat is thinking
+        self.assertLess(names.index("thinking"), names.index("activity"))
+        self.assertLess(names.index("activity"),
+                        len(names) - 1 - names[::-1].index("message"))
+
+
 class ReadTextBridgeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="ai-chat-readtext-test-")
