@@ -34,6 +34,12 @@ import uuid
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSIONS_DIR = os.path.join(BASE_DIR, "sessions")
 TURN_TIMEOUT = 300  # seconds per agent turn (base; scaled by effort below)
+# Where agy parks everything a conversation produces, including generated
+# images (one folder per conversation id). It writes here regardless of the
+# process cwd — see GeminiAgent.harvest_images.
+GEMINI_BRAIN = os.path.join(os.path.expanduser("~"), ".gemini",
+                            "antigravity-cli", "brain")
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 # High reasoning efforts do real multi-minute work on real repos; give them
 # room instead of killing legitimate turns at the base window.
 TIMEOUT_SCALE = {"high": 2, "xhigh": 3, "max": 3, "ultra": 3}
@@ -794,19 +800,77 @@ class GeminiAgent(Agent):
         return cmd
 
     def capability_note(self):
-        # agy HAS a generate_image tool, deliberately NOT claimed here:
-        # verified twice (sandboxed and yolo, 2026-08-17) it writes the file
-        # into agy's OWN scratch dir (~/.gemini/antigravity-cli/scratch) and
-        # then reports it as "the current working directory" — agy ignores
-        # the process cwd for file writes. An image nobody else can see is
-        # not a capability the group can route work to.
-        return ("web search and web browsing. Can generate images, but they "
-                "land in a private folder the others cannot see, so it is "
-                "NOT the seat for an image the group needs")
+        # The name matters: agy's tool reports "<name>_<epoch-ms>.jpg" and
+        # harvest_images strips that suffix, so a seat quoting the raw tool
+        # path sends the others hunting for a file that isn't there (seen
+        # live 2026-08-17 — Claude had to glob the folder to find it).
+        return ("web search, web browsing, and GENERATING IMAGES with a "
+                "built-in image tool — the relay copies each one into the "
+                "shared folder under the plain name you chose (any "
+                "_<numbers> suffix removed), so call it by that plain name")
+
+    def before_run(self):
+        # Snapshot first so a resumed conversation only harvests THIS turn's
+        # images (the brain dir keeps every image the conversation ever made).
+        self._seen_images = set(self._brain_images())
+
+    def _brain_dir(self):
+        """agy's per-conversation store, named for the conversation id."""
+        if not self.session_id:
+            return None
+        return os.path.join(GEMINI_BRAIN, self.session_id)
+
+    def _brain_images(self):
+        d = self._brain_dir()
+        if not d:
+            return []
+        try:
+            names = os.listdir(d)
+        except OSError:
+            return []
+        return [os.path.join(d, n) for n in sorted(names)
+                if n.lower().endswith(IMAGE_EXTS)]
+
+    def harvest_images(self):
+        """Copy this turn's generated images into the shared workspace.
+
+        agy IGNORES the process cwd for file writes (verified sandboxed AND
+        yolo, 2026-08-17): `generate_image` drops the file in
+        ~/.gemini/antigravity-cli/brain/<conversation-id>/ and the model then
+        reports it as being "in the current working directory" — so the image
+        was real, the claim was sincere, and nothing ever reached the folder
+        the other seats and the Files rail can see. Copying it here is the
+        only mechanism that does not depend on the model cooperating, and it
+        works in sandbox mode too because the RELAY does the copy, not the
+        sandboxed CLI. Never raises: an image that fails to copy must not
+        take down an otherwise good turn."""
+        seen = getattr(self, "_seen_images", set())
+        copied = []
+        for src in self._brain_images():
+            if src in seen:
+                continue
+            stem, ext = os.path.splitext(os.path.basename(src))
+            # generate_image appends _<epoch-ms>; keep the name the model used
+            stem = re.sub(r"_\d{10,}$", "", stem) or "image"
+            dest = os.path.join(self.workspace, stem + ext)
+            n = 2
+            while os.path.exists(dest):
+                dest = os.path.join(self.workspace, f"{stem}-{n}{ext}")
+                n += 1
+            try:
+                shutil.copy2(src, dest)
+            except OSError:
+                continue
+            copied.append(dest)
+        self._seen_images = seen | set(self._brain_images())
+        return copied
 
     def parse(self, stdout):
         data = json.loads(stdout[stdout.find("{"):])
         self.session_id = data.get("conversation_id", self.session_id)
+        # after session_id: the brain dir is named for it, and a FIRST turn
+        # only learns the id here
+        self.last_images = self.harvest_images()
         return (data.get("response") or "").strip()
 
 

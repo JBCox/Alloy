@@ -10,7 +10,9 @@ Token-free: no CLI is invoked (codex_features is stubbed).
 Run:  python tests/test_capabilities.py
 """
 
+import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -60,12 +62,112 @@ class CapabilityNoteTests(CapabilityBase):
         relay._CODEX_FEATURES = {}
         self.assertNotIn("IMAGE", CodexAgent(self.tmp).capability_note().upper())
 
-    def test_gemini_does_not_offer_itself_for_image_work(self):
-        # it HAS the tool but writes into its own private dir (verified) —
-        # an image the others cannot see is not a routable capability
+    def test_gemini_claims_images_because_the_relay_delivers_them(self):
         note = GeminiAgent(self.tmp).capability_note()
-        self.assertIn("NOT the seat", note)
-        self.assertIn("private", note)
+        self.assertIn("GENERATING IMAGES", note)
+        self.assertIn("shared folder", note)
+
+
+class GeminiImageHarvestTests(unittest.TestCase):
+    """agy writes generated images into its own per-conversation folder and
+    ignores the process cwd, so the relay copies them into the workspace."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ai-chat-harvest-")
+        self.ws = os.path.join(self.tmp, "workspace")
+        self.brain = os.path.join(self.tmp, "brain")
+        os.makedirs(self.ws)
+        self._old_brain = relay.GEMINI_BRAIN
+        relay.GEMINI_BRAIN = self.brain
+
+    def tearDown(self):
+        relay.GEMINI_BRAIN = self._old_brain
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def agent(self, convo="convo-1"):
+        a = GeminiAgent(self.ws)
+        a.session_id = convo
+        return a
+
+    def brain_file(self, name, convo="convo-1", data=b"\x89PNG-ish"):
+        d = os.path.join(self.brain, convo)
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, name)
+        with open(p, "wb") as f:
+            f.write(data)
+        return p
+
+    def test_copies_new_images_into_the_workspace(self):
+        a = self.agent()
+        a.before_run()
+        self.brain_file("apple_1786992618499.jpg")
+        copied = a.harvest_images()
+        self.assertEqual([os.path.basename(p) for p in copied], ["apple.jpg"])
+        # the epoch-ms suffix generate_image appends is stripped
+        self.assertTrue(os.path.isfile(os.path.join(self.ws, "apple.jpg")))
+
+    def test_ignores_images_from_earlier_turns(self):
+        a = self.agent()
+        self.brain_file("old_1786000000000.jpg")
+        a.before_run()                      # snapshot: old one already there
+        self.brain_file("new_1786992618499.jpg")
+        copied = a.harvest_images()
+        self.assertEqual([os.path.basename(p) for p in copied], ["new.jpg"])
+        self.assertFalse(os.path.exists(os.path.join(self.ws, "old.jpg")))
+
+    def test_never_overwrites_an_existing_file(self):
+        with open(os.path.join(self.ws, "apple.jpg"), "wb") as f:
+            f.write(b"mine")
+        a = self.agent()
+        a.before_run()
+        self.brain_file("apple_1786992618499.jpg")
+        copied = a.harvest_images()
+        self.assertEqual([os.path.basename(p) for p in copied], ["apple-2.jpg"])
+        with open(os.path.join(self.ws, "apple.jpg"), "rb") as f:
+            self.assertEqual(f.read(), b"mine")
+
+    def test_non_images_are_left_alone(self):
+        a = self.agent()
+        a.before_run()
+        self.brain_file("notes_1786992618499.txt")
+        self.assertEqual(a.harvest_images(), [])
+
+    def test_missing_brain_dir_is_not_an_error(self):
+        a = self.agent(convo="never-ran")
+        a.before_run()
+        self.assertEqual(a.harvest_images(), [])
+
+    def test_no_session_id_yet_is_not_an_error(self):
+        a = GeminiAgent(self.ws)            # fresh conversation, no id
+        a.before_run()
+        self.assertEqual(a.harvest_images(), [])
+
+    def test_parse_harvests_using_the_id_it_just_learned(self):
+        # a FIRST turn only learns the conversation id from this very reply,
+        # so the harvest has to run after session_id is set
+        a = GeminiAgent(self.ws)
+        a.before_run()
+        self.brain_file("pear_1786993636710.jpg", convo="fresh-id")
+        reply = a.parse(json.dumps({"conversation_id": "fresh-id",
+                                    "response": "Here is the pear."}))
+        self.assertEqual(reply, "Here is the pear.")
+        self.assertEqual([os.path.basename(p) for p in a.last_images],
+                         ["pear.jpg"])
+        self.assertTrue(os.path.isfile(os.path.join(self.ws, "pear.jpg")))
+
+    def test_a_copy_failure_never_breaks_the_turn(self):
+        a = self.agent()
+        a.before_run()
+        self.brain_file("apple_1786992618499.jpg")
+        orig = relay.shutil.copy2
+
+        def boom(*args, **kw):
+            raise OSError("disk gone")
+        relay.shutil.copy2 = boom
+        try:
+            self.assertEqual(a.harvest_images(), [])
+        finally:
+            relay.shutil.copy2 = orig
 
 
 class PreambleCapabilityBlockTests(CapabilityBase):
