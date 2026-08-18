@@ -32,9 +32,9 @@ def par_state(tmp, scripts, turns=3, labels=None, jitter=0.0):
     if jitter:
         for a in state["agents"]:
             real_turn = a.turn
-            def jittered(message, _real=real_turn):
+            def jittered(message, on_activity=None, _real=real_turn):
                 time.sleep(random.uniform(0, jitter))
-                return _real(message)
+                return _real(message, on_activity=on_activity)
             a.turn = jittered
     return state
 
@@ -164,7 +164,7 @@ class GatedAgent(FakeAgent):
         self.gate = threading.Event()
         self.entered = threading.Event()
 
-    def turn(self, message):
+    def turn(self, message, on_activity=None):
         self.entered.set()
         if not self.gate.wait(timeout=10):
             raise RuntimeError("test gate never opened")
@@ -325,6 +325,54 @@ class AppParallelTests(unittest.TestCase):
         done = events[-1]
         self.assertEqual(done["event"], "done")
         self.assertTrue(done["payload"]["can_continue"])
+
+
+class ParallelAskTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ai-chat-par-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_ask_mid_round_without_holding_the_lock(self):
+        from test_ask import AskIO
+
+        state = par_state(self.tmp,
+                          [["q [[ASK: pick | A | B]]", "a2"],
+                           ["b1", "b2"]], turns=2, labels=["A", "B"])
+        probe = {}
+
+        class LockProbeAskIO(AskIO):
+            def ask_human(self, payload, abort=None):
+                # a DIFFERENT thread must be able to take state["lock"]
+                # while the asking seat waits (RLock reentrancy would let
+                # the owner thread lie to us, so probe from outside)
+                res = {}
+
+                def try_lock():
+                    got = state["lock"].acquire(timeout=2)
+                    res["got"] = got
+                    if got:
+                        state["lock"].release()
+                t = threading.Thread(target=try_lock)
+                t.start()
+                t.join()
+                probe["lock_free"] = res.get("got", False)
+                time.sleep(0.1)          # let the barrier visibly wait on us
+                return super().ask_human(payload, abort=abort)
+
+        state["ask"] = True
+        io = LockProbeAskIO(answers=["A"])
+        outcome = run_rounds(state, io)
+        self.assertEqual(outcome, "cap")
+        self.assertTrue(probe["lock_free"],
+                        "ask_human ran with state['lock'] held")
+        self.assertEqual(len(io.asked), 1)
+        # both seats saw the answer in a later prompt
+        for ag in state["agents"]:
+            self.assertTrue(any("Josh (human) answers: A" in p
+                                for p in ag.prompts), ag.name)
+        self.assertIsNone(state.get("ask_pending"))
 
 
 if __name__ == "__main__":

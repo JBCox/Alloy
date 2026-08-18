@@ -6,6 +6,7 @@ mirrors relay.py's round-robin engine and reuses its Agent adapters verbatim.
 """
 
 import base64
+import ctypes
 import datetime
 import json
 import os
@@ -13,6 +14,7 @@ import queue
 import re
 import shutil
 import subprocess
+import sys
 import threading
 
 import webview
@@ -21,12 +23,59 @@ from relay import (AGENT_TYPES, PROVIDERS, SESSIONS_DIR, HELP_TEXT,
                    MODES, DEFAULT_MODE, IMPLEMENTED_MODES, DEFAULT_CEILING,
                    assign_labels, compact_agent, resolve_cmd, clean_env,
                    logout_gemini,
+                   error_excerpt,
                    LoopIO, run_rounds, dispatch_command,
                    SessionStore, make_log, read_meta, read_messages,
                    session_summary,
+                   project_brief, write_project_context, read_project_context,
+                   brief_drift,
                    list_sessions as stored_sessions, session_path, rehydrate)
 
 AGENT_ORDER = ["claude", "gpt", "gemini"]
+
+# ------------------------------------------------------- file/image viewing --
+# The bridge serves ONLY files beneath the ACTIVE session's workspace (the
+# same contract the adapters live under). Allowed image types + a byte cap,
+# returned as data URIs — file:// does not reliably load in WebView2 from the
+# app's own origin, so this mirrors save_attachments' base64 path in reverse.
+IMAGE_MIME = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+    ".ico": "image/x-icon",
+}
+IMAGE_MAX_BYTES = 15 * 1024 * 1024   # matches the composer's attachment cap
+THUMB_EDGE = 320                     # thumbnail bytes first; full res on click
+FILE_LIST_MAX = 200                  # rows returned to the Files rail
+FILE_SCAN_MAX = 4000                 # walk budget for huge picked folders
+TEXT_MAX_BYTES = 256 * 1024          # live code viewer read cap
+
+
+# Moved to relay.py (the activity sink confines CLI-quoted paths engine-side);
+# re-exported here so the bridge methods and tests keep their import.
+from relay import confine_to_workspace
+
+
+def _thumb_bytes(path):
+    """Downscaled bytes for a thumbnail, or (None, None) to fall back to the
+    original file (tiny images, corrupt files, Pillow missing)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None, None
+    import io
+    try:
+        with Image.open(path) as im:
+            if max(im.size) <= THUMB_EDGE:
+                return None, None            # already small — original wins
+            im.thumbnail((THUMB_EDGE, THUMB_EDGE))
+            buf = io.BytesIO()
+            if im.mode in ("RGBA", "LA", "P"):
+                im.save(buf, "PNG")
+                return buf.getvalue(), "image/png"
+            im.convert("RGB").save(buf, "JPEG", quality=82)
+            return buf.getvalue(), "image/jpeg"
+    except Exception:
+        return None, None
 
 
 def save_attachments(files, workspace):
@@ -96,6 +145,29 @@ class _AppIO(LoopIO):
         if self._api._staged_roles:
             self._api._commit_roles(state)
 
+    def ask_human(self, payload, abort=None):
+        # Runs on the conversation worker / a seat thread, NEVER the bridge
+        # thread. emit is a pure enqueue, so blocking here never stalls the
+        # UI. _ask_lock serializes simultaneous questions (parallel mode) into
+        # consecutive modals instead of stacked ones; it is app-level only, so
+        # no lock-order interaction with state["lock"].
+        api = self._api
+        q = queue.Queue()
+        with api._ask_lock:
+            api._ask_waiters[payload["qid"]] = q
+            api.emit("question", payload)
+            try:
+                while True:
+                    if api._stop_flag.is_set() or (abort and abort()):
+                        return None
+                    try:
+                        return q.get(timeout=0.5)
+                    except queue.Empty:
+                        pass
+            finally:
+                api._ask_waiters.pop(payload["qid"], None)
+                api.emit("question_done", {"qid": payload["qid"]})
+
 
 class Api:
     def __init__(self):
@@ -104,6 +176,7 @@ class Api:
         self._stop_flag = threading.Event()
         self._human_q = queue.Queue()
         self._session_dir = None
+        self._view_workspace = None    # reopened view-only chat's workspace
         self._config_cache = None
         self._config_ready = threading.Event()
         self._conv = None  # finished-conversation state, kept for continuation
@@ -111,6 +184,8 @@ class Api:
         self._auth_lock = threading.Lock()
         self._login_procs = {}         # provider id -> Popen of open login console
         self._staged_roles = {}        # seat index -> staged role change (apply_role)
+        self._ask_waiters = {}         # qid -> Queue awaiting answer_question
+        self._ask_lock = threading.Lock()
         self._roles_lock = threading.Lock()
         self._roles_busy = False       # an idle-path commit worker is running
         # Serialized emitter: evaluate_js is only ever called from ONE thread
@@ -279,6 +354,102 @@ class Api:
     def open_path(self, path):
         if path and os.path.exists(path):
             os.startfile(path)
+
+    # ------------------------------------------------- file/image viewing --
+    # Bridge-thread rules apply: bounded file I/O and Pillow only — no
+    # subprocess, no unbounded walks. Errors come back as {"error": …} so the
+    # UI can render a quiet placeholder instead of a broken tag.
+
+    def _active_workspace(self):
+        """The LIVE workspace value: the running/continuable conversation's,
+        else the reopened (view-only) chat's. Never rebuilt from a session id."""
+        return (self._conv or {}).get("workspace") or self._view_workspace
+
+    def read_image(self, path, full=False):
+        ws = self._active_workspace()
+        if not ws:
+            return {"error": "No active conversation workspace."}
+        real = confine_to_workspace(ws, path)
+        if not real or not os.path.isfile(real):
+            # out-of-bounds and missing look identical on purpose: the reply
+            # must not disclose whether a forbidden path exists
+            return {"error": "not available"}
+        mime = IMAGE_MIME.get(os.path.splitext(real)[1].lower())
+        if not mime:
+            return {"error": "not an image"}
+        try:
+            if os.path.getsize(real) > IMAGE_MAX_BYTES:
+                return {"error": "image too large to preview"}
+            data = None
+            if not full:
+                data, tmime = _thumb_bytes(real)
+                if data is not None:
+                    mime = tmime
+            if data is None:
+                with open(real, "rb") as f:
+                    data = f.read()
+        except OSError:
+            return {"error": "not available"}
+        return {"ok": True, "name": os.path.basename(real),
+                "data_uri": f"data:{mime};base64,"
+                            f"{base64.b64encode(data).decode('ascii')}"}
+
+    def read_text(self, path, max_bytes=None):
+        """Text of a workspace file for the live code viewer. Mirrors
+        read_image's posture exactly: confined path, and forbidden/missing
+        are the IDENTICAL quiet error (no existence disclosure)."""
+        ws = self._active_workspace()
+        if not ws:
+            return {"error": "No active conversation workspace."}
+        real = confine_to_workspace(ws, path)
+        if not real or not os.path.isfile(real):
+            return {"error": "not available"}
+        cap = int(max_bytes or TEXT_MAX_BYTES)
+        cap = max(1, min(cap, TEXT_MAX_BYTES))
+        try:
+            st = os.stat(real)
+            with open(real, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read(cap)
+        except OSError:
+            return {"error": "not available"}
+        if "\x00" in text[:4096]:
+            return {"error": "not a text file"}
+        return {"ok": True, "name": os.path.basename(real),
+                "path": os.path.relpath(real, os.path.realpath(ws)),
+                "text": text, "truncated": st.st_size > cap,
+                "mtime": st.st_mtime}
+
+    def list_workspace_files(self):
+        ws = self._active_workspace()
+        if not ws or not os.path.isdir(ws):
+            return {"workspace": None, "files": []}
+        root = os.path.realpath(ws)
+        skip = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+        rows, scanned = [], 0
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames
+                           if d not in skip and not d.startswith(".")]
+            for fn in filenames:
+                scanned += 1
+                if scanned > FILE_SCAN_MAX:
+                    dirnames[:] = []
+                    break
+                full = os.path.join(dirpath, fn)
+                try:
+                    st = os.stat(full)
+                except OSError:
+                    continue
+                rows.append({
+                    "name": fn,
+                    "path": os.path.relpath(full, root),
+                    "abs": full,
+                    "size": st.st_size, "mtime": st.st_mtime,
+                    "is_image": os.path.splitext(fn)[1].lower() in IMAGE_MIME})
+            if scanned > FILE_SCAN_MAX:
+                break
+        rows.sort(key=lambda r: r["mtime"], reverse=True)
+        return {"workspace": root, "files": rows[:FILE_LIST_MAX],
+                "truncated": scanned > FILE_SCAN_MAX or len(rows) > FILE_LIST_MAX}
 
     # ------------------------------------------------------------ accounts --
     # get_auth_status is called on the js-bridge thread: it must stay
@@ -461,6 +632,10 @@ class Api:
                     "Saved chat state is incomplete — view only"
 
         self._session_dir = path
+        # view-only chats have no live state; the Files rail and inline
+        # previews still need THIS chat's recorded workspace (may be gone —
+        # confine/read handle that with placeholders, never a broken tag)
+        self._view_workspace = summary.get("workspace") or None
         while not self._human_q.empty():
             self._human_q.get_nowait()
 
@@ -471,6 +646,10 @@ class Api:
             # same logger the live loops use — a second copy here is how a
             # reopened chat's rows start drifting from a fresh one's
             state["log"] = make_log(state, store)
+            # Patched here rather than inside rehydrate(): rehydrate takes no
+            # session_dir and deliberately refuses to trust meta["id"] as a
+            # path, while open_session already holds the validated one.
+            state["brief"] = read_project_context(path, meta)
         self._conv = state
         return {"ok": True, "session": summary, "messages": messages}
 
@@ -520,6 +699,7 @@ class Api:
         if active:
             self._conv = None
             self._session_dir = None
+            self._view_workspace = None
         try:
             shutil.rmtree(path)
         except OSError as e:
@@ -564,6 +744,7 @@ class Api:
             except (OSError, KeyError):
                 pass
         self._conv = None
+        self._view_workspace = None
         return {"ok": True}
 
     def interject(self, text, files=None):
@@ -579,6 +760,15 @@ class Api:
         if text:
             self._human_q.put(text)
         return {"ok": True, "text": text}
+
+    def answer_question(self, qid, text):
+        """Answer (or skip, with empty text) a seat's [[ASK]] question.
+        Bridge-thread safe: a pure queue put, like interject."""
+        q = self._ask_waiters.get(qid)
+        if not q:
+            return {"error": "That question is no longer waiting."}
+        q.put((text or "").strip())
+        return {"ok": True}
 
     def command(self, text):
         text = (text or "").strip()
@@ -655,7 +845,7 @@ class Api:
                         self._roles_busy = False
                         return
         except Exception as e:                       # never strand the flag
-            self.emit("status", {"text": f"Role change failed: {str(e)[:200]}"})
+            self.emit("status", {"text": f"Role change failed: {error_excerpt(e)}"})
             with self._roles_lock:
                 self._roles_busy = False
 
@@ -812,6 +1002,7 @@ class Api:
             (attachments[0].get("name", "") if attachments else "")
         slug = re.sub(r"[^a-z0-9]+", "-", title_src.lower())[:40].strip("-") or "chat"
         self._session_dir = os.path.join(SESSIONS_DIR, f"{stamp}-{slug}")
+        self._view_workspace = None      # the live _conv is authoritative now
         workspace = cfg.get("workspace") or os.path.join(self._session_dir, "workspace")
         os.makedirs(self._session_dir, exist_ok=True)
         os.makedirs(workspace, exist_ok=True)
@@ -857,6 +1048,8 @@ class Api:
                       "max_teams": max(0, int((cfg.get("spawn") or {})
                                               .get("max_teams") or 0)),
                       "teams_used": 0},
+            # the app always has a human watching — seats may [[ASK]] Josh
+            "ask": True,
         }
         state["log"] = log = make_log(state, store)
         self._conv = state
@@ -878,10 +1071,27 @@ class Api:
                 for i in range(len(picked))],
         })
 
+        # After `started` so a slow read shows a status line instead of a
+        # frozen window, and BEFORE the opener because compose_prompt prepends
+        # the preamble to the very first prompt — the block has to be in state
+        # by then. Safe to spend a subprocess here: this is the worker thread
+        # `start` spawned, not the js-bridge thread.
+        def brief_status_row(text):
+            store.system(text, round=0)
+            self.emit("status", {"text": text})
+
+        brief = project_brief(workspace, self._session_dir,
+                              enabled=cfg.get("brief", True),
+                              on_status=brief_status_row)
+        if brief.get("status") != "off":
+            state["brief"] = brief
+            write_project_context(self._session_dir, brief)
+            store.save(state)
+
         if opener:
-            log("Josh (human)", opener)
-            self.emit("message", {"speaker": "josh", "name": "Josh",
-                                  "text": opener, "round": 0})
+            # emit the recorded row so live and replayed chats carry the
+            # same keys (ts, meta, …) for this message
+            self.emit("message", log("Josh (human)", opener))
             for j in state["pending"]:
                 state["pending"][j].append(
                     f"Josh (human) opens the conversation: {opener}")
@@ -912,10 +1122,20 @@ class Api:
         # local closing_left, which never survived a process anyway.)
         state["closing"] = None
         state["next_speaker"] = None
+        # Project docs may have moved since this chat started. REPORT it, never
+        # swap it: the seats already hold the original text, so regenerating
+        # here would give a later /clear'd seat different context than its
+        # peers were given, with nothing in the transcript saying so. Same
+        # posture as dead session ids — recovery is offered, not performed.
+        drift = brief_drift(state.get("brief"), state["workspace"])
+        if drift:
+            note = (f"Project docs changed since this chat started "
+                    f"({', '.join(drift)}). The seats still have the original "
+                    f"text; start a new chat to pick up the new version.")
+            state["store"].system(note, round=state["rnd"])
+            self.emit("status", {"text": note})
         if opener:
-            state["log"]("Josh (human)", opener)
-            self.emit("message", {"speaker": "josh", "name": "Josh",
-                                  "text": opener, "round": state["rnd"]})
+            self.emit("message", state["log"]("Josh (human)", opener))
             for j in state["pending"]:
                 state["pending"][j].append(f"Josh (human) says: {opener}")
             state["store"].save(state)
@@ -947,15 +1167,54 @@ class Api:
         return dispatch_command(state, text, _AppIO(self))
 
 
+ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "ai-chat.ico")
+
+
+def _apply_window_icon(window):
+    """Title-bar + taskbar icon for the RUNNING window. pythonw owns the
+    process, so without WM_SETICON the window wears the stock Python icon no
+    matter what the desktop shortcut shows. Windows-only, best-effort — an
+    icon must never be able to crash the app."""
+    if sys.platform != "win32" or not os.path.isfile(ICON_PATH):
+        return
+    try:
+        u32 = ctypes.windll.user32
+        try:                       # pywebview/WinForms exposes the native Form
+            hwnd = int(window.native.Handle.ToInt64())
+        except Exception:          # renderer changed shape — find by title
+            hwnd = u32.FindWindowW(None, window.title)
+        if not hwnd:
+            return
+        IMAGE_ICON, LR_LOADFROMFILE, WM_SETICON = 1, 0x10, 0x80
+        for size, which in ((16, 0), (32, 1)):   # ICON_SMALL, ICON_BIG
+            h = u32.LoadImageW(None, ICON_PATH, IMAGE_ICON,
+                               size, size, LR_LOADFROMFILE)
+            if h:
+                u32.SendMessageW(hwnd, WM_SETICON, which, h)
+    except Exception:
+        pass
+
+
 def main():
+    if sys.platform == "win32":
+        # Own taskbar identity BEFORE the window exists — otherwise Windows
+        # groups the app under pythonw.exe and shows Python's icon there.
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "Alloy.AIChat")
+        except Exception:
+            pass
     api = Api()
     threading.Thread(target=api.precompute_config, daemon=True).start()
     threading.Thread(target=api.precompute_auth, daemon=True).start()
     ui = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                       "ui", "index.html")
     api._window = webview.create_window(
-        "AI Chat", ui, js_api=api, width=1220, height=820,
+        "Alloy — many models, one conversation", ui, js_api=api,
+        width=1220, height=820,
         min_size=(940, 620), background_color="#17151C")
+    api._window.events.shown += lambda *a: _apply_window_icon(api._window)
     webview.start(debug=False)
 
 

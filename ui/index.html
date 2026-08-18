@@ -2,12 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>AI Chat</title>
+<title>Alloy</title>
 <style>
   :root {
     --bg: #17151C; --surface: #201D26; --surface2: #2A2631;
     --line: rgba(255,255,255,.07); --text: #ECE8E3; --muted: #8D8798;
-    --claude: #E07B54; --gpt: #2EAE8B; --gemini: #5B7FE8; --josh: #C9A227;
+    --claude: #E07B54; --gpt: #2EAE8B; --gemini: #5B7FE8;
+    /* the grammar: source colors mean A PARTICIPANT SPOKE; --alloy means THE
+       APP ITSELF (wordmark, buttons, focus rings, round badge). --josh is
+       warm bone, moved off gold so it can't be confused with --alloy. */
+    --josh: #C9B896; --alloy: #F4B942;
     --danger: #C75B5B;
   }
   * { box-sizing: border-box; margin: 0; }
@@ -27,14 +31,13 @@
     background: linear-gradient(180deg, #1C1922, var(--bg));
   }
   .wordmark { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
-  .wordmark .dots { display: flex; }
-  .wordmark .dots i { width: 11px; height: 11px; border-radius: 50%; margin-left: -3px; }
-  .wordmark .dots i:nth-child(1) { background: var(--claude); margin-left: 0; }
-  .wordmark .dots i:nth-child(2) { background: var(--gpt); }
-  .wordmark .dots i:nth-child(3) { background: var(--gemini); }
+  /* the FIXED brand mark (indivisible, no seat count, no provider color) —
+     the dynamic roster indicator is a different element (.empty .dots) */
+  .wordmark .mark { width: 22px; height: 22px; display: block; }
   .wordmark h1 {
     font-family: Bahnschrift, sans-serif; font-weight: 600;
     font-size: 17px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--alloy);
   }
   #stopBtn {
     flex: 0 0 auto; border: 1px solid var(--danger); border-radius: 9px;
@@ -44,17 +47,36 @@
   }
   #stopBtn:hover { filter: brightness(1.15); }
   #stopBtn[hidden] { display: none; }
-  #roundBadge { margin-left: auto; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
-  .railToggles { display: flex; gap: 6px; }
-  .tgl {
-    border: 1px solid var(--line); background: none; color: var(--text);
-    border-radius: 7px; padding: 4px 10px; font-family: Bahnschrift, sans-serif;
-    font-size: 11px; letter-spacing: .1em; text-transform: uppercase; cursor: pointer;
+  #roundBadge { margin-left: auto; color: var(--alloy); font-size: 12.5px; white-space: nowrap; }
+  /* app-chrome focus ring — participants never wear this color */
+  :focus-visible { outline: 2px solid color-mix(in srgb, var(--alloy) 65%, transparent); outline-offset: 1px; }
+  #say:focus { border-color: color-mix(in srgb, var(--alloy) 55%, transparent); }
+  /* Rail collapsing lives ON the rails: a « button in each rail's header,
+     and a collapsed rail becomes a slim click-to-reopen strip. */
+  .rail-collapse {
+    flex: 0 0 auto; border: 0; background: none; color: var(--muted);
+    cursor: pointer; font-size: 15px; line-height: 1; padding: 3px 7px;
+    border-radius: 6px;
   }
-  .tgl:hover { border-color: rgba(255,255,255,.25); }
-  .tgl.off { color: var(--muted); border-style: dashed; }
-  main.no-chats #chatRail { display: none; }
-  main.no-seats aside { display: none; }
+  .rail-collapse:hover { color: var(--text); background: var(--surface2); }
+  .rail-reopen { display: none; }
+  main.no-chats #chatRail, main.no-seats #seatRail, main.no-files #fileRail {
+    width: 22px; min-width: 22px; padding: 0; overflow: hidden; cursor: pointer;
+  }
+  main.no-chats #chatRail > *, main.no-seats #seatRail > *,
+  main.no-files #fileRail > * { display: none; }
+  main.no-chats #chatRail .rail-reopen, main.no-seats #seatRail .rail-reopen,
+  main.no-files #fileRail .rail-reopen {
+    display: block; height: 100%; padding-top: 10px; text-align: center;
+    color: var(--muted); font-size: 14px;
+  }
+  main.no-chats #chatRail:hover, main.no-seats #seatRail:hover,
+  main.no-files #fileRail:hover { background: var(--surface); }
+  main.no-chats #chatRail:hover .rail-reopen,
+  main.no-seats #seatRail:hover .rail-reopen,
+  main.no-files #fileRail:hover .rail-reopen { color: var(--text); }
+  .rail-head { display: flex; align-items: center; }
+  .rail-head .rail-label { flex: 1; margin-top: 0; }
 
   /* ---------- layout ---------- */
   main { flex: 1; display: flex; min-height: 0; }
@@ -64,9 +86,9 @@
     width: 224px; flex: 0 0 auto; border-right: 1px solid var(--line);
     background: #15131A; display: flex; flex-direction: column; min-height: 0;
   }
-  #chatRailHead { padding: 14px 12px 10px; }
+  #chatRailHead { padding: 14px 8px 10px 12px; display: flex; align-items: center; gap: 4px; }
   #newChatBtn {
-    width: 100%; display: flex; align-items: center; gap: 8px;
+    flex: 1; display: flex; align-items: center; gap: 8px;
     background: var(--surface2); color: var(--text);
     border: 1px solid var(--line); border-radius: 9px;
     padding: 9px 12px; font-size: 13.5px; cursor: pointer;
@@ -123,7 +145,7 @@
   .chat-empty { padding: 14px 10px; color: var(--muted); font-size: 12px; line-height: 1.5; }
   #seatList.locked { opacity: .72; pointer-events: none; }
 
-  aside {
+  #seatRail {
     width: 270px; flex: 0 0 auto; border-right: 1px solid var(--line);
     padding: 16px 14px; overflow-y: auto; background: #1A1720;
   }
@@ -201,12 +223,42 @@
   }
   #roleApplyBtn:hover:not([disabled]) { background: var(--surface2); }
   #roleApplyBtn[disabled] { opacity: .45; cursor: default; }
+  /* ---------- ask modal (a seat's question to Josh) ---------- */
+  #askModal .modal { border-left: 3px solid var(--seat, var(--muted)); }
+  #askQ { font-size: 13.5px; line-height: 1.55; margin-bottom: 12px; }
+  #askOpts { margin-bottom: 10px; }
+  #askOpts button { font-size: 12.5px; padding: 6px 13px; color: var(--text); }
+  #askOther {
+    width: 100%; background: var(--surface2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px;
+    font: 12.5px "Cascadia Mono", Consolas, monospace; outline: none;
+    line-height: 1.45; resize: vertical;
+  }
+  #askOther:focus { border-color: var(--seat, var(--muted)); }
+  #askFoot { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+  #askHint { flex: 1; font-size: 11px; color: var(--muted); line-height: 1.4; }
+  #askSend {
+    border: 1px solid var(--seat, var(--muted)); background: none; color: var(--text);
+    border-radius: 7px; padding: 5px 12px; font-size: 12px; cursor: pointer;
+  }
+  #askSend:hover { background: var(--surface2); }
+  #askPill {
+    flex-basis: 100%; text-align: left; background: var(--surface);
+    border: 1px solid var(--seat, var(--muted)); border-radius: 9px;
+    color: var(--text); padding: 7px 12px; font-size: 12.5px; cursor: pointer;
+  }
+  #askPill:hover { background: var(--surface2); }
   .seat .switch { float: right; }
   .seat-head .rm {
     border: 0; background: none; color: var(--muted); cursor: pointer;
     font-size: 14px; line-height: 1; padding: 0 2px;
   }
   .seat-head .rm:hover { color: var(--danger); }
+  .seat-head .rn {
+    border: 0; background: none; color: var(--muted); cursor: pointer;
+    font-size: 12px; line-height: 1; padding: 0 2px;
+  }
+  .seat-head .rn:hover { color: var(--text); }
   #addSeatRow { display: flex; gap: 6px; margin-bottom: 10px; }
   #addSeatRow select {
     flex: 1; background: var(--surface2); color: var(--text);
@@ -256,12 +308,12 @@
     margin-left: auto; background: var(--danger); color: #fff; border-radius: 999px;
     font: 11px "Cascadia Mono", Consolas, monospace; padding: 1px 7px;
   }
-  #acctModal, #roleModal {
+  #acctModal, #roleModal, #askModal {
     position: fixed; inset: 0; z-index: 50; display: none;
     align-items: flex-start; justify-content: center; padding-top: 9vh;
     background: rgba(10,8,14,.6);
   }
-  #acctModal.show, #roleModal.show { display: flex; }
+  #acctModal.show, #roleModal.show, #askModal.show { display: flex; }
   .modal {
     background: #1A1720; border: 1px solid var(--line); border-radius: 12px;
     width: min(460px, 92vw); max-height: 78vh; overflow-y: auto;
@@ -293,6 +345,8 @@
     font: 12.5px "Cascadia Mono", Consolas, monospace; outline: none;
   }
   .ctl select:disabled { color: var(--muted); cursor: not-allowed; }
+  #modCtl { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+  #modCtl select + select { margin-top: 6px; }
   .rounds { display: flex; align-items: center; gap: 10px; }
   .rounds button {
     width: 28px; height: 28px; border-radius: 7px; border: 1px solid var(--line);
@@ -310,7 +364,7 @@
     white-space: nowrap;
   }
   .btn-sm:hover { border-color: rgba(255,255,255,.25); }
-  input[type=checkbox] { accent-color: var(--josh); width: 15px; height: 15px; }
+  input[type=checkbox] { accent-color: var(--alloy); width: 15px; height: 15px; }
   .yolo-note { font-size: 11px; color: var(--danger); margin-top: 5px; display: none; }
 
   /* ---------- transcript ---------- */
@@ -321,11 +375,14 @@
     height: 100%; display: flex; flex-direction: column; align-items: center;
     justify-content: center; gap: 10px; color: var(--muted); text-align: center;
   }
+  /* the LIVE roster cluster: N circles in real provider colors, one per seat
+     (dynamic — this is the participant indicator, NOT the logo) */
   .empty .dots { display: flex; margin-bottom: 6px; }
-  .empty .dots i { width: 16px; height: 16px; border-radius: 50%; margin-left: -4px; opacity: .85; }
-  .empty .dots i:nth-child(1) { background: var(--claude); margin-left: 0; }
-  .empty .dots i:nth-child(2) { background: var(--gpt); }
-  .empty .dots i:nth-child(3) { background: var(--gemini); }
+  .empty .dots i {
+    width: 16px; height: 16px; border-radius: 50%; margin-left: -4px;
+    opacity: .85; background: var(--rc, #6C6677);
+  }
+  .empty .dots i:first-child { margin-left: 0; }
   .empty h2 { font-family: Bahnschrift, sans-serif; font-weight: 500; font-size: 19px;
     letter-spacing: .05em; color: var(--text); }
   .empty p { font-size: 13.5px; max-width: 380px; }
@@ -349,6 +406,10 @@
     text-transform: uppercase; color: var(--who);
   }
   .msg-head .meta { font: 11px "Cascadia Mono", Consolas, monospace; color: var(--muted); }
+  .msg-head .mtime {
+    font: 11px "Cascadia Mono", Consolas, monospace; color: var(--muted);
+    margin-left: auto; opacity: .7; cursor: default;
+  }
   .msg-body p { margin-bottom: 9px; } .msg-body p:last-child { margin-bottom: 0; }
   .msg-body code {
     font: 12.5px "Cascadia Mono", Consolas, monospace; background: var(--surface2);
@@ -359,19 +420,174 @@
     padding: 10px 12px; overflow-x: auto; margin-bottom: 9px;
   }
   .msg-body pre code { background: none; padding: 0; }
+  /* ==seat-marked highlight== — the one thing Josh most needs to see */
+  .msg-body mark {
+    background: color-mix(in srgb, var(--who, var(--josh)) 26%, transparent);
+    color: var(--text); border-radius: 3px; padding: 0 3px;
+  }
+  /* trailing directives ([[WRAP]], [[NEXT:]], [[ASK:]], …) render as chips
+     instead of raw bracket soup; mid-reply mentions stay as text (they
+     didn't fire) */
+  .dir-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+  .dir-chip {
+    border: 1px solid var(--line); border-radius: 999px; padding: 1px 9px;
+    font: 10.5px "Cascadia Mono", Consolas, monospace; color: var(--muted);
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dir-chip.dir-ask { border-color: var(--who, var(--muted)); color: var(--text); }
+  .dir-chip.dir-wrap { opacity: .8; }
 
-  .typing { display: flex; align-items: center; gap: 9px; color: var(--muted);
-    font-size: 13px; margin: 0 0 18px 2px; }
+  /* messages are copyable: selectable text + a per-row copy button */
+  .msg { user-select: text; }
+  .msg .copy-btn {
+    margin-left: auto; border: 0; background: none; color: var(--muted);
+    cursor: pointer; font-size: 13px; line-height: 1; padding: 0 3px;
+    opacity: 0; transition: opacity .12s; user-select: none;
+  }
+  .msg:hover .copy-btn, .msg .copy-btn:focus-visible { opacity: 1; }
+  .msg .copy-btn:hover { color: var(--text); }
+
+  /* ---------- inline image previews ---------- */
+  .msg-imgs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 9px; user-select: none; }
+  .img-thumb {
+    border: 1px solid var(--line); border-radius: 8px; background: #131118;
+    overflow: hidden; cursor: zoom-in; max-width: 240px;
+  }
+  .img-thumb:hover { border-color: var(--who, var(--muted)); }
+  .img-thumb img { display: block; max-width: 238px; max-height: 180px; }
+  .img-missing {
+    border: 1px dashed var(--line); border-radius: 8px; color: var(--muted);
+    font-size: 11.5px; font-style: italic; padding: 6px 10px;
+  }
+  #lightbox {
+    position: fixed; inset: 0; z-index: 60; display: none;
+    flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; background: rgba(10,8,14,.84); cursor: zoom-out;
+  }
+  #lightbox.show { display: flex; }
+  #lightboxImg {
+    max-width: 92vw; max-height: 84vh; border-radius: 10px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.6); background: #131118;
+  }
+  #lightboxCap {
+    color: var(--muted); font: 12px "Cascadia Mono", Consolas, monospace;
+    max-width: 92vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  /* ---------- files rail ---------- */
+  #fileRail {
+    width: 240px; flex: 0 0 auto; border-left: 1px solid var(--line);
+    background: #1A1720; display: flex; flex-direction: column; min-height: 0;
+    padding: 14px 10px;
+  }
+  #fileList { flex: 1; overflow-y: auto; min-height: 0; margin-top: 4px; }
+  .file-row {
+    display: flex; align-items: center; gap: 8px; border-radius: 9px;
+    padding: 5px 6px; cursor: pointer; border: 1px solid transparent;
+    margin-bottom: 1px;
+  }
+  .file-row:hover { background: var(--surface); }
+  .file-row .fi {
+    flex: 0 0 auto; width: 34px; height: 34px; border-radius: 6px;
+    background: var(--surface2); display: flex; align-items: center;
+    justify-content: center; font-size: 15px; overflow: hidden;
+  }
+  .file-row .fi img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .file-row .fmeta { flex: 1; min-width: 0; }
+  .file-row .fname {
+    font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .file-row .fsub {
+    font: 10.5px "Cascadia Mono", Consolas, monospace; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .file-row .fopen {
+    border: 0; background: none; color: var(--muted); cursor: pointer;
+    font-size: 13px; padding: 0 2px; opacity: 0; transition: opacity .12s;
+  }
+  .file-row:hover .fopen { opacity: 1; }
+  .file-row .fopen:hover { color: var(--text); }
+  .file-empty { padding: 12px 6px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+
+  /* a seat is editing this file right now — provider color = participant */
+  .file-row.editing { border-left: 3px solid var(--who); padding-left: 3px; }
+  .file-row.editing .fi { animation: blink 1.6s ease-in-out infinite; }
+  .file-row .ebadge { color: var(--who); margin-left: 4px; }
+
+  /* ---------- live code viewer ---------- */
+  #fileRail.code-open { width: 520px; max-width: 45vw; }
+  #codePane {
+    display: none; flex-direction: column; min-height: 0; flex: 1.7;
+    border: 1px solid var(--line); border-radius: 10px; margin: 6px 0 8px;
+    background: var(--surface); overflow: hidden;
+  }
+  #fileRail.code-open #codePane { display: flex; }
+  #fileRail.code-open #fileList { flex: 1; }
+  .code-head {
+    display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+    border-bottom: 1px solid var(--line); flex: 0 0 auto;
+  }
+  #codeTitle {
+    flex: 1; min-width: 0; font: 11.5px "Cascadia Mono", Consolas, monospace;
+    color: var(--who, var(--text)); white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #codeFollow { display: flex; align-items: center; gap: 4px; color: var(--muted);
+    font-size: 11px; cursor: pointer; flex: 0 0 auto; }
+  #codeClose { border: 0; background: none; color: var(--muted); cursor: pointer;
+    font-size: 12px; }
+  #codeClose:hover { color: var(--text); }
+  #codeBody {
+    flex: 1; overflow: auto; min-height: 0; padding: 6px 0;
+    font: 11.5px "Cascadia Mono", Consolas, monospace; line-height: 1.45;
+  }
+  #codeBody .cl { white-space: pre; padding: 0 10px; min-height: 1.45em; }
+  #codeBody .cl.chg {
+    background: color-mix(in srgb, var(--who, #888) 18%, transparent);
+    border-left: 2px solid var(--who, #888); padding-left: 8px;
+  }
+  .code-note { padding: 8px 10px; color: var(--muted); font-size: 11.5px; }
+
+  .typing { display: flex; flex-direction: column; align-items: stretch;
+    gap: 4px; color: var(--muted); font-size: 13px; margin: 0 0 18px 2px; }
+  .typing .trow { display: flex; align-items: center; gap: 9px; }
   .typing .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--who); }
   .typing .dot { animation: blink 1.2s infinite; }
   @keyframes blink { 50% { opacity: .25; } }
   @media (prefers-reduced-motion: reduce) { .typing .dot { animation: none; } }
 
+  /* ---------- live activity narration ---------- */
+  .act-log { margin: 2px 0 0 17px; border-left: 2px solid var(--who, var(--line));
+    padding-left: 9px; }
+  .act-line {
+    font: 11px "Cascadia Mono", Consolas, monospace; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.6;
+  }
+  .act-line.k-reasoning { font-style: italic; }
+  .act-line.k-edit { color: var(--text); opacity: .8; }
+  .think-block { margin: 0 0 8px; }
+  .think-block summary {
+    cursor: pointer; color: var(--muted); font-size: 11.5px; user-select: none;
+    list-style-position: inside;
+  }
+  .think-block summary:hover { color: var(--text); }
+  .think-block[open] { border-left: 2px solid var(--who, var(--line));
+    padding-left: 9px; margin-left: 2px; }
+  .think-block .act-line { white-space: normal; }
+
   /* ---------- composer ---------- */
   .composer {
-    display: flex; gap: 10px; padding: 14px 18px; border-top: 1px solid var(--line);
+    display: flex; gap: 10px; padding: 4px 18px 14px; border-top: 1px solid var(--line);
     background: #1A1720; align-items: flex-end; flex-wrap: wrap;
   }
+  /* the whole-width grab bar above the box — drag it to resize the typing area */
+  #sayGrip { flex-basis: 100%; height: 10px; cursor: ns-resize; touch-action: none; }
+  #sayGrip::after {
+    content: ""; display: block; margin: 3px auto 0; width: 46px; height: 4px;
+    border-radius: 999px; background: var(--line);
+  }
+  #sayGrip:hover::after, #sayGrip.dragging::after { background: var(--muted); }
   #say {
     /* the chat rail costs the stage 224px — below this the after-row wraps to
        its own line instead of squeezing the box you actually type in */
@@ -379,12 +595,12 @@
     flex: 1; background: var(--surface); border: 1px solid var(--line);
     border-radius: 9px; color: var(--text); padding: 10px 14px; font: inherit;
     outline: none; resize: vertical; overflow-y: auto; line-height: 1.45;
-    min-height: 42px; max-height: 70vh; display: block;
+    min-height: 96px; max-height: 70vh; display: block;
   }
   #say:disabled { opacity: .4; }
   #say::placeholder { color: var(--muted); }
   #sayBtn {
-    border: 1px solid var(--josh); background: none; color: var(--josh);
+    border: 1px solid var(--alloy); background: none; color: var(--alloy);
     border-radius: 9px; padding: 0 18px; font-family: Bahnschrift, sans-serif;
     font-size: 13px; letter-spacing: .08em; text-transform: uppercase; cursor: pointer;
     height: 42px; flex: none;
@@ -415,13 +631,10 @@
 <body>
 
 <header>
-  <div class="wordmark">
-    <div class="dots"><i></i><i></i><i></i></div>
-    <h1>AI Chat</h1>
-  </div>
-  <div class="railToggles">
-    <button id="tglChats" class="tgl">Chats</button>
-    <button id="tglSeats" class="tgl">Seats</button>
+  <div class="wordmark" title="Many models. One conversation.">
+    <img class="mark" alt=""
+      src="data:image/png;base64,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">
+    <h1>Alloy</h1>
   </div>
   <span id="roundBadge" class="mono"></span>
   <button id="stopBtn" class="display" hidden>Stop</button>
@@ -429,14 +642,20 @@
 
 <main>
   <nav id="chatRail">
+    <div class="rail-reopen" title="Show chat history">»</div>
     <div id="chatRailHead">
       <button id="newChatBtn" class="display"><span class="plus">＋</span> New chat</button>
+      <button class="rail-collapse" id="chatsCollapse" title="Hide chat history">«</button>
     </div>
     <div id="chatList"></div>
   </nav>
 
-  <aside>
-    <div class="rail-label">Seats</div>
+  <aside id="seatRail">
+    <div class="rail-reopen" title="Show seats">»</div>
+    <div class="rail-head">
+      <div class="rail-label">Seats</div>
+      <button class="rail-collapse" id="seatsCollapse" title="Hide seats">«</button>
+    </div>
 
     <div id="seatList"></div>
     <div id="addSeatRow">
@@ -458,6 +677,16 @@
         <option value="parallel">Parallel — everyone answers at once</option>
         <option value="free">Free-running — reply as they please</option>
       </select>
+      <div id="modCtl" hidden>
+        <label>Moderator — the AI that picks each speaker</label>
+        <select id="modProv" title="A cheap stateless side call per turn — it never speaks in the conversation.">
+          <option value="claude">Claude</option>
+          <option value="gpt">GPT</option>
+          <option value="gemini">Gemini</option>
+        </select>
+        <select id="modModel"></select>
+        <select id="modEffort"></select>
+      </div>
     </div>
     <div class="ctl">
       <label id="roundsLabel">Rounds — each seat speaks once per round</label>
@@ -490,6 +719,10 @@
         <span id="folderPath">auto (fresh per conversation)</span>
         <button class="btn-sm" id="pickFolder">Choose</button>
       </div>
+      <label style="display:flex;align-items:center;gap:8px;margin:6px 0 0"
+             title="Each CLI only auto-loads its own doc (Claude reads CLAUDE.md, GPT reads AGENTS.md, Gemini reads AGENTS.md/GEMINI.md), so without this the seats start with very unequal knowledge of the project. Only applies to a chosen folder.">
+        <input type="checkbox" id="projBrief" checked> Share the folder's AI docs with every seat
+      </label>
     </div>
     <div class="ctl">
       <label style="display:flex;align-items:center;gap:8px;margin:0">
@@ -507,7 +740,7 @@
     <div id="feed">
       <div class="empty" id="emptyState">
         <div class="dots"><i></i><i></i><i></i></div>
-        <h2>Three minds, one table</h2>
+        <h2>Different metals. One alloy.</h2>
         <p>Type your opening message below and hit Send — that starts the
            conversation. Anything you type after that joins as an interjection,
            and when a run ends, keep typing to continue it. Shift+Enter adds a
@@ -516,6 +749,9 @@
       </div>
     </div>
     <div class="composer">
+      <button id="askPill" hidden
+        title="A seat is waiting on your answer — click to reopen the question"></button>
+      <div id="sayGrip" title="Drag up or down to resize the message box"></div>
       <div id="attRow" hidden></div>
       <button id="attachBtn" title="Attach files — saved into the working folder for the AIs to open">📎</button>
       <input type="file" id="attachInput" multiple hidden>
@@ -528,7 +764,31 @@
       </div>
     </div>
   </div>
+
+  <aside id="fileRail">
+    <div class="rail-reopen" title="Show files">«</div>
+    <div class="rail-head">
+      <button class="rail-collapse" id="filesCollapse" title="Hide files">»</button>
+      <div class="rail-label">Files</div>
+      <button class="rail-collapse" id="filesRefresh" title="Refresh the file list">↻</button>
+    </div>
+    <div id="codePane">
+      <div class="code-head">
+        <span id="codeTitle" title=""></span>
+        <label id="codeFollow" title="Jump to whichever file a seat is editing">
+          <input type="checkbox" id="codeFollowChk" checked>follow</label>
+        <button id="codeClose" title="Close the code view">✕</button>
+      </div>
+      <div id="codeBody"></div>
+    </div>
+    <div id="fileList"></div>
+  </aside>
 </main>
+
+<div id="lightbox" title="Click anywhere to close">
+  <img id="lightboxImg" alt="">
+  <div id="lightboxCap"></div>
+</div>
 
 <div id="acctModal">
   <div class="modal">
@@ -561,6 +821,25 @@
   </div>
 </div>
 
+<div id="askModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="askTitle">Question</h2>
+      <button class="close" id="askHide" title="Answer later — the conversation keeps waiting">✕</button>
+    </div>
+    <div id="askQ"></div>
+    <div class="chips" id="askOpts"></div>
+    <textarea id="askOther" rows="3" spellcheck="false"
+      placeholder="Other — type your own answer (Shift+Enter for a new line)"></textarea>
+    <div id="askFoot">
+      <span id="askHint">The conversation is paused until you answer.</span>
+      <button class="btn-sm" id="askSkip"
+        title="Resume without an answer — the seat is told you passed">Skip</button>
+      <button id="askSend">Answer</button>
+    </div>
+  </div>
+</div>
+
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -571,26 +850,151 @@ const EMPTY_HTML = document.getElementById("feed").innerHTML;
 
 /* ---------- markdown-lite ---------- */
 function esc(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+// Mirror of relay.peel_directives: trailing [[NAME]]/[[NAME: arg]] blocks
+// peel off the END of a reply (last-"[["-anchored, ≤4). Only directives that
+// actually FIRED become chips; mid-reply mentions stay as text — truthful,
+// since the engine ignored them too.
+const DIR_RE = /^\[\[([A-Z][A-Z0-9_]*)(?:\s*:\s*([\s\S]*?))?\s*\]\]$/;
+function peelDirs(s) {
+  s = s.replace(/\s+$/, "");
+  const hits = [];
+  for (let k = 0; k < 4; k++) {
+    const start = s.lastIndexOf("[[");
+    if (start === -1) break;
+    const m = DIR_RE.exec(s.slice(start));
+    if (!m) break;
+    hits.unshift({ name: m[1], arg: (m[2] || "").trim() });   // written order
+    s = s.slice(0, start).replace(/\s+$/, "");
+  }
+  return { body: s, hits };
+}
+function dirChip({ name, arg }) {
+  const label = { WRAP: "wrap", NEXT: "next", PASS: "pass", SPAWN: "spawn",
+                  TEAM: "team", ASK: "asks Josh" }[name] || name.toLowerCase();
+  let detail = "";
+  if (name === "NEXT" && arg) detail = ": " + arg;
+  if ((name === "SPAWN" || name === "TEAM") && arg)
+    detail = ": " + arg.split("|")[0].trim();
+  if (name === "ASK" && arg) {
+    const q = arg.split("|")[0].trim();
+    detail = ": " + (q.length > 60 ? q.slice(0, 60) + "…" : q);
+  }
+  return `<span class="dir-chip dir-${name.toLowerCase()}" title="${esc(
+    "[[" + name + (arg ? ": " + arg : "") + "]]")}">${esc(label + detail)}</span>`;
+}
 function md(s) {
-  s = esc(s).replace(/\[\[WRAP\]\]/g, "");
-  const blocks = s.split(/```/);
+  const { body, hits } = peelDirs(s);
+  const blocks = esc(body).split(/```/);
   let out = "";
   blocks.forEach((b, i) => {
     if (i % 2) { out += "<pre><code>" + b.replace(/^\w*\n/, "") + "</code></pre>"; return; }
     b.split(/\n{2,}/).forEach(p => {
       if (!p.trim()) return;
       p = p.replace(/`([^`]+)`/g, "<code>$1</code>")
+           .replace(/==([^=\n]+)==/g, "<mark>$1</mark>")
            .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
            .replace(/\*([^*]+)\*/g, "<i>$1</i>")
            .replace(/\n/g, "<br>");
       out += "<p>" + p + "</p>";
     });
   });
+  if (hits.length)
+    out += `<div class="dir-chips">${hits.map(dirChip).join("")}</div>`;
   return out;
 }
 
+/* ---------- inline images (bridge: api.read_image) ---------- */
+// Detection is deliberately conservative: markdown image links and attachment
+// lines may contain spaces; bare paths must carry at least one separator so
+// prose mentioning "logo.png" doesn't sprout a placeholder.
+const IMG_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|ico)$/i;
+function findImageRefs(text) {
+  const refs = [], seen = new Set();
+  const push = p => {
+    p = (p || "").trim().replace(/^["'<`]+|[>"'`,.;:!?)]+$/g, "");
+    if (p && IMG_EXT_RE.test(p) && !seen.has(p.toLowerCase())) {
+      seen.add(p.toLowerCase()); refs.push(p);
+    }
+  };
+  for (const m of text.matchAll(/!\[[^\]]*\]\(([^)\n]+)\)/g)) push(m[1]);
+  for (const m of text.matchAll(/\[Josh attached a file:\s*([^\]\n]+)\]/g)) push(m[1]);
+  for (const m of text.matchAll(
+    /(?:[A-Za-z]:)?(?:[\w.\-]+[\\/])+[\w.\-]+\.(?:png|jpe?g|gif|webp|bmp|ico)\b/gi))
+    push(m[0]);
+  return refs.slice(0, 8);
+}
+// One fetch per path per chat: replaying a long chat re-adds many rows, and
+// the bridge shouldn't re-encode the same thumbnail each time. Cleared
+// whenever the active chat (and so the workspace boundary) changes.
+const imgCache = new Map();
+async function fetchImage(path, full) {
+  const key = (full ? "F|" : "T|") + path;
+  if (imgCache.has(key)) return imgCache.get(key);
+  let r;
+  try { r = await pywebview.api.read_image(path, !!full); }
+  catch (e) { r = { error: String(e) }; }
+  imgCache.set(key, r);
+  return r;
+}
+function missingCell(cell, path) {
+  cell.className = "img-missing";
+  cell.textContent = "image no longer available";
+  cell.title = path;
+  cell.onclick = null;
+}
+function attachThumbs(container, refs) {
+  if (!refs.length) return;
+  const strip = document.createElement("div");
+  strip.className = "msg-imgs";
+  container.appendChild(strip);
+  refs.forEach(async path => {
+    const cell = document.createElement("div");
+    cell.className = "img-thumb";
+    strip.appendChild(cell);
+    const r = await fetchImage(path, false);
+    if (!r || !r.ok) { missingCell(cell, path); return; }
+    const img = document.createElement("img");
+    img.alt = r.name || path; img.title = path;
+    img.onerror = () => missingCell(cell, path);   // corrupt bytes, not a broken tag
+    img.src = r.data_uri;
+    cell.onclick = () => openLightbox(path, r.name || path);
+    cell.appendChild(img);
+  });
+}
+function openLightbox(path, name) {
+  const lb = $("lightbox"), img = $("lightboxImg");
+  $("lightboxCap").textContent = name || path;
+  img.removeAttribute("src");
+  lb.classList.add("show");
+  fetchImage(path, true).then(r => {
+    if (r && r.ok) img.src = r.data_uri;
+    else $("lightboxCap").textContent =
+      "image no longer available — " + (name || path);
+  });
+}
+function closeLightbox() { $("lightbox").classList.remove("show"); }
+$("lightbox").onclick = closeLightbox;
+
+/* ---------- copy a message ---------- */
+async function copyText(t, btn) {
+  let ok = false;
+  try { await navigator.clipboard.writeText(t); ok = true; }
+  catch (e) {                       // clipboard API can be walled off — fall back
+    const ta = document.createElement("textarea");
+    ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { ok = document.execCommand("copy"); } catch (e2) {}
+    ta.remove();
+  }
+  if (btn) {
+    const old = btn.textContent;
+    btn.textContent = ok ? "✓" : "✕";
+    setTimeout(() => { btn.textContent = old; }, 1200);
+  }
+}
+
 /* ---------- feed ---------- */
-function addMsg(kind, name, text, meta, role) {
+function addMsg(kind, name, text, meta, role, ts, activity) {
   // kind: "josh" | "system" | a provider id ("claude"/"gpt"/"gemini")
   // `role` is the role the seat held WHEN IT SPOKE (stamped into the stored
   // row), never its current one — otherwise re-roling in round 6 would
@@ -600,9 +1004,29 @@ function addMsg(kind, name, text, meta, role) {
   if (kind === "josh" || kind === "system") d.className = "msg " + kind;
   else { d.className = "msg"; d.dataset.provider = kind; }
   if (role) meta = meta ? `${role} · ${meta}` : role;
+  // ts is the stored ISO stamp; old rows lack it and show no time
+  const clock = ts && ts.length >= 16
+    ? `<span class="mtime" title="${esc(ts.replace("T", " "))}">${esc(ts.slice(11, 16))}</span>`
+    : "";
+  // what the seat DID before this reply — the stored row's capped activity
+  // list, rendered as a collapsed block ABOVE the body (escaped: command
+  // lines and file names are arbitrary text from the CLIs)
+  const think = Array.isArray(activity) && activity.length
+    ? `<details class="think-block"><summary>${esc(name)} worked through ` +
+      `${activity.length} step${activity.length === 1 ? "" : "s"}</summary>` +
+      activity.map(a =>
+        `<div class="act-line k-${esc(String(a.kind || "note"))}">` +
+        `${esc(String(a.text || ""))}</div>`).join("") + `</details>`
+    : "";
   d.innerHTML = `<div class="msg-head"><span class="who">${esc(name)}</span>` +
-    (meta ? `<span class="meta">${esc(meta)}</span>` : "") +
-    `</div><div class="msg-body">${md(text)}</div>`;
+    (meta ? `<span class="meta">${esc(meta)}</span>` : "") + clock +
+    `</div>` + think + `<div class="msg-body">${md(text)}</div>`;
+  const cp = document.createElement("button");
+  cp.className = "copy-btn"; cp.title = "Copy message text"; cp.textContent = "⧉";
+  cp.onclick = e => { e.stopPropagation(); copyText(text, cp); };
+  d.querySelector(".msg-head").appendChild(cp);
+  // an agent mentioning an image it made ⇒ show it right here in the chat
+  if (kind !== "system") attachThumbs(d.querySelector(".msg-body"), findImageRefs(text));
   $("feed").appendChild(d);
   // parallel modes: keep live typing indicators below the new message
   typingEls.forEach(el => $("feed").appendChild(el));
@@ -616,9 +1040,28 @@ function showTyping(speakerId, provider, name) {
   const el = document.createElement("div");
   el.className = "typing";
   el.style.setProperty("--who", `var(--${provider})`);
-  el.innerHTML = `<span class="dot"></span> ${esc(name)} is thinking…`;
+  el.innerHTML = `<span class="trow"><span class="dot"></span> ${esc(name)} is thinking…</span>`;
   typingEls.set(speakerId, el);
   $("feed").appendChild(el);
+  $("feed").scrollTop = $("feed").scrollHeight;
+}
+// Live narration under the dots: the last few things the seat is DOING
+// ("$ pytest", "editing app.py"), streamed as `activity` events mid-turn.
+function typingActivity(speakerId, payload) {
+  const el = typingEls.get(speakerId);
+  if (!el) return;
+  let log = el.querySelector(".act-log");
+  if (!log) {
+    log = document.createElement("div");
+    log.className = "act-log";
+    el.appendChild(log);
+  }
+  const ln = document.createElement("div");
+  ln.className = "act-line k-" + (payload.kind || "note");
+  ln.textContent = payload.text || "";
+  ln.title = payload.text || "";
+  log.appendChild(ln);
+  while (log.children.length > 6) log.firstChild.remove();
   $("feed").scrollTop = $("feed").scrollHeight;
 }
 function hideTyping(speakerId) {
@@ -653,7 +1096,10 @@ window.uiEvent = ({event, payload}) => {
     transcriptPath = payload.transcript; workspacePath = payload.workspace;
     convProviders = (payload.participants || []).map(p => p.provider);
     if (payload.mode) $("modeSel").value = payload.mode;
+    syncModCtl();
     setSeated(true);       // roles are now APPLIED (a turn each), not just typed
+    imgCache.clear(); resetEditing();      // new chat = new workspace boundary
+    scheduleFilesRefresh();
     $("openTranscript").style.display = ""; $("openWorkspace").style.display = "";
     if (payload.session) {                    // rail row for the chat just born
       activeId = payload.session.id;
@@ -672,13 +1118,24 @@ window.uiEvent = ({event, payload}) => {
   } else if (event === "thinking_done") {
     seatState(payload.speaker, "", seatLabel(payload.speaker));
     hideTyping(payload.speaker);
+  } else if (event === "activity") {
+    typingActivity(payload.speaker, payload);
+    if (payload.kind === "edit" && payload.path)
+      onEditActivity(payload.path, payload.provider);
   } else if (event === "message") {
     hideTyping(payload.speaker);         // backstop; thinking_done owns it
     // rows carry their true caption (e.g. "helper for Claude"); fall back to
     // the round number for payloads that predate stored metas
     addMsg(payload.provider || payload.speaker, payload.name, payload.text,
            payload.meta || (payload.round ? "round " + payload.round : "opening"),
-           payload.role);
+           payload.role, payload.ts, payload.activity);
+    scheduleFilesRefresh();              // the turn may have written files
+  } else if (event === "question") {
+    showQuestion(payload);
+  } else if (event === "question_done") {
+    // engine-side resolution (answered elsewhere, skipped, stop) — the wait
+    // is over whether or not this window answered it
+    if (!payload.qid || payload.qid === askQid) clearAsk();
   } else if (event === "role_applied") {
     roleApplied(payload);
   } else if (event === "status") {
@@ -689,14 +1146,17 @@ window.uiEvent = ({event, payload}) => {
     seatState(payload.speaker, "", payload.fatal ? "session lost" : "error");
   } else if (event === "error") {
     addMsg("system", "relay", payload.message, "");
+    clearAsk();                        // belt and braces; question_done owns it
     finish();
   } else if (event === "done") {
+    clearAsk();
     canContinue = !!payload.can_continue;
     if (transcriptPath) addMsg("system", "relay", canContinue
       ? "Conversation paused. Reply to continue it, or start a new one."
       : "Conversation ended. Transcript saved.", "");
     finish();
     refreshChats();          // updated timestamp / round count / title
+    refreshFiles();
   }
 };
 
@@ -724,6 +1184,17 @@ function seatDisplayName(seat) {
 // label sent to the engine (assign_labels treats explicit labels as-is).
 function refreshSeatNames() {
   seats.forEach(s => { s.el.querySelector(".name").placeholder = seatDisplayName(s); });
+  renderEmptyRoster();
+}
+// The LIVE roster cluster on the empty state: one circle per enabled seat in
+// its real provider color. Dynamic on purpose — the fixed wordmark trefoil
+// is the logo and never encodes a seat count (BRANDING.md).
+function renderEmptyRoster() {
+  const el = document.querySelector(".empty .dots");
+  if (!el) return;                   // a conversation is on stage
+  const on = seats.filter(s => s.el.querySelector(".switch").checked);
+  el.innerHTML = (on.length ? on : seats)
+    .map(s => `<i style="--rc:var(--${s.provider})"></i>`).join("");
 }
 function addSeat(provider, forceId) {
   // forceId: reopening a saved chat rebuilds its seats with their ORIGINAL ids,
@@ -740,6 +1211,7 @@ function addSeat(provider, forceId) {
       <span class="dot"></span><input class="name" type="text" maxlength="24"
         spellcheck="false" autocomplete="off"
         title="Seat name — click to rename (blank = automatic)">
+      <button class="rn" title="Rename this seat">✎</button>
       <span class="state">ready</span>
       <input type="checkbox" class="switch" checked>
       <button class="rm" title="Remove seat">✕</button>
@@ -750,8 +1222,14 @@ function addSeat(provider, forceId) {
   seat.el = d;
   refreshRoleBtn(seat);
   d.querySelector(".role-btn").onclick = () => openRole(seat);
-  d.querySelector(".switch").onchange = e =>
+  d.querySelector(".rn").onclick = () => {
+    const n = d.querySelector(".name");
+    n.focus(); n.select();
+  };
+  d.querySelector(".switch").onchange = e => {
     d.classList.toggle("off", !e.target.checked);
+    renderEmptyRoster();
+  };
   d.querySelector(".rm").onclick = () => {
     seats = seats.filter(s => s !== seat);
     d.remove();
@@ -783,6 +1261,67 @@ function fillSeat(seat) {
          uiCfg.gemini_default_family);
     fillGeminiLevels(eSel, mSel.value, uiCfg.gemini_default_level);
     mSel.onchange = () => fillGeminiLevels(eSel, mSel.value, eSel.value);
+  }
+}
+
+/* ---------- moderator picker ---------- */
+// Mirrors fillSeat but for the one shared #modCtl block. Defaults match the
+// engine's build_moderator fallback (claude-haiku-4-5, low) so an untouched
+// picker is truthful about what will actually moderate.
+function syncModCtl() { $("modCtl").hidden = $("modeSel").value !== "moderator"; }
+$("modeSel").addEventListener("change", syncModCtl);
+function fillModerator(prov, model, effort) {
+  if (!uiCfg) return;
+  const p = prov || $("modProv").value;
+  $("modProv").value = p;
+  const mSel = $("modModel"), eSel = $("modEffort");
+  if (p === "claude") {
+    fill(mSel, uiCfg.claude_models, model || "claude-haiku-4-5");
+    fill(eSel, ["low", "medium", "high", "xhigh", "max"]
+           .map(l => ({id: l, label: "Thinking: " + l})), effort || "low");
+    mSel.onchange = null;
+  } else if (p === "gpt") {
+    fill(mSel, gptModels.map(m => ({id: m.id, label: m.label})),
+         model || uiCfg.gpt_default_model);
+    fillGptLevels(eSel, mSel.value, effort || "low");
+    mSel.onchange = () => fillGptLevels(eSel, mSel.value, eSel.value);
+  } else {
+    fill(mSel, geminiFamilies.map(f => ({id: f.base, label: f.label})),
+         model || uiCfg.gemini_default_family);
+    fillGeminiLevels(eSel, mSel.value, effort || "low");
+    mSel.onchange = () => fillGeminiLevels(eSel, mSel.value, eSel.value);
+  }
+}
+$("modProv").onchange = () => fillModerator($("modProv").value);
+function moderatorCfg() {
+  if ($("modeSel").value !== "moderator") return null;
+  const p = $("modProv").value;
+  const m = $("modModel").value, e = $("modEffort").value;
+  // agy model ids carry the thinking level, same as cfgFor
+  if (p === "gemini") return {provider: p, model: m + "-" + e, effort: ""};
+  return {provider: p, model: m, effort: e};
+}
+// Reopened chats show the moderator they actually ran with — a saved value
+// missing from today's lists is added as an option, never silently swapped.
+function restoreModerator(spec) {
+  if (!uiCfg) return;
+  if (!spec) { fillModerator("claude"); return; }
+  let model = spec.model || "", effort = spec.effort || "";
+  if ((spec.provider || "") === "gemini" && model) {
+    const fam = geminiFamilies.find(f => model === f.base ||
+                                         model.startsWith(f.base + "-"));
+    if (fam) {
+      effort = model.slice(fam.base.length + 1) || effort;
+      model = fam.base;
+    }
+  }
+  fillModerator(spec.provider || "claude", model, effort);
+  const mSel = $("modModel"), eSel = $("modEffort");
+  if (model && mSel.value !== model) {
+    addOption(mSel, model, model); mSel.value = model;
+  }
+  if (effort && eSel.value !== effort) {
+    addOption(eSel, effort, "Thinking: " + effort); eSel.value = effort;
   }
 }
 
@@ -862,9 +1401,15 @@ function setSeated(on) {
   // turn order + end condition + helper budget are baked into the running
   // conversation; continuing keeps them (the ceiling stepper stays live)
   $("modeSel").disabled = seated;
+  $("modProv").disabled = seated;
+  $("modModel").disabled = seated;
+  $("modEffort").disabled = seated;
   $("untilDone").disabled = seated;
   $("spawnSel").disabled = seated;
   $("teamSel").disabled = seated;
+  // the project context is injected in each seat's FIRST preamble, so it is
+  // settled the moment a conversation exists
+  $("projBrief").disabled = seated;
 }
 
 async function applyRole(seat) {
@@ -893,6 +1438,66 @@ function roleApplied(p) {
   }
 }
 
+/* ---------- ask modal (a seat's question to Josh) ---------- */
+// The wait lives in the ENGINE: hiding the modal (✕ / backdrop / Escape)
+// keeps the conversation paused and leaves a pill above the composer to
+// reopen it. Only Answer, Skip, or engine-side resolution (question_done)
+// clears the question.
+let askQid = null, askAsker = "";
+
+function showQuestion(p) {
+  askQid = p.qid; askAsker = p.asker || "A seat";
+  $("askTitle").textContent = askAsker + " asks";
+  $("askModal").style.setProperty("--seat",
+    p.provider ? `var(--${p.provider})` : "var(--muted)");
+  $("askPill").style.setProperty("--seat",
+    p.provider ? `var(--${p.provider})` : "var(--muted)");
+  $("askQ").textContent = p.question || "";
+  const opts = $("askOpts");
+  opts.innerHTML = "";
+  (p.options || []).forEach(o => {
+    const b = document.createElement("button");
+    b.textContent = o;
+    b.onclick = () => answerAsk(o);
+    opts.appendChild(b);
+  });
+  $("askOther").value = "";
+  const pill = $("askPill");
+  pill.textContent = `⏳ ${askAsker} is waiting for your answer — click to open`;
+  pill.hidden = false;
+  openAsk();
+}
+function openAsk() {
+  if (!askQid) return;
+  $("askModal").classList.add("show");
+  const first = $("askOpts").querySelector("button");
+  (first || $("askOther")).focus();
+}
+function hideAsk() { $("askModal").classList.remove("show"); }  // keep waiting
+function clearAsk() {
+  askQid = null;
+  hideAsk();
+  $("askPill").hidden = true;
+}
+async function answerAsk(text) {
+  if (!askQid) return;
+  try {
+    const r = await pywebview.api.answer_question(askQid, text);
+    if (r?.error) addMsg("system", "relay", r.error, "");
+  } finally { clearAsk(); }
+}
+$("askPill").onclick = openAsk;
+$("askHide").onclick = hideAsk;
+$("askModal").onclick = e => { if (e.target === $("askModal")) hideAsk(); };
+$("askSkip").onclick = () => answerAsk("");
+$("askSend").onclick = () => {
+  const t = $("askOther").value.trim();
+  if (t) answerAsk(t); else $("askOther").focus();
+};
+$("askOther").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("askSend").click(); }
+});
+
 /* ---------- accounts ---------- */
 let authStatus = {};        // provider id -> latest status dict
 let convProviders = [];     // providers in the current/paused conversation
@@ -903,7 +1508,7 @@ $("acctBtn").onclick = () => { setAcctNote(""); openAccounts(); };
 $("acctClose").onclick = closeAccounts;
 $("acctModal").onclick = e => { if (e.target === $("acctModal")) closeAccounts(); };
 document.addEventListener("keydown", e => {
-  if (e.key === "Escape") { closeAccounts(); closeRole(); }
+  if (e.key === "Escape") { closeAccounts(); closeRole(); hideAsk(); closeLightbox(); }
 });
 
 function setAcctNote(text, danger) {
@@ -978,7 +1583,7 @@ function renderAccounts(payload) {
           setAcctNote(
             `Logging out ${p.label} signs the ${p.label} CLI out machine-wide — every app and terminal on this PC` +
             (p.provider === "claude" ? ", including any Claude Code sessions" : "") +
-            ` — not just AI Chat. Click "Really log out?" to confirm.`, true);
+            ` — not just Alloy. Click "Really log out?" to confirm.`, true);
           setTimeout(() => {
             if (b.dataset.arm) {
               delete b.dataset.arm; b.textContent = "Log out"; b.classList.remove("danger");
@@ -1063,6 +1668,28 @@ $("say").addEventListener("pointerup", () => {
     sayMinH = Math.min(h, Math.round(innerHeight * 0.7));
     sayAutoH = h;
   }
+});
+// The grab bar above the box — a big obvious target, unlike the native corner
+// grip (which still works but hides next to the scrollbar).
+$("sayGrip").addEventListener("pointerdown", e => {
+  e.preventDefault();
+  const grip = $("sayGrip"), el = $("say");
+  grip.setPointerCapture(e.pointerId);
+  grip.classList.add("dragging");
+  const startY = e.clientY, startH = el.offsetHeight;
+  const move = ev => {
+    sayMinH = Math.max(96, Math.min(Math.round(innerHeight * 0.7),
+                                    startH + (startY - ev.clientY)));
+    sayAutoH = sayMinH;
+    el.style.height = sayMinH + "px";
+  };
+  const up = () => {
+    grip.classList.remove("dragging");
+    grip.removeEventListener("pointermove", move);
+    grip.removeEventListener("pointerup", up);
+  };
+  grip.addEventListener("pointermove", move);
+  grip.addEventListener("pointerup", up);
 });
 function clearSay() { $("say").value = ""; histIdx = -1; autoGrow(); }
 
@@ -1174,7 +1801,9 @@ async function sendSay() {
   transcriptPath = null;
   const cfg = {
     opener: t, turns: rounds, yolo: $("yolo").checked, workspace: customFolder,
+    brief: $("projBrief").checked,
     mode: $("modeSel").value,
+    moderator: moderatorCfg(),
     until_done: untilDoneOn(), ceiling: ceiling,
     spawn: {tier1: true, max_helpers: parseInt($("spawnSel").value, 10) || 0,
             max_teams: parseInt($("teamSel").value, 10) || 0},
@@ -1216,25 +1845,252 @@ $("stopBtn").onclick = async () => {
   addMsg("system", "relay", "Stopping after the current turn…", "");
 };
 
+/* ---------- files rail ---------- */
+// Lists the active working folder newest-first (bridge: list_workspace_files,
+// confined server-side). Refreshes are debounced: agent turns land in bursts.
+let filesTimer = null, filesBusy = false, filesDelay = 0;
+function scheduleFilesRefresh(ms = 1500) {
+  // a faster request beats a pending slower one (edit activity wants ~300ms)
+  if (filesTimer) {
+    if (ms >= filesDelay) return;
+    clearTimeout(filesTimer);
+  }
+  filesDelay = ms;
+  filesTimer = setTimeout(() => { filesTimer = null; filesDelay = 0; refreshFiles(); }, ms);
+}
+async function refreshFiles() {
+  if (!window.pywebview) return;         // boot order: bridge not up yet
+  if (filesBusy) { scheduleFilesRefresh(); return; }
+  filesBusy = true;
+  let r;
+  try { r = await pywebview.api.list_workspace_files(); }
+  catch (e) { r = { workspace: null, files: [] }; }
+  finally { filesBusy = false; }
+  renderFiles(r);
+}
+function fmtSize(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB";
+  return (n / 1048576).toFixed(1) + " MB";
+}
+function fileIcon(name) {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  if (["md", "txt", "rst", "log"].includes(ext)) return "📄";
+  if (["py", "js", "ts", "html", "css", "json", "toml", "yml", "yaml",
+       "ps1", "sh", "bat", "cmd"].includes(ext)) return "⚙️";
+  if (["csv", "xlsx", "pdf"].includes(ext)) return "🧾";
+  if (["zip", "7z", "gz", "tar"].includes(ext)) return "🗜️";
+  return "📎";
+}
+function renderFiles(r) {
+  const list = $("fileList");
+  list.innerHTML = "";
+  if (!r || !r.workspace) {
+    list.innerHTML = '<div class="file-empty">No working folder yet — files ' +
+      'the AIs make show up here once a conversation exists.</div>';
+    return;
+  }
+  if (!r.files.length) {
+    list.innerHTML = '<div class="file-empty">The working folder is empty so far.</div>';
+    return;
+  }
+  let thumbBudget = 24;                  // don't hammer the bridge on huge repos
+  r.files.forEach(f => {
+    const d = document.createElement("div");
+    d.className = "file-row";
+    d.title = f.path;
+    d.dataset.key = f.path.toLowerCase();
+    const ed = editing.get(d.dataset.key);
+    if (ed) {
+      d.classList.add("editing");
+      d.style.setProperty("--who", `var(--${ed.provider})`);
+    }
+    d.innerHTML = '<span class="fi"></span>' +
+      '<span class="fmeta"><div class="fname"></div><div class="fsub"></div></span>' +
+      '<button class="fopen" title="Open in OS">↗</button>';
+    d.querySelector(".fname").textContent = f.name;
+    d.querySelector(".fsub").textContent =
+      relTime(new Date(f.mtime * 1000).toISOString()) + " · " + fmtSize(f.size);
+    if (ed) {
+      const b = document.createElement("span");
+      b.className = "ebadge"; b.textContent = "✎";
+      d.querySelector(".fsub").appendChild(b);
+    }
+    const fi = d.querySelector(".fi");
+    if (f.is_image && thumbBudget-- > 0) {
+      fi.textContent = "🖼️";
+      fetchImage(f.path, false).then(res => {
+        if (res && res.ok) {
+          const im = document.createElement("img");
+          im.alt = f.name; im.src = res.data_uri;
+          fi.textContent = ""; fi.appendChild(im);
+        }
+      });
+    } else fi.textContent = f.is_image ? "🖼️" : fileIcon(f.name);
+    d.onclick = e => {
+      if (e.target.closest(".fopen")) return;
+      if (f.is_image) openLightbox(f.path, f.name);
+      else openCode(f.path, ed ? ed.provider : null, f.abs);
+    };
+    d.querySelector(".fopen").onclick = e => {
+      e.stopPropagation();
+      pywebview.api.open_path(f.abs);
+    };
+    list.appendChild(d);
+  });
+  if (r.truncated) {
+    const n = document.createElement("div");
+    n.className = "file-empty";
+    n.textContent = "Large folder — showing the newest files only.";
+    list.appendChild(n);
+  }
+}
+$("filesRefresh").onclick = e => { e.stopPropagation(); refreshFiles(); };
+
+/* ---------- live code viewer ---------- */
+// Watch a file being written, edit-by-edit: edit activity events (paths
+// pre-confined engine-side) open/refresh the pane; a light poll catches
+// writers with no event stream (Gemini). Changed lines highlight in the
+// editing seat's color — the previous snapshot lives here in JS.
+const editing = new Map();     // lowercased relpath -> {provider, timer}
+let codeFile = null, codeProv = null, codeLines = null, codeMtime = null;
+let codeBusy = false, codePoll = null;
+
+function onEditActivity(path, provider) {
+  const key = path.toLowerCase();
+  const old = editing.get(key);
+  if (old) clearTimeout(old.timer);
+  const entry = { provider, timer: setTimeout(() => {
+    editing.delete(key);
+    const row = $("fileList").querySelector(`[data-key="${CSS.escape(key)}"]`);
+    if (row) { row.classList.remove("editing"); row.querySelector(".ebadge")?.remove(); }
+  }, 6000) };
+  editing.set(key, entry);
+  const row = $("fileList").querySelector(`[data-key="${CSS.escape(key)}"]`);
+  if (row) {
+    row.classList.add("editing");
+    row.style.setProperty("--who", `var(--${provider})`);
+    if (!row.querySelector(".ebadge")) {
+      const b = document.createElement("span");
+      b.className = "ebadge"; b.textContent = "✎";
+      row.querySelector(".fsub")?.appendChild(b);
+    }
+  } else scheduleFilesRefresh(300);      // a NEW file: surface it fast
+  const follow = $("codeFollowChk").checked;
+  if (codeFile === null || (follow && codeFile !== path)) openCode(path, provider);
+  else if (codeFile === path) fetchCode();
+}
+
+function openCode(path, provider, absFallback) {
+  if (codeFile !== path) { codeLines = null; codeMtime = null; }
+  codeFile = path;
+  if (provider) codeProv = provider;
+  $("fileRail").classList.add("code-open");
+  const pane = $("codePane");
+  pane.style.setProperty("--who", codeProv ? `var(--${codeProv})` : "var(--text)");
+  $("codeTitle").textContent = path;
+  $("codeTitle").title = path;
+  fetchCode(absFallback);
+  if (!codePoll) codePoll = setInterval(() => {
+    // only poll while some seat is mid-turn — that's when files change
+    if (typingEls.size > 0) fetchCode();
+  }, 700);
+}
+
+async function fetchCode(absFallback) {
+  if (!window.pywebview || !codeFile || codeBusy) return;
+  codeBusy = true;
+  let r;
+  try { r = await pywebview.api.read_text(codeFile); }
+  catch (e) { r = null; }
+  finally { codeBusy = false; }
+  const body = $("codeBody");
+  if (!r || !r.ok) {
+    // not text / not readable: fall back to opening in the OS when this was
+    // a direct click, else a quiet note (the file may not exist yet)
+    if (absFallback) { closeCode(); pywebview.api.open_path(absFallback); return; }
+    body.innerHTML = "";
+    const n = document.createElement("div");
+    n.className = "code-note";
+    n.textContent = (r && r.error) === "not a text file"
+      ? "Binary file — no preview." : "File not readable (yet).";
+    body.appendChild(n);
+    return;
+  }
+  if (r.mtime !== null && r.mtime === codeMtime) return;   // unchanged
+  codeMtime = r.mtime;
+  const lines = r.text.split("\n");
+  // cheap change detection: common prefix + suffix vs the last snapshot;
+  // the middle band is "what just changed"
+  let lo = 0, hi = 0;
+  if (codeLines) {
+    const max = Math.min(lines.length, codeLines.length);
+    while (lo < max && lines[lo] === codeLines[lo]) lo++;
+    while (hi < max - lo &&
+           lines[lines.length - 1 - hi] === codeLines[codeLines.length - 1 - hi]) hi++;
+  }
+  const changed = codeLines !== null;
+  codeLines = lines;
+  body.innerHTML = "";
+  const frag = document.createDocumentFragment();
+  lines.forEach((ln, idx) => {
+    const d = document.createElement("div");
+    d.className = "cl";
+    if (changed && idx >= lo && idx < lines.length - hi) d.classList.add("chg");
+    d.textContent = ln;
+    frag.appendChild(d);
+  });
+  if (r.truncated) {
+    const n = document.createElement("div");
+    n.className = "code-note";
+    n.textContent = "Large file — showing the first 256 KB.";
+    frag.appendChild(n);
+  }
+  body.appendChild(frag);
+  if (changed && lo < lines.length - hi) {
+    const first = body.children[lo];
+    if (first) first.scrollIntoView({ block: "center" });
+  }
+}
+
+function closeCode() {
+  codeFile = null; codeProv = null; codeLines = null; codeMtime = null;
+  $("fileRail").classList.remove("code-open");
+  $("codeBody").innerHTML = "";
+  if (codePoll) { clearInterval(codePoll); codePoll = null; }
+}
+$("codeClose").onclick = e => { e.stopPropagation(); closeCode(); };
+function resetEditing() {         // workspace boundary changed (new/reopened chat)
+  editing.forEach(e => clearTimeout(e.timer));
+  editing.clear();
+  closeCode();
+}
+
 /* ---------- collapsible rails ---------- */
-// localStorage may not persist for every WebView2 origin — treat it as
-// best-effort and never let a storage error break the toggle itself.
-function bindRailToggle(btnId, cls, storeKey, what) {
-  const btn = $(btnId), main = document.querySelector("main");
+// The « button in each rail's header collapses it to a slim strip; clicking
+// the strip re-opens it. localStorage may not persist for every WebView2
+// origin — best-effort, and a storage error must never break the toggle.
+function bindRail(cls, storeKey, collapseBtnId, railSel) {
+  const main = document.querySelector("main");
+  const rail = document.querySelector(railSel);
   const apply = hidden => {
     main.classList.toggle(cls, hidden);
-    btn.classList.toggle("off", hidden);
-    btn.title = (hidden ? "Show " : "Hide ") + what;
     try { localStorage.setItem(storeKey, hidden ? "1" : "0"); } catch (e) {}
     autoGrow();                    // the stage just changed width
   };
-  btn.onclick = () => apply(!main.classList.contains(cls));
+  // stopPropagation: the « is INSIDE the rail, so without it the same click
+  // bubbles to the strip listener below and reopens the rail instantly
+  $(collapseBtnId).onclick = e => { e.stopPropagation(); apply(true); };
+  rail.addEventListener("click", () => {   // only the collapsed strip reopens
+    if (main.classList.contains(cls)) apply(false);
+  });
   let saved = "0";
   try { saved = localStorage.getItem(storeKey) || "0"; } catch (e) {}
   apply(saved === "1");
 }
-bindRailToggle("tglChats", "no-chats", "hideChatRail", "chat history");
-bindRailToggle("tglSeats", "no-seats", "hideSeatRail", "seats & settings");
+bindRail("no-chats", "hideChatRail", "chatsCollapse", "#chatRail");
+bindRail("no-seats", "hideSeatRail", "seatsCollapse", "#seatRail");
+bindRail("no-files", "hideFileRail", "filesCollapse", "#fileRail");
 
 let ceiling = 60;               // until-done safety ceiling (total turns)
 function untilDoneOn() { return $("untilDone").checked; }
@@ -1411,8 +2267,15 @@ async function openChat(id) {
   transcriptPath = s.transcript || null;   // absent today — button hides itself
   customFolder = null;
   convProviders = (s.participants || []).map(p => p.provider);
+  imgCache.clear(); resetEditing();                     // this chat's workspace, not the last one's
+  refreshFiles();
   $("modeSel").value = s.mode || "round_robin";   // truthful for old chats too
+  restoreModerator(s.moderator);
+  syncModCtl();
   $("untilDone").checked = !!s.until_done;
+  // truthful for chats that ran before this existed, and for ones that opted
+  // out: no brief record means the seats were never given project context
+  $("projBrief").checked = !!s.brief;
   const helpers = (s.spawn || {}).max_helpers || 0;
   $("spawnSel").value = [0, 3, 10].includes(helpers) ? String(helpers) : "10";
   const teams = (s.spawn || {}).max_teams || 0;
@@ -1422,7 +2285,7 @@ async function openChat(id) {
   restoreSeats(s.participants || []);
   $("feed").innerHTML = "";
   msgs.forEach(m => addMsg(m.provider || m.speaker, m.name, m.text,
-                           m.meta || "", m.role));
+                           m.meta || "", m.role, m.ts, m.activity));
   setSeated(!!s.can_continue && (s.participants || []).length > 0);
   addMsg("system", "relay", canContinue
     ? "Reopened — the agents still remember this chat. Reply to pick it up."
@@ -1497,9 +2360,12 @@ function resetStage() {
   $("openTranscript").style.display = "";
   $("openWorkspace").style.display = "";
   $("feed").innerHTML = EMPTY_HTML;
+  renderEmptyRoster();               // the restored empty state is static HTML
   $("say").placeholder = IDLE_PH;
   $("seatList").classList.remove("locked");
   setSeated(false);   // no live seats to re-role — roles are typed again
+  imgCache.clear(); resetEditing();
+  refreshFiles();     // no active chat ⇒ the rail says so
 }
 
 async function newChat() {
@@ -1550,7 +2416,9 @@ window.addEventListener("pywebviewready", async () => {
   gptModels = uiCfg.gpt_models;
   geminiFamilies = uiCfg.gemini_families;
   seats.forEach(fillSeat);
+  fillModerator("claude");
   await refreshChats();
+  refreshFiles();
   $("say").focus();
 });
 </script>

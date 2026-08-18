@@ -22,7 +22,9 @@ from relay import Agent, LoopIO, SessionStore, make_log, run_rounds
 
 class FakeAgent(Agent):
     """Scripted seat. Each entry in `script` is either a reply string, an
-    Exception instance to raise, or "" to exercise the empty-reply backstop."""
+    Exception instance to raise, "" to exercise the empty-reply backstop, or
+    a (reply, [activity dicts]) tuple — the acts fire through `on_activity`
+    (when the loop passed one) before the reply returns."""
 
     name = "Fake"
     cli = "fake"
@@ -32,15 +34,21 @@ class FakeAgent(Agent):
         self.script = list(script)
         self.prompts = []          # every prompt this seat actually received
 
-    def turn(self, message):
+    def turn(self, message, on_activity=None):
         self.prompts.append(message)
         if not self.script:
             item = "(out of script)"
         else:
             item = self.script.pop(0)
+        acts = ()
+        if isinstance(item, tuple):
+            item, acts = item
         if isinstance(item, BaseException):
             raise item             # BaseException so tests can script a
                                    # KeyboardInterrupt "crash" too
+        if on_activity:
+            for act in acts:
+                on_activity(act)
         if not (item or "").strip():
             return ""              # bypasses Agent.turn's raise-on-empty
         # real adapters re-capture a session id in parse() every call; without
@@ -67,11 +75,17 @@ class RecordingIO(LoopIO):
         return [e for e, _ in self.events]
 
 
-def build_state(tmp, scripts, turns=3, labels=None):
-    """Mirror main()/_conversation state construction with FakeAgents."""
+def build_state(tmp, scripts, turns=3, labels=None, workspace=None,
+                brief=None):
+    """Mirror main()/_conversation state construction with FakeAgents.
+
+    `workspace` overrides the default in-session scratch dir so the project
+    context suite can point a state at a fake project folder; `brief` is
+    project_brief()'s record. Both default to the old behaviour exactly."""
     session_dir = os.path.join(tmp, "session")
-    workspace = os.path.join(session_dir, "workspace")
+    workspace = workspace or os.path.join(session_dir, "workspace")
     os.makedirs(workspace, exist_ok=True)
+    os.makedirs(session_dir, exist_ok=True)
     labels = labels or [f"Fake {i+1}" for i in range(len(scripts))]
     agents = [FakeAgent(workspace, s, name=lb)
               for s, lb in zip(scripts, labels)]
@@ -82,7 +96,7 @@ def build_state(tmp, scripts, turns=3, labels=None):
              "workspace": workspace, "transcript": store.transcript,
              "topic": "test", "title": "test", "created": store.created,
              "yolo": False, "turns": turns,
-             "rnd": 0, "max": turns, "ended": False,
+             "rnd": 0, "max": turns, "ended": False, "brief": brief,
              "pending": {i: [] for i in range(len(agents))},
              "introduced": [False] * len(agents), "store": store}
     state["log"] = make_log(state, store)

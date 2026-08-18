@@ -1,4 +1,8 @@
-# ai-chat — AI-to-AI conversation relay
+# Alloy — AI-to-AI conversation relay
+
+*Different metals. One alloy.* Many models, one conversation.
+(The repo, CLI and skills keep the `ai-chat` name on disk — only the brand
+changed. See `BRANDING.md`.)
 
 Kick off a conversation between **Claude** (Claude Code CLI, your Max account),
 **GPT** (OpenAI Codex CLI, your ChatGPT Pro account), and **Gemini** (Google
@@ -8,7 +12,8 @@ you can jump in anytime.
 
 ## Three ways to start a conversation
 
-1. **Desktop app** — double-click **AI Chat** on the Desktop. A native window
+1. **Desktop app (Alloy)** — double-click **AI Chat** on the Desktop (the
+   shortcut keeps its old on-disk name). A native window
    (`app.py`, pywebview/WebView2) with a seat card per participant: toggle who's
    in, pick each one's model and thinking level, click the seat's name to give
    it a custom one ("Optimist" instead of "Claude 2"), and the **Role** button
@@ -16,7 +21,9 @@ you can jump in anytime.
    instructions only that seat sees — with presets); set rounds and choose the
    working folder they operate in. The **Conversation** controls below the
    seats set how the conversation runs: **Turn order** (round-robin, speaker
-   picks next, moderator decides, parallel, free-running), **Until done** —
+   picks next, moderator decides, parallel, free-running — picking "moderator
+   decides" reveals a picker for which AI moderates: provider, model, and
+   thinking level, defaulting to a cheap Claude), **Until done** —
    which turns the rounds stepper into a safety ceiling and lets the agents
    decide when the task is finished — and how many **Helpers** (one-shot AIs
    a seat can spawn) and **Teams** (whole sub-conversations that report back)
@@ -25,15 +32,21 @@ you can jump in anytime.
    message in the bottom bar and hit **Send** to start the conversation (it's
    delivered to every seat as your kickoff); anything you type after that joins
    as an interjection, and the header shows a **Stop** button while it runs.
-   The message box grows as you type and can be dragged taller by its resize
-   grip; the 📎 button (or pasting a screenshot straight into the box) attaches
-   files, which are saved into the working folder and pointed out to every
-   seat. The **Chats** and **Seats** header buttons collapse either sidebar
-   for a full-width transcript. The
+   The message box starts several lines tall, grows as you type, and the grab
+   bar above it drags it to any height; the 📎 button (or pasting a screenshot
+   straight into the box) attaches files, which are saved into the working
+   folder and pointed out to every seat. Each sidebar collapses with the **«**
+   button at its top — a collapsed bar becomes a slim strip; click it to bring
+   the bar back. The ✎ next to a seat's name (or just clicking the name)
+   renames that seat. The
    **"+ Add seat"** row adds more seats of any provider (two Claudes,
    2×Claude + 2×GPT, etc. — auto-named "Claude", "Claude 2", …) and the ✕ on a
    card removes it. Live transcript with per-speaker colors; Transcript/Folder
-   buttons when it ends. When the rounds run out the conversation only
+   buttons when it ends. Images the agents mention or you attach render as
+   inline thumbnails right in the chat (click one for a full-size lightbox
+   view), a **Files** rail on the right lists everything in the working folder
+   newest-first with previews and an open-in-Explorer button, and every
+   message has a copy button and selectable text. When the rounds run out the conversation only
    **pauses**: type another message to continue it (same participants, same
    memory, another batch of rounds), or hit **New conversation** to start
    fresh. The left chat rail lists every saved conversation on a single line
@@ -76,13 +89,16 @@ Options:
 | `--role "SEAT=NAME"` | none | Public role name for a seat, shown to every seat in the roster line; repeatable. `SEAT` is the same label-or-provider grammar as `/clear`; a typo is a hard error, not a silent no-op |
 | `--role-instructions "SEAT=TEXT"` | none | Private role instructions only that seat sees; repeatable, same `SEAT` grammar |
 | `--yolo` | off | Full autonomy incl. shell access (use with care) |
+| `--workspace PATH` | fresh scratch dir | Run the conversation inside an existing project folder instead of a private scratch dir. The folder's AI docs then become shared context for every seat (see below) |
+| `--no-brief` | on | Skip that shared context and leave each seat with whatever its own CLI happens to load |
 | `--mode M` | round-robin | Turn order: `round-robin` (fixed), `speaker` (each reply ends with `[[NEXT: seat]]` naming who goes next), `moderator` (a cheap side call picks each turn), `parallel` (everyone answers at once in simultaneous rounds), `free` (seats reply whenever messages arrive, interleaved live) |
 | `--moderator P` | claude:claude-haiku-4-5:low | Who moderates in `--mode moderator` (`provider[:model[:effort]]`); not a seat — one cheap stateless call per turn, and it can call the conversation DONE |
 | `--until-done` / `--ceiling N` | off / 60 | No round cap: run until a seat wraps (or the moderator says DONE), hard-stopped at N total turns as the spend backstop; `/ceiling N` adjusts mid-run |
 | `--spawn-helpers N` | 0 | Let seats spawn up to N one-shot helper AIs: a reply ending `[[SPAWN: provider[:model[:effort]] \| task]]` runs a helper in the shared workspace while the conversation continues; the result returns only to the requester |
 | `--spawn-teams N` | 0 | Let seats spawn up to N whole sub-conversations: `[[TEAM: seats \| rounds=N mode=m \| task]]` runs a child chat (its own transcript, reopenable from the app's rail, marked ↳) that reports its outcome back to the requester |
 | `--no-native-subagents` | on | Stop telling seats they may use their CLI's built-in subagent tools (Claude's Task tool, Codex multi-agent) |
-| `--claude-model` / `--claude-effort` | Opus 4.8 / high | `claude-fable-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5` (aliases `opus`/`sonnet`/`haiku` also work) · `low\|medium\|high` |
+| `--no-ask` | on | Stop telling seats they may put a question to you: a reply ending `[[ASK: question \| option A \| option B]]` PAUSES the conversation until you answer (app: a popup with option buttons, an "Other" box and Skip; CLI: a console prompt where a number picks an option). The answer is shared with every seat; an unanswered question resumes the chat with a note |
+| `--claude-model` / `--claude-effort` | Opus 4.8 / high | `claude-fable-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5` (aliases `opus`/`sonnet`/`haiku` also work) · `low\|medium\|high\|xhigh\|max` |
 | `--gpt-model` / `--gpt-effort` | gpt-5.6-sol / high (config.toml) | any Codex model · `low`…`ultra` (model-dependent; app reads the live list from `~\.codex\models_cache.json`) |
 | `--gemini-model` / `--gemini-effort` | gemini-3.7-flash-high / in slug | see `agy models` for slugs |
 
@@ -91,6 +107,40 @@ Example — heavyweight debate: `ai-chat "topic" --claude-effort high --gemini-m
 Example — cheap fast chat: `ai-chat "topic" --claude-model haiku --gpt-effort low --gemini-model gemini-3.7-flash-low`.
 Example — Claude vs Claude: `ai-chat "topic" --agents claude:claude-opus-4-8:high,claude:claude-haiku-4-5:low`.
 Example — role team: `ai-chat "build it" --agents "claude=Researcher,gpt=Coder,claude=Reviewer" --role-instructions "Researcher=Find and verify facts; cite them; don't write code" --role-instructions "Coder=Implement the agreed design in the workspace" --role-instructions "Reviewer=Review only: file, line, problem, fix"` (here the seat labels already read as roles; add `--role` as well when you want the explicit "Roles:" roster line in every preamble).
+
+## Talking about a real project
+
+Point a conversation at a project folder — `--workspace C:\my\project`, or the
+**Working folder → Choose** button in the app — and the agents run inside it,
+reading its files.
+
+There's a catch worth knowing, because it used to bite silently. Each CLI only
+auto-loads *its own* doc from that folder: Claude reads `CLAUDE.md`, GPT reads
+`AGENTS.md`, Gemini reads `AGENTS.md`/`GEMINI.md`. Most repos have one of those,
+not three — so in a repo with only a `CLAUDE.md`, the Claude seat would arrive
+having read your whole project and the other two would arrive knowing nothing,
+with no sign of it in the transcript. One seat sounds authoritative, the others
+guess.
+
+So ai-chat now gives all of them the same context:
+
+- **Small doc sets are quoted verbatim** to every seat. Free, nothing is
+  written anywhere, and each seat is told which docs it already had.
+- **Doc sets too large to quote** get summarized once into `AI-CHAT.md` in the
+  project folder, tagged with the source files' hashes. Later chats reuse it for
+  free and only rebuild it when you actually edit those docs — and the chat says
+  so when it does. It's a generated cache (worth adding to `.gitignore`); the
+  header inside it says as much.
+
+If the summary can't be built, the seats are told that plainly and pointed at
+the docs — nothing is invented. Reopening an old chat replays the context it was
+originally given; if the docs have moved on since, you get a notice rather than a
+silent swap. Untick **Share the folder's AI docs with every seat** (or pass
+`--no-brief`) to turn the whole thing off.
+
+Agents are also told a chosen folder is your real project and not to change
+files there unless you ask. That warning is advice, not a sandbox — `--yolo`
+removes the guardrails entirely, so point it at a git repo you can `git diff`.
 
 ## While it's running
 
@@ -107,6 +157,14 @@ Example — role team: `ai-chat "build it" --agents "claude=Researcher,gpt=Coder
 - **`Ctrl+C`** — hard stop; transcript is still saved.
 - Remote interjection: write text into `sessions\<run>\say.txt` (from another
   Claude session, SSH, the phone…) — same effect as typing.
+- **Questions to you**: when a seat needs your decision it can end a reply
+  with `[[ASK: …]]` — the app pops a question box (option buttons + an
+  "Other" box + Skip) and the conversation waits for you; closing the box
+  leaves a "waiting for your answer" pill above the composer to reopen it.
+  In the terminal it's a console prompt (a number picks an option; say.txt
+  works too). Seats are also told to mark the one key line of a reply with
+  `==double equals==` — the app renders it highlighted, and trailing
+  directives show as small chips instead of raw brackets.
 
 ## Where things land
 
@@ -118,7 +176,11 @@ named from your opening message):
 - `meta.json` — participant settings, pending queues, round state, and each
   CLI's session id; this is what makes restart-safe continuation possible.
 - `workspace\` — a scratch folder all participants share; they can co-write files
-  there (ask them to "write findings.md" etc.).
+  there (ask them to "write findings.md" etc.). Absent when you chose your own
+  working folder — that folder is used directly.
+- `project-context.md` — only when the chat used a chosen working folder: the
+  exact shared-context text the seats were given, kept so reopening the chat
+  replays what they actually saw.
 
 Terminal-created chats use the same files and appear in the desktop app's chat
 rail, so a terminal conversation can be reopened there too. A conversation

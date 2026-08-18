@@ -2,8 +2,9 @@
 
 Planned with Josh 2026-08-16 (mode/scope decisions his), designed via three
 parallel plan agents, reconciled and implemented by Claude the same day.
-**Status: SHIPPED — all nine phases landed and verified** (102 token-free tests
-in `tests/`, plus one cheap real run per feature). This is the sequel
+**Status: SHIPPED — all nine phases landed and verified** (111 token-free tests
+across this doc's ten suites as of 2026-08-16, plus one cheap real run per
+feature). This is the sequel
 ROLES_DESIGN.md:11 explicitly deferred ("turn-taking changes are out of
 scope"). All file references verified against the working tree 2026-08-16.
 
@@ -19,9 +20,10 @@ control in the app's Conversation group), never per-seat capability:
   (off by default) · tier 3 `--spawn-teams N` (off by default)
 
 Out of scope, deliberately: per-seat permissions, live UI for child-team
-feeds (children replay from the rail), recursion beyond depth 1, a moderator
-picker in the UI (cfg supports `moderator: {provider, model, effort}`;
-default claude:claude-haiku-4-5:low).
+feeds (children replay from the rail), recursion beyond depth 1. (A moderator
+picker in the UI was originally deferred here; it shipped 2026-08-16 —
+`#modCtl` in ui/index.html feeds cfg `moderator: {provider, model, effort}`,
+default claude:claude-haiku-4-5:low.)
 
 ## The one hard rule: commit-consume
 
@@ -74,7 +76,7 @@ Decided against, with reasons:
 ## Directives: one trailing-token grammar
 
 `peel_directives` (relay.py) owns `[[WRAP]]`, `[[NEXT: seat]]`,
-`[[SPAWN: …]]`, `[[TEAM: …]]` (+ reserved `PASS`). `wrap_called` is a
+`[[SPAWN: …]]`, `[[TEAM: …]]`, `[[ASK: …]]` (+ reserved `PASS`). `wrap_called` is a
 one-liner over it, so the grammars cannot drift. Rules inherited from the
 wrap token's two documented bugs: a directive fires only when it TERMINATES
 the reply (sentence-close form fires; mid-reply mentions have text after
@@ -113,6 +115,43 @@ parse separately).
   READER without FILE_SHARE_DELETE (editor, indexer, a test polling
   meta.json) blocks the rename with PermissionError. Found the hard way by
   a polling test; it was always a latent hazard for saves.
+
+## Asking Josh — [[ASK: question | option | …]]
+
+A seat may END a reply with `[[ASK: question | option A | option B]]`
+(options optional, ≤6; the pipe grammar means the question cannot contain
+`|`). `handle_ask_directive` runs after `commit_reply` in every loop and
+BLOCKS on the new `LoopIO.ask_human(payload, abort=None) -> str|None` seam:
+
+- **Headless default returns `None` immediately** — tests and child-team
+  runs never hang; the requester gets a "(Relay: Josh was unavailable…)"
+  note instead. Never forge: a missing answer is a note, an answer is a real
+  Josh row (`meta="answer to <name>"`) fanned out to EVERY seat like an
+  interjection.
+- **The wait happens OUTSIDE `state["lock"]`** (it can be minutes; the
+  handler takes the lock only around mutations). Sequential: the loop simply
+  pauses. Parallel: the round barrier waits; the coordinator's drain keeps
+  /stop live. Free: the asking seat blocks with `busy[i]` held (cap-stop
+  can't fire mid-question) while the others keep talking until FREE_MAX_LEAD
+  throttles; `abort=flow-stop` unblocks it on a fatal elsewhere.
+- **Gate `state["ask"]`**: True from the app and the CLI (`--no-ask` to
+  disable), False in child teams / bare states, persisted additively in meta
+  (`ask`, `ask_pending`) — the preamble's "Asking Josh" block and the
+  softened header sentence toggle with it, so seats are never promised a
+  channel the front end doesn't provide.
+- **Crash safety**: `ask_pending` is saved BEFORE the wait; `announce_lost_ask`
+  (run start, next to `announce_lost_helpers`) turns a leftover marker into
+  one system note + a requester note — a lost question is never re-popped
+  (the conversation state it came from is gone).
+- **App front end**: `_AppIO.ask_human` emits a `question` event, blocks on a
+  per-qid queue polling `_stop_flag`; `Api.answer_question(qid, text)` is a
+  pure bridge-thread enqueue (empty text = explicit skip); `question_done`
+  always follows. The UI modal can be hidden ("answer later") — the wait is
+  engine-side and a composer pill reopens it. CLI: `CLIIO.ask_human` prompts
+  on the console (number picks an option; any text answers; a `/command` is
+  re-queued to the loop and resolves the question unanswered); its
+  `_asking` flag stops the concurrent coordinator drain from stealing the
+  typed answer in parallel/free.
 
 ## Until-done
 
@@ -159,7 +198,7 @@ met."
 
 ## Landed — verification record (2026-08-16)
 
-Token-free: 102 tests across `tests/test_loop.py`, `test_scheduler.py`,
+Token-free: 111 tests (as of 2026-08-16) across `tests/test_loop.py`, `test_scheduler.py`,
 `test_modes.py`, `test_until_done.py`, `test_parallel.py`, `test_free.py`,
 `test_spawn_tier1.py`, `test_spawn_helpers.py`, `test_spawn_teams.py`,
 `test_app_headless.py` — the Phase-1 loop extraction is what made the loop

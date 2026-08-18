@@ -24,7 +24,7 @@ class RehydratableFake(Agent):
     name = "Fake"
     cli = "fake"
 
-    def turn(self, message):
+    def turn(self, message, on_activity=None):
         item = self.script.pop(0) if getattr(self, "script", None) else "(dry)"
         if isinstance(item, BaseException):
             raise item

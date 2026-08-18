@@ -42,6 +42,14 @@ class NoteGatingTests(unittest.TestCase):
         allow = next(c for c in cmd if c.startswith("--allowedTools="))
         self.assertIn("Task", allow.split("=", 1)[1].split(","))
 
+    def test_claude_print_prompt_is_bound_to_p(self):
+        a = ClaudeAgent(self.tmp)
+        a.session_id = "saved-session"
+        cmd = a.build_cmd("continue this chat")
+        self.assertEqual(cmd[1:3], ["-p", "continue this chat"])
+        resume = cmd.index("--resume")
+        self.assertEqual(cmd[resume + 1], "saved-session")
+
     def test_policy_off_hides_the_note(self):
         a = ClaudeAgent(self.tmp, yolo=False)
         self.assertNotIn("Delegation", self.pre(a, {"tier1": False}))

@@ -36,7 +36,7 @@ class SleepyAgent(FakeAgent):
         super().__init__(workspace, script, name=name, **kw)
         self.delay = delay
 
-    def turn(self, message):
+    def turn(self, message, on_activity=None):
         time.sleep(self.delay)
         return super().turn(message)
 
@@ -242,6 +242,60 @@ class FreeModeTests(unittest.TestCase):
         recleared = [p for p in b.prompts if "cleared your context" in p]
         self.assertTrue(recleared)
         self.assertIn("You are B", recleared[0])
+
+    # ------------------------------------------------------- [[ASK]] flow --
+    def test_ask_answered_in_free_mode(self):
+        from test_ask import AskIO
+
+        state = free_state(self.tmp,
+                           [["q [[ASK: pick | A | B]]", "a2"],
+                            ["b1", "b2"]],
+                           turns=2, labels=["A", "B"], opener="go")
+        state["ask"] = True
+        io = AskIO(answers=["B"])
+        outcome = run_rounds(state, io)
+        self.assertEqual(outcome, "cap")
+        self.assertEqual(len(io.asked), 1)
+        b = state["agents"][1]
+        self.assertTrue(any("Josh (human) answers: B" in p
+                            for p in b.prompts))
+        self.assertIsNone(state.get("ask_pending"))
+
+    def test_blocked_ask_unblocked_by_fatal_abort(self):
+        # seat A waits on Josh; seat B dies fatally -> flow-stop -> abort()
+        # unblocks the waiter (should_stop never sees free mode's stop)
+        asked_evt = threading.Event()
+        result = {}
+
+        class BlockingAskIO(RecordingIO):
+            def ask_human(self, payload, abort=None):
+                asked_evt.set()
+                deadline = time.time() + 10
+                while time.time() < deadline:
+                    if abort and abort():
+                        result["aborted"] = True
+                        return None
+                    time.sleep(0.05)
+                result["aborted"] = False
+                return None
+
+        class WaitThenFail(FakeAgent):
+            def turn(self, message, on_activity=None):
+                self.prompts.append(message)
+                asked_evt.wait(10)
+                raise RuntimeError(
+                    "No conversation found with session ID: dead")
+
+        state = free_state(self.tmp,
+                           [["q [[ASK: pick | A ]]"], []],
+                           turns=2, labels=["A", "B"], opener="go")
+        b_old = state["agents"][1]
+        state["agents"][1] = WaitThenFail(b_old.workspace, [], name="B")
+        state["ask"] = True
+        outcome = run_rounds(state, BlockingAskIO())
+        self.assertEqual(outcome, "fatal")
+        self.assertTrue(result.get("aborted"),
+                        "ask_human was not unblocked by the abort signal")
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ class StubHelper(Agent):
     prompts = []
     fail = False
 
-    def turn(self, message):
+    def turn(self, message, on_activity=None):
         StubHelper.prompts.append(message)
         if StubHelper.fail:
             raise RuntimeError("helper exploded")

@@ -27,7 +27,7 @@ class StubChild(Agent):
     cli = "fake"
     replies = []
 
-    def turn(self, message):
+    def turn(self, message, on_activity=None):
         self.session_id = f"fake-{self.uid}"
         if not StubChild.replies:
             return "(dry)"

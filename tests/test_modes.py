@@ -179,7 +179,7 @@ class FakeModerator(Agent):
     picks = []
     prompts = []
 
-    def turn(self, message):
+    def turn(self, message, on_activity=None):
         FakeModerator.prompts.append(message)
         item = FakeModerator.picks.pop(0)
         if isinstance(item, BaseException):
