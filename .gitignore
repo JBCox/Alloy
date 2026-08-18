@@ -9,6 +9,8 @@ ui/_harness.html
 # CLAUDE.md next to CLAUDE.md — a second source of truth that drifts. Rebuild
 # cost is one cheap CLI call, and only when the sources actually change.
 AI-CHAT.md
+# One-off operator briefs belong to the local workflow, not source history.
+PROMPT.txt
 # app.py's stdout/stderr when launched from the desktop shortcut
 app-stdout.log
 app-stderr.log
