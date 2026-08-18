@@ -91,14 +91,14 @@ Options:
 | `--yolo` | off | Full autonomy incl. shell access (use with care) |
 | `--workspace PATH` | fresh scratch dir | Run the conversation inside an existing project folder instead of a private scratch dir. The folder's AI docs then become shared context for every seat (see below) |
 | `--no-brief` | on | Skip that shared context and leave each seat with whatever its own CLI happens to load |
-| `--mode M` | round-robin | Turn order: `round-robin` (fixed), `speaker` (each reply ends with `[[NEXT: seat]]` naming who goes next), `moderator` (a cheap side call picks each turn), `parallel` (everyone answers at once in simultaneous rounds), `free` (seats reply whenever messages arrive, interleaved live) |
+| `--mode M` | round-robin | Orchestration: `round-robin` (fixed), `speaker` (each reply ends with `[[NEXT: seat]]` naming who goes next), `moderator` (a cheap side call picks each turn), `supervisor` (a stateless planner decomposes the goal into isolated concurrent workstreams with capability gating and filesystem verification), `parallel` (everyone answers at once in simultaneous rounds), `free` (seats reply whenever messages arrive, interleaved live) |
 | `--moderator P` | claude:claude-haiku-4-5:low | Who moderates in `--mode moderator` (`provider[:model[:effort]]`); not a seat — one cheap stateless call per turn, and it can call the conversation DONE |
 | `--until-done` / `--ceiling N` | off / 60 | No round cap: run until a seat wraps (or the moderator says DONE), hard-stopped at N total turns as the spend backstop; `/ceiling N` adjusts mid-run |
 | `--spawn-helpers N` | 0 | Let seats spawn up to N one-shot helper AIs: a reply ending `[[SPAWN: provider[:model[:effort]] \| task]]` runs a helper in the shared workspace while the conversation continues; the result returns only to the requester |
 | `--spawn-teams N` | 0 | Let seats spawn up to N whole sub-conversations: `[[TEAM: seats \| rounds=N mode=m \| task]]` runs a child chat (its own transcript, reopenable from the app's rail, marked ↳) that reports its outcome back to the requester |
 | `--no-native-subagents` | on | Stop telling seats they may use their CLI's built-in subagent tools (Claude's Task tool, Codex multi-agent) |
 | `--no-ask` | on | Stop telling seats they may put a question to you: a reply ending `[[ASK: question \| option A \| option B]]` PAUSES the conversation until you answer (app: a popup with option buttons, an "Other" box and Skip; CLI: a console prompt where a number picks an option). The answer is shared with every seat; an unanswered question resumes the chat with a note |
-| `--claude-model` / `--claude-effort` | Opus 4.8 / high | `claude-fable-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5` (aliases `opus`/`sonnet`/`haiku` also work) · `low\|medium\|high\|xhigh\|max` |
+| `--claude-model` / `--claude-effort` | Opus 5 / high | `claude-fable-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5` (aliases `opus`/`sonnet`/`haiku` also work) · `low\|medium\|high\|xhigh\|max` |
 | `--gpt-model` / `--gpt-effort` | gpt-5.6-sol / high (config.toml) | any Codex model · `low`…`ultra` (model-dependent; app reads the live list from `~\.codex\models_cache.json`) |
 | `--gemini-model` / `--gemini-effort` | gemini-3.7-flash-high / in slug | see `agy models` for slugs |
 
@@ -154,6 +154,11 @@ removes the guardrails entirely, so point it at a git repo you can `git diff`.
   without losing the thread). Seat = a label like `claude 2` or a provider
   (`claude`/`gpt`/`gemini`); omit it to hit every seat. `/help` lists these.
   In the app these also work while paused between batches.
+- **`/retro`** — aggregate finished sessions' `outcome.json` records into the
+  human-editable `sessions/playbook.json` and print the active,
+  provenance-backed coordination heuristics. Explicit feedback reasons count
+  immediately; inferred patterns require recurrence. Unpinned rules expire
+  after 30 days, while pinned and dismissed choices survive refreshes.
 - **`Ctrl+C`** — hard stop; transcript is still saved.
 - Remote interjection: write text into `sessions\<run>\say.txt` (from another
   Claude session, SSH, the phone…) — same effect as typing.

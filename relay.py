@@ -31,6 +31,12 @@ import threading
 import time
 import uuid
 
+# local: outcome records (imported by NAME to avoid shadowing — a child-team
+# call site already binds a local variable called `outcome`)
+from outcome import write_outcome
+import retro
+import workstreams
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSIONS_DIR = os.path.join(BASE_DIR, "sessions")
 TURN_TIMEOUT = 300  # seconds per agent turn (base; scaled by effort below)
@@ -55,15 +61,23 @@ ACTIVITY_KEEP = 50
 # fixed order; the others land phase by phase — IMPLEMENTED_MODES is the gate
 # both front ends validate against, so an unbuilt mode is a clear error at
 # start time, never a silent fall-through to round-robin.
-MODES = ("round_robin", "speaker", "moderator", "parallel", "free")
+MODES = ("round_robin", "speaker", "moderator", "parallel", "free",
+         "supervisor")
 DEFAULT_MODE = "round_robin"
 IMPLEMENTED_MODES = ("round_robin", "speaker", "moderator", "parallel",
-                     "free")
+                     "free", "supervisor")
 
 # "Until done": no round cap — the conversation ends via [[WRAP]], a moderator
 # DONE, /stop, or this hard turn ceiling (the spend backstop; generous but
 # bounded). Orthogonal to mode.
 DEFAULT_CEILING = 60
+
+# Claude's default seat model. PINNED rather than inherited: with no --model
+# flag the claude CLI falls back to ~/.claude/settings.json, which is Josh's
+# own global Claude Code default and drifts independently of this app — so the
+# CLI and the app's picker would silently disagree. app.py pins the same id in
+# precompute_config; change both together (see the model-mirroring rule).
+DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 
 # Free mode fairness: a seat may not START a turn while this many turns ahead
 # of the slowest live seat — a fast cheap seat must not flood the budget.
@@ -198,6 +212,19 @@ class Agent:
         self.effort = effort
         self.session_id = None
         self.uid = uuid.uuid4().hex[:8]
+        # Cancellation. `should_stop()` is only consulted at ROUND boundaries,
+        # so a Stop pressed mid-fan-out used to wait for every in-flight CLI
+        # child to finish its turn — up to turn_timeout MINUTES, with replies
+        # still landing the whole time. That reads to a human as "Stop did
+        # nothing" / "I have to stop each seat" (Josh, 2026-08-18). Stop has
+        # to reach the child process. `_proc` is the live Popen (owned by the
+        # seat's own thread, mutated under `_proc_lock` because cancel() is
+        # called from a DIFFERENT thread); `_cancelled` is sticky for the
+        # duration of one turn so a kill that lands between Popen and the
+        # first read is still reported as a cancel rather than a crash.
+        self._proc = None
+        self._proc_lock = threading.Lock()
+        self._cancelled = False
         # High-effort seats legitimately exceed the base window on a real
         # repo (a first xhigh turn in C:\ai-chat blew 300s twice, 2026-08-16).
         # Instance attr on purpose: tests shrink it to seconds.
@@ -218,6 +245,46 @@ class Agent:
         # document building need no such gate — they stay inside the
         # workspace; a connector reaches the outside world.
         self.connectors = bool(connectors)
+        # PLAN MODE. During the drafting phase a seat must be genuinely unable
+        # to change the workspace — not merely told not to. A preamble line is
+        # theatre: non-yolo claude already holds Write/Edit and codex already
+        # holds workspace-write, so an "only plan" instruction leaves a seat
+        # free to plan and implement in the same turn (the ROLES_DESIGN rule —
+        # a role changes what a seat is TOLD, not what it CAN do). build_cmd
+        # therefore swaps in each CLI's real read-only switch, and plan mode
+        # OUTRANKS yolo: the whole point is that nothing is written before
+        # Josh approves, so a yolo conversation is not exempt.
+        self.plan_mode = False
+
+    def cancel(self):
+        """Kill this seat's in-flight CLI child. Safe from ANY thread, safe to
+        call when nothing is running, and never raises — a stop button that
+        can throw is worse than no stop button.
+
+        Killing mid-stream is already proven safe here: the turn watchdog has
+        always done exactly this (see `_run_streaming`), so the reader loop,
+        the stderr drain and the pipe teardown all handle a dead child.
+        Returns True when there was actually a process to kill."""
+        with self._proc_lock:
+            self._cancelled = True
+            proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return False
+        try:
+            proc.kill()
+        except (OSError, ValueError):
+            return False
+        return True
+
+    def cancelled(self):
+        with self._proc_lock:
+            return self._cancelled
+
+    def clear_cancel(self):
+        """Re-arm the seat for its next turn. The loops call this when a run
+        starts or resumes; without it a cancelled seat would refuse forever."""
+        with self._proc_lock:
+            self._cancelled = False
 
     def turn(self, message, on_activity=None):
         """One CLI call. `on_activity`, when given, receives {kind, text[, …]}
@@ -238,8 +305,14 @@ class Agent:
                         on_activity(act)
                     except Exception:
                         pass
+        # Cancelled while this seat was queued behind another (parallel/free)
+        # or between fan-out and dispatch: never start the child at all.
+        if self.cancelled():
+            raise TurnCancelled(f"{self.name}: stopped before its turn started")
         try:
             rc, stdout, stderr = self._run_streaming(cmd, env, on_line)
+        except TurnCancelled:
+            raise
         except subprocess.TimeoutExpired:
             raise TurnTimeout(
                 f"{self.name} timed out after "
@@ -304,6 +377,18 @@ class Agent:
             # parent has none (pythonw app); output is piped, so suppress.
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
+        # Publish the child so cancel() (another thread) can reach it. If a
+        # cancel landed in the window between the guard in turn() and this
+        # line, honour it here — otherwise that stop would be swallowed and
+        # the turn would run to completion after Josh pressed the button.
+        with self._proc_lock:
+            self._proc = proc
+            already = self._cancelled
+        if already:
+            try:
+                proc.kill()
+            except (OSError, ValueError):
+                pass
         err_parts = []
         t_err = threading.Thread(
             target=lambda: err_parts.append(proc.stderr.read()), daemon=True)
@@ -340,7 +425,14 @@ class Agent:
                     pipe.close()
                 except OSError:
                     pass
+            with self._proc_lock:
+                self._proc = None
         stdout, stderr = "".join(out), "".join(err_parts)
+        # A cancel and the watchdog can both have fired; the human's intent
+        # wins the label, because "you stopped it" is the true sentence and
+        # "it timed out" would send Josh looking for a hang that never was.
+        if self.cancelled():
+            raise TurnCancelled(f"{self.name}: stopped by Josh mid-turn")
         if timed_out.is_set():
             raise subprocess.TimeoutExpired(cmd, self.turn_timeout,
                                             output=stdout, stderr=stderr)
@@ -410,7 +502,14 @@ class ClaudeAgent(Agent):
             cmd += ["--effort", self.effort]
         if self.session_id:
             cmd += ["--resume", self.session_id]
-        if self.yolo:
+        if self.plan_mode:
+            # `plan` is a real Claude Code permission mode (verified against
+            # the installed CLI's own --help, not assumed). --disallowedTools
+            # is belt and braces: unlike --allowedTools, which is only an
+            # AUTO-APPROVE list, this one actually removes the tools.
+            cmd += ["--permission-mode", "plan",
+                    "--disallowedTools=Write,Edit,NotebookEdit,Bash"]
+        elif self.yolo:
             cmd += ["--dangerously-skip-permissions"]
         else:
             allowed = ["WebSearch", "WebFetch", "Read", "Write", "Edit",
@@ -611,7 +710,13 @@ class CodexAgent(Agent):
             common += ["-m", self.model]
         if self.effort:
             common += ["-c", f'model_reasoning_effort="{self.effort}"']
-        if self.yolo:
+        if self.plan_mode:
+            # `read-only` is one of codex's three documented sandbox policies.
+            # Passed as a -c override, not -s, because `codex exec resume`
+            # rejects -s (see the gotchas) and a planning turn is usually a
+            # resumed one.
+            common += ["-c", 'sandbox_mode="read-only"']
+        elif self.yolo:
             common += ["--dangerously-bypass-approvals-and-sandbox"]
         else:
             common += [
@@ -856,12 +961,13 @@ class GeminiAgent(Agent):
             cmd += ["--effort", self.effort]
         if self.session_id:
             cmd += ["--conversation", self.session_id]
-        if self.yolo:
-            cmd += ["--dangerously-skip-permissions"]
-        else:
+        if self.plan_mode or not self.yolo:
             # auto-approve tools but keep terminal restrictions on: print mode
-            # can't answer interactive permission prompts, it would just stall
+            # can't answer interactive permission prompts, it would just stall.
+            # In plan mode the sandbox stays on even for a yolo conversation.
             cmd += ["--dangerously-skip-permissions", "--sandbox"]
+        else:
+            cmd += ["--dangerously-skip-permissions"]
         return cmd
 
     def capability_note(self):
@@ -1090,8 +1196,15 @@ PROVIDERS = {
                    mcp=dict(kind="file",
                             path=os.path.join(HOME, ".gemini", "config",
                                               "mcp_config.json")),
-                   install_hint="Antigravity CLI installer "
-                                "(installs to %LOCALAPPDATA%\\agy)"),
+                   # Official installer (antigravity.google/docs/cli/install),
+                   # but DOWNLOAD THEN RUN as two steps: install.cmd aborts
+                   # ("Illegal shell characters") if & | ; < > ^ appear in its
+                   # own CMDCMDLINE, so the docs' `curl ... && install.cmd`
+                   # one-liner kills itself. PowerShell's `;` is safe — it
+                   # never reaches the cmd child. Verified 2026-08-17.
+                   install_hint='curl.exe -fsSL https://antigravity.google'
+                                '/cli/install.cmd -o "$env:TEMP\\agy-setup.cmd"'
+                                '; & "$env:TEMP\\agy-setup.cmd"'),
     "grok": dict(label="Grok", cli="grok", agent=None,  # adapter not built yet
                  color="#B8B8C8", probe=probe_grok,
                  login_argv=["grok", "login"],
@@ -1593,7 +1706,7 @@ COMPACT_PROMPT = (
 CLEAR_NOTE = ("(Josh cleared your context: you are rejoining the conversation "
               "fresh. Catch up from the messages that follow.)")
 
-HELP_TEXT = ("Commands: /clear [seat] · /compact [seat] · /turns N · "
+HELP_TEXT = ("Commands: /clear [seat] · /compact [seat] · /retro · /turns N · "
              "/ceiling N (until-done chats) · /stop · /help — seat is a name "
              "('claude 2') or a provider (claude/gpt/gemini); no seat means "
              "every seat. Roles are edited on the seat cards — Apply role "
@@ -1834,6 +1947,7 @@ class SessionStore:
             "next_speaker": state.get("next_speaker"),
             "closing": state.get("closing"),
             "moderator": state.get("moderator"),
+            "supervisor": state.get("supervisor"),
             "until_done": bool(state.get("until_done")),
             "turn_ceiling": state.get("turn_ceiling"),
             "spawn": state.get("spawn"),
@@ -1847,8 +1961,14 @@ class SessionStore:
             # ask feature on resume, never continuity
             "ask": bool(state.get("ask")),
             "ask_pending": state.get("ask_pending"),
+            # Additive like the rest: a v2 meta without it rehydrates to None,
+            # which plan_phase() reads as "no plan", i.e. ordinary execution.
+            "plan": state.get("plan"),
             "parent": state.get("parent"),
             "children": state.get("children"),
+            # additive like brief/ask: old code ignoring this loses task
+            # tracking on resume, never continuity
+            "workstreams": state.get("workstreams"),
             "seats": [{
                 "id": state["slot_ids"][i],
                 "provider": state["providers"][i],
@@ -2493,7 +2613,11 @@ def session_summary(session_dir, meta=None):
         "max": meta.get("max", 0),
         "mode": meta.get("mode", DEFAULT_MODE),
         "moderator": meta.get("moderator"),
+        "supervisor": meta.get("supervisor"),
         "brief": meta.get("brief") or None,
+        # so a reopened chat truthfully shows whether it was planned and
+        # whether Josh ever approved it, rather than guessing from the rail
+        "plan": meta.get("plan") or None,
         "until_done": bool(meta.get("until_done")),
         "spawn": meta.get("spawn") or {},
         "parent": meta.get("parent"),
@@ -2571,13 +2695,16 @@ def rehydrate(meta, workspace=None):
         "next_speaker": meta.get("next_speaker"),
         "closing": meta.get("closing"),
         "moderator": meta.get("moderator"),
+        "supervisor": meta.get("supervisor"),
         "until_done": bool(meta.get("until_done")),
         "turn_ceiling": meta.get("turn_ceiling"),
         "spawn": meta.get("spawn"),
         "ask": bool(meta.get("ask")),      # pre-feature metas -> False
         "ask_pending": meta.get("ask_pending"),
+        "plan": meta.get("plan"),
         "parent": meta.get("parent"),
         "children": meta.get("children"),   # hints — a child may be deleted
+        "workstreams": meta.get("workstreams"),
     }
 
 
@@ -2663,6 +2790,85 @@ def peel_directives(reply, known=KNOWN_DIRECTIVES, max_peel=4):
     return body, hits, unknown
 
 
+_TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def parse_task(arg, slot_ids=None):
+    """Parse Supervisor's future ``[[TASK: ...]]`` payload.
+
+    Grammar: ``id | owner=slot | files=a,b | deps=x,y | brief``. ``files``
+    and ``deps`` are optional; owner and the final brief are required. File
+    claims are literal workspace-relative paths in v1, not globs — verification
+    must not promise wildcard semantics it does not implement.
+    """
+    parts = [p.strip() for p in (arg or "").split("|")]
+    if len(parts) < 3:
+        raise ValueError("expected 'id | owner=slot | brief'")
+    task_id, brief = parts[0], parts[-1]
+    # Real planners sometimes label the final free-text field despite the
+    # grammar showing it bare. Accept that harmless spelling without leaking
+    # "brief=" into seat cards, prompts, and settlement summaries.
+    if brief.lower().startswith("brief="):
+        brief = brief.split("=", 1)[1].strip()
+    if not _TASK_ID.fullmatch(task_id):
+        raise ValueError("task id must be 1-64 letters, numbers, '.', '_' or '-'")
+    if not brief:
+        raise ValueError("task brief is empty")
+
+    fields = {}
+    for token in parts[1:-1]:
+        key, sep, value = token.partition("=")
+        key = key.strip().lower()
+        if not sep or key not in ("owner", "files", "deps"):
+            raise ValueError(f"unknown TASK field {token!r}")
+        if key in fields:
+            raise ValueError(f"TASK field {key!r} appears more than once")
+        fields[key] = value.strip()
+    if not fields.get("owner"):
+        raise ValueError("TASK requires owner=<slot_id>")
+
+    raw_owner = fields["owner"]
+    owner = int(raw_owner) if re.fullmatch(r"\d+", raw_owner) else raw_owner
+    if slot_ids is not None and owner not in slot_ids:
+        raise ValueError(f"TASK owner {raw_owner!r} is not a seat in this conversation")
+
+    def csv(name):
+        vals = [v.strip() for v in fields.get(name, "").split(",") if v.strip()]
+        return list(dict.fromkeys(vals))
+
+    files = csv("files")
+    for path in files:
+        norm = os.path.normpath(path)
+        if (os.path.isabs(path) or norm in ("", ".", "..")
+                or norm.startswith(".." + os.sep)):
+            raise ValueError(f"TASK file claim escapes the workspace: {path!r}")
+        if any(ch in path for ch in "*?[]"):
+            raise ValueError(f"TASK file claims are literal paths, not globs: {path!r}")
+
+    deps = csv("deps")
+    if task_id in deps:
+        raise ValueError("a TASK cannot depend on itself")
+    for dep in deps:
+        if not _TASK_ID.fullmatch(dep):
+            raise ValueError(f"invalid dependency id {dep!r}")
+    return workstreams.make_task(task_id, owner, brief, files=files, deps=deps)
+
+
+def parse_task_directives(reply, slot_ids=None, max_tasks=12):
+    """Return ``(body, tasks, unknown)`` for a Supervisor planning reply.
+
+    TASK is opted into here instead of added to ``KNOWN_DIRECTIVES``. Until
+    Supervisor Mode owns a handler, an ordinary seat playing TASK must remain
+    visibly unknown instead of silently doing nothing. Tasks preserve their
+    written order even though the common peeling grammar works from the end.
+    """
+    known = KNOWN_DIRECTIVES + ("TASK",)
+    body, hits, unknown = peel_directives(reply, known=known,
+                                          max_peel=max_tasks)
+    args = [arg for name, arg in reversed(hits) if name == "TASK"]
+    return body, [parse_task(arg, slot_ids=slot_ids) for arg in args], unknown
+
+
 def wrap_called(reply):
     """True only when a seat PLAYS the wrap token to close its turn.
 
@@ -2720,9 +2926,212 @@ class TurnTimeout(RuntimeError):
     """
 
 
+class TurnCancelled(RuntimeError):
+    """Josh stopped this turn — the CLI child was killed mid-flight.
+
+    NOT an error: it carries no reply, so it takes the same never-forge-a-turn
+    path an empty parse takes (queue restored, nothing relayed to the other
+    seats). Retrying it would immediately undo the stop, so it is `no_retry`.
+    """
+
+
 def no_retry(exc):
     """True for failures that must not receive the automatic second attempt."""
-    return isinstance(exc, TurnTimeout)
+    return isinstance(exc, (TurnTimeout, TurnCancelled))
+
+
+def skip_kind(exc):
+    """UI label for a no-retry skip. A stop Josh asked for must not be
+    reported as a timeout — he would go hunting for a hang that never was."""
+    return "stopped" if isinstance(exc, TurnCancelled) else "timeout"
+
+
+def cancel_all(state):
+    """Stop every seat in this conversation at once — the ONE Stop press.
+
+    Pairs with the front end setting its stop flag: the flag ends the loop at
+    the next boundary, this reaches the CLI children that would otherwise keep
+    the loop from getting there for minutes. Returns how many were running.
+    Side-work (helpers/teams) is deliberately untouched; it reports back to
+    its requester and cannot extend the conversation.
+    """
+    killed = 0
+    for agent in state.get("agents") or ():
+        try:
+            if agent.cancel():
+                killed += 1
+        except Exception:          # a stop button must never raise
+            pass
+    return killed
+
+
+def cancel_seat(state, target):
+    """Stop ONE seat mid-turn, leaving the rest of the conversation running.
+
+    `target` is resolved by the same label-first resolver /clear and /compact
+    use, so "claude 2" means the same seat everywhere. Returns the list of
+    seat indexes actually interrupted (empty = it was not mid-turn).
+    """
+    hit = []
+    agents = state.get("agents") or []
+    for i in match_seats(agents, target):
+        try:
+            if agents[i].cancel():
+                hit.append(i)
+        except Exception:
+            pass
+    return hit
+
+
+PLAN_PHASES = ("drafting", "awaiting", "approved")
+
+
+def set_plan_mode(state, on):
+    """Flip every seat between read-only drafting and normal execution.
+
+    The ONLY way plan mode changes behaviour: it changes the flags build_cmd
+    emits on the next turn. Nothing here edits a running child — a seat
+    already mid-turn keeps the capabilities it started with, which is why
+    approval takes effect at a turn boundary rather than instantly.
+    """
+    for agent in state.get("agents") or ():
+        agent.plan_mode = bool(on)
+    return bool(on)
+
+
+def plan_phase(state):
+    return (state.get("plan") or {}).get("phase")
+
+
+def start_plan(state, goal=""):
+    """Enter drafting: seats can read and reason, and cannot write."""
+    state["plan"] = {"phase": "drafting", "goal": goal or "", "tasks": [],
+                     "revision": 1}
+    set_plan_mode(state, True)
+    return state["plan"]
+
+
+def approve_plan(state, goal=None, tasks=None):
+    """Josh approved — unlock writes and record what he actually approved.
+
+    The approved task list is the EDITED one from the card, not the one the
+    seats proposed, because those differ exactly when the gate did its job.
+    An approved plan is then immutable: a later edit becomes a new revision
+    that takes effect at the next task boundary, never a silent mutation
+    under a seat that is already writing files for it.
+    """
+    plan = state.get("plan") or start_plan(state)
+    if plan.get("phase") == "approved":
+        plan["revision"] = plan.get("revision", 1) + 1
+    if goal is not None:
+        plan["goal"] = goal
+    if tasks is not None:
+        plan["tasks"] = list(tasks)
+    plan["phase"] = "approved"
+    set_plan_mode(state, False)
+    return plan
+
+
+PLAN_PROMPT = (
+    "PLANNING PHASE — you are in read-only mode. Your CLI's write tools are "
+    "switched OFF for real, so do not try to create or edit anything yet; "
+    "read, search and reason instead. Agree on a plan with the others, then "
+    "ONE of you ends a reply with the task list, each task on its own trailing "
+    "line as [[TASK: id | owner=<seat name> | what it does]], then "
+    "[[WRAP]]. Josh "
+    "then approves or edits the plan and only THEN do your write tools come "
+    "back."
+)
+
+
+def collect_plan_tasks(state, reply, slot_ids=None):
+    """Harvest TASK directives from a drafting reply into the plan.
+
+    Reuses the Supervisor planner's parser rather than inventing a second
+    grammar — one parser means the two can't drift, which is the whole reason
+    peel_directives is shared.
+    """
+    plan = state.get("plan")
+    if not plan:
+        return []
+    try:
+        _body, tasks, _unknown = parse_task_directives(
+            reply, slot_ids=slot_ids or state.get("slot_ids"))
+    except ValueError:
+        # A seat mistyping the grammar must not take the conversation down.
+        # The reply is still relayed verbatim, so the mistake stays visible
+        # and the others can correct it — the same posture unknown directives
+        # already get.
+        return []
+    for t in tasks:
+        if t is not None:
+            plan["tasks"].append(t)
+    return tasks
+
+
+def plan_gate(state, io):
+    """Drafting finished — pause for Josh, and unlock writes ONLY if he says so.
+
+    Returns True when the plan was approved and the conversation should carry
+    on with write tools restored. An unanswered or declined question leaves
+    every seat read-only and the phase back in drafting: silence must never
+    be read as approval, exactly as an unanswered [[ASK]] never becomes a
+    forged answer.
+    """
+    plan = state.get("plan")
+    if not plan:
+        return False
+    plan["phase"] = "awaiting"
+    plan["id"] = f"plan-{plan.get('revision', 1)}"
+    io.emit("plan", {"id": plan["id"],
+                     "phase": "awaiting", "goal": plan.get("goal", ""),
+                     "tasks": plan.get("tasks", []),
+                     "revision": plan.get("revision", 1)})
+    qid = uuid.uuid4().hex[:8]
+    plan["qid"] = qid          # the card answers THIS question, not a new one
+    answer = io.ask_human({
+        "qid": qid, "kind": "plan",
+        "plan_id": plan["id"], "revision": plan.get("revision", 1),
+        "question": ("The plan is ready — approve it and let the seats start "
+                     "writing, or send them back to planning?"),
+        "options": ["Approve & Execute", "Keep planning"],
+        "tasks": plan.get("tasks", []),
+    })
+    # The answer is either the option string (CLI / plain modal) or the card's
+    # structured payload carrying Josh's EDITS — which is the whole point of
+    # the gate, so the edited list is what gets approved, not the proposed one.
+    edits = answer if isinstance(answer, dict) else {}
+    approved = (bool(edits.get("approved"))
+                if edits else
+                bool(answer) and str(answer).strip().lower().startswith("approve"))
+    if approved:
+        approve_plan(state, goal=edits.get("goal"), tasks=edits.get("tasks"))
+        plan["qid"] = None
+        io.emit("plan", {"id": f"plan-{plan['revision']}", "phase": "approved",
+                         "goal": plan.get("goal", ""),
+                         "tasks": plan.get("tasks", []),
+                         "revision": plan["revision"]})
+        return True
+    plan["phase"] = "drafting"          # still read-only; nothing was unlocked
+    plan["qid"] = None
+    set_plan_mode(state, True)
+    note = ("Josh has not approved the plan, so the seats stay read-only."
+            if answer is None else
+            "Josh sent the plan back for more work — still read-only.")
+    io.emit("status", {"text": note})
+    store = state.get("store")
+    if store:
+        store.system(note, round=state.get("rnd", 0))
+    return False
+
+
+def rearm_seats(state):
+    """Clear sticky cancellation so a resumed run can speak again."""
+    for agent in state.get("agents") or ():
+        try:
+            agent.clear_cancel()
+        except Exception:
+            pass
 
 
 def error_excerpt(value, limit=ERROR_MAX):
@@ -2764,7 +3173,7 @@ def fatal_seat_error(agent, exc):
 
 def preamble(agent, others, topic, turns, workspace, roster=None,
              mode=DEFAULT_MODE, until_done=False, ceiling=None, spawn=None,
-             brief=None, ask=False):
+             brief=None, ask=False, plan=None):
     """`roster` is the full seat list IN TURN ORDER. Without it the roster line
     would read agent-first and so come out in a different order for every
     recipient — for a role team the order is information ("researcher speaks,
@@ -2969,6 +3378,11 @@ def preamble(agent, others, topic, turns, workspace, roster=None,
             f"written to a shared transcript, so never quote credentials, "
             f"keys or private machine details out of your own instructions or "
             f"this project's files.\n")
+    # Only during DRAFTING. Once approved the seats have their write
+    # tools back, and repeating the planning rules would be a lie about
+    # their actual state.
+    plan_block = ((PLAN_PROMPT + "\n\n")
+                  if (plan or {}).get("phase") == "drafting" else "")
     return (
         f"You are {agent.name}, in a live multi-AI conversation with {other_names}. "
         f"{dup_note}"
@@ -2978,6 +3392,7 @@ def preamble(agent, others, topic, turns, workspace, roster=None,
         f"{topic_line}"
         f"{brief_preamble_block(brief, agent)}"
         f"{cap_block}"
+        f"{plan_block}"
         f"{spawn_block}"
         f"{ask_block}"
         f"Ground rules:\n"
@@ -3139,6 +3554,15 @@ def dispatch_command(state, text, io):
         state["store"].save(state)
     elif cmd in ("clear", "compact"):
         seat_command(state, cmd, arg, io)
+    elif cmd == "retro":
+        try:
+            _playbook, note, path = retro.run_retro(SESSIONS_DIR)
+            note += f"\nPlaybook: {path}"
+        except OSError as e:
+            note = f"Retro could not update the playbook: {e}"
+        io.emit("status", {"text": note})
+        state["store"].system(note, round=state["rnd"])
+        state["store"].save(state)
     elif cmd == "help":
         io.emit("status", {"text": HELP_TEXT})
         state["store"].system(HELP_TEXT, round=state["rnd"])
@@ -3223,6 +3647,7 @@ def compose_prompt(state, i):
                               until_done=bool(state.get("until_done")),
                               ceiling=state.get("turn_ceiling"),
                               spawn=state.get("spawn"),
+                              plan=state.get("plan"),
                               brief=state.get("brief"),
                               ask=bool(state.get("ask"))))
         # parallel/free round 1 with no opener: EVERY seat opens
@@ -3252,11 +3677,388 @@ def commit_reply(state, i, reply, consumed, io, activity=None):
                        activity=activity)
     io.emit("message", row)
     for j, other in enumerate(agents):
-        if other is not agent:
+        if other is not agent and workstream_hears(state, i, j):
             state["pending"][j].append(f"{agent.name} said:\n{reply}")
+    settle_workstream(state, i, io)
     state["turn"] = state.get("turn", 0) + 1
     state["store"].save(state)
     return row
+
+
+def workstream_hears(state, i, j):
+    """Fan-out predicate. No workstreams == the old unconditional broadcast,
+    so an ordinary chat is byte-for-byte unaffected by this feature existing."""
+    tasks = state.get("workstreams")
+    if not tasks:
+        return True
+    return workstreams.shares_stream(tasks, state["slot_ids"][i],
+                                     state["slot_ids"][j])
+
+
+def active_workstream(state, i):
+    """Whether seat ``i`` is currently replying as an isolated worker.
+
+    Captured BEFORE commit_reply settles the task. Worker-tail directives are
+    scoped to the task; in particular [[WRAP]] means "my task is finished",
+    never "close the whole conversation".
+    """
+    tasks = state.get("workstreams") or []
+    owner = state["slot_ids"][i]
+    return any(t.get("status") == "active" and t.get("owner") == owner
+               for t in tasks)
+
+
+def settle_workstream(state, i, io):
+    """The seat that just replied owned an active task, so that task is done —
+    verify it against the filesystem, publish the settlement summary to
+    EVERYONE (the one thing that always crosses the isolation boundary), then
+    start whatever its completion unblocked.
+
+    A task whose declared files never appeared settles as `failed`: the summary
+    says so, and it is the requester's problem to reassign. Nothing here forges
+    a delivery, and nothing retries on its own.
+    """
+    tasks = state.get("workstreams")
+    if not tasks:
+        return
+    owner = state["slot_ids"][i]
+    settled = [t for t in tasks
+               if t.get("status") == "active" and t.get("owner") == owner]
+    if not settled:
+        return
+    for t in settled:
+        workstreams.settle(t, state.get("workspace"))
+        note = workstreams.summarize(t)
+        row = state["log"]("relay", note)
+        io.emit("message", row)
+        for j in range(len(state["agents"])):
+            if j != i:
+                state["pending"][j].append(note)
+    assign_workstreams(state, io)
+    io.emit("workstreams", {"tasks": tasks})
+
+
+# Providers whose CLI can actually create files in the workspace. Gemini is
+# absent on purpose: agy generates images but IGNORES the process cwd for file
+# writes (the RELAY copies them in), so it is not a file-writing seat — the
+# same measured capability list the preamble's notes are built from.
+FILE_WRITER_PROVIDERS = {"claude", "gpt"}
+
+
+def workstream_writers(state):
+    """Slot ids of seats that can genuinely deliver a file."""
+    return {state["slot_ids"][i]
+            for i, p in enumerate(state.get("providers") or [])
+            if p in FILE_WRITER_PROVIDERS}
+
+
+def _seat_name(state, slot_id):
+    ids = list(state["slot_ids"])
+    if slot_id in ids:
+        return state["agents"][ids.index(slot_id)].name
+    return str(slot_id)
+
+
+SUPERVISOR_PROMPT = (
+    "You are the Supervisor of a live multi-AI working session. Decompose "
+    "the goal below into tasks the roster can work on AT THE SAME TIME.\n\n"
+    "Roster - plan against these capabilities, not the model names:\n"
+    "{roster}\n\n"
+    "Rules:\n"
+    "1. A task that creates or edits files may ONLY go to a seat marked "
+    "'can write files: yes'. Research, browsing and image work go to "
+    "whoever the tool profile says can do it.\n"
+    "2. For every task that touches files, list the exact "
+    "workspace-relative paths in files=a,b - no wildcards, no absolute "
+    "paths, no '..'. Two tasks must never claim the same path. Omit "
+    "files= for research or discussion tasks.\n"
+    "3. Prefer independent tasks: use deps= only when a task genuinely "
+    "cannot start until another one's files exist. Tasks with no deps run "
+    "simultaneously, which is the whole point.\n"
+    "4. One task per seat to start with; give every seat something if you "
+    "can.\n"
+    "5. Write one or two sentences of rationale, then END your reply with "
+    "the task directives, one per line, nothing after them:\n"
+    "[[TASK: <id> | owner=<seat id> | files=<a,b> | deps=<id,id> | "
+    "brief]]\n\n"
+    "{playbook}"
+    "Goal:\n{goal}"
+)
+
+SUPERVISOR_REPLAN_PROMPT = (
+    "You are the Supervisor repairing failed tasks in a live multi-AI working "
+    "session. Revise ONLY the failed tasks below so the original goal can "
+    "continue.\n\n"
+    "Roster - plan against these capabilities, not the model names:\n"
+    "{roster}\n\n"
+    "Original goal:\n{goal}\n\n"
+    "Failed tasks and objective verification results:\n{failures}\n\n"
+    "Rules:\n"
+    "1. Return exactly one replacement TASK for each failed task, using the "
+    "SAME task id. Existing downstream dependencies point at those ids.\n"
+    "2. You may change owner, brief, and exact workspace-relative file claims "
+    "to repair the failure. Keep the task's original dependencies; the engine "
+    "will preserve them.\n"
+    "3. File work may ONLY go to a seat marked 'can write files: yes'. No "
+    "wildcards, absolute paths, or '..'.\n"
+    "4. This is the task's only automatic replan attempt. Prefer a concrete, "
+    "achievable correction over a larger redesign.\n"
+    "5. Write one concise sentence, then END with the replacement directives, "
+    "one per line and nothing after them:\n"
+    "[[TASK: <same id> | owner=<seat id> | files=<a,b> | revised brief]]"
+)
+
+
+def playbook_block(sessions_dir=None, limit=6):
+    """Active playbook rules, rendered for the Supervisor's planning prompt.
+
+    This is the last hop of the feedback loop: `/retro` derives heuristics
+    from real session outcomes, and THIS is what feeds them back into a
+    decision. Without it the playbook is a report nobody reads.
+
+    Three deliberate constraints. Only `active` rules are shown, so a rule
+    Josh dismissed stays dismissed and a rule that decayed stays gone.
+    Provenance rides along (evidence count), because a planner should be able
+    to weigh a rule seen once against one seen five times, and because a rule
+    that cannot say where it came from should not be steering anything.
+    And the block is capped and returns "" when empty — an empty playbook must
+    cost the prompt nothing, since Windows caps a command line at ~32k chars
+    and the whole prompt travels as one argv element.
+    """
+    try:
+        book = retro.read_playbook(sessions_dir or SESSIONS_DIR) or {}
+        rules = [h for h in book.get("heuristics", [])
+                 if isinstance(h, dict) and h.get("status") == "active"
+                 and h.get("directive")]
+    except Exception:
+        return ""
+    if not rules:
+        return ""
+    rules.sort(key=lambda h: (not h.get("pinned"),
+                              -int(h.get("evidence_count") or 0)))
+    lines = []
+    for h in rules[:limit]:
+        n = int(h.get("evidence_count") or 0)
+        why = "pinned by Josh" if h.get("pinned") else f"seen in {n} session" + ("s" if n != 1 else "")
+        lines.append(f"- {str(h['directive'])[:200]} ({why})")
+    return ("What past sessions actually showed - guidance, not orders; "
+            "ignore any rule that does not fit this goal:\n"
+            + "\n".join(lines) + "\n\n")
+
+
+def supervisor_roster_block(state):
+    """The roster the supervisor plans against, built from the LIVE adapters.
+
+    Capabilities come from each seat's own `capability_note()` and its
+    provider's real write ability - never a hardcoded table. This repo has
+    twice been burned by reasoning about what a product "is" instead of what
+    its CLI actually grants, and a hardcoded block would start lying the
+    moment a provider's tools change.
+    """
+    writers = workstream_writers(state)
+    lines = []
+    for i, agent in enumerate(state["agents"]):
+        slot = state["slot_ids"][i]
+        try:
+            note = agent.capability_note()
+        except Exception:
+            note = None
+        role = f" (role: {agent.role})" if getattr(agent, "role", None) else ""
+        lines.append(
+            f"- seat id {slot!r}: {agent.name}{role} - can write files: "
+            f"{'yes' if slot in writers else 'no'}; "
+            f"{note or 'discussion and reasoning only'}")
+    return "\n".join(lines)
+
+
+def build_supervisor(state):
+    """Stateless planner adapter - same contract as build_moderator: not a
+    seat, no roster entry, no queue, invisible to the seats, and its session
+    id is never reused, which keeps the dead-session-id class out of it."""
+    spec = state.get("supervisor") or {}
+    provider = spec.get("provider") or "claude"
+    model = spec.get("model") or ("claude-haiku-4-5" if provider == "claude"
+                                  else None)
+    effort = spec.get("effort") or ("low" if provider == "claude" else None)
+    return AGENT_TYPES[provider](state["workspace"], yolo=False, model=model,
+                                 effort=effort, name="Supervisor")
+
+
+def plan_workstreams(state, io, goal=None):
+    """One cheap side call that turns the goal into tasks. Returns the tasks.
+
+    Every failure - CLI error, timeout, nothing parseable - degrades to NO
+    tasks, and the session simply runs as an ordinary parallel conversation.
+    A broken planner must never kill a run, and must never invent a plan: an
+    empty result is honest, a fabricated one is not.
+    """
+    goal = (goal or state.get("topic") or "").strip()
+    if not goal:
+        return []
+    prompt = SUPERVISOR_PROMPT.format(roster=supervisor_roster_block(state),
+                                      playbook=playbook_block(),
+                                      goal=goal)
+    try:
+        reply = build_supervisor(state).turn(prompt)
+    except Exception as e:
+        io.emit("status", {"text": f"Supervisor could not plan "
+                                   f"({str(e)[:120]}) - running as a normal "
+                                   f"parallel conversation"})
+        return []
+    try:
+        _body, tasks, _unknown = parse_task_directives(
+            reply or "", slot_ids=list(state["slot_ids"]))
+    except Exception as e:
+        io.emit("status", {"text": f"Supervisor's plan did not parse "
+                                   f"({str(e)[:120]}) - running as a normal "
+                                   f"parallel conversation"})
+        return []
+    if not tasks:
+        io.emit("status", {"text": "Supervisor produced no tasks - running "
+                                   "as a normal parallel conversation"})
+        return []
+    state["workstreams"] = tasks
+    plan = "\n".join(f"[{t['id']}] {_seat_name(state, t['owner'])}: "
+                     f"{t['brief']}"
+                     + (f"  (files: {', '.join(t['files'])})"
+                        if t.get("files") else "")
+                     for t in tasks)
+    io.emit("message", state["log"]("relay", "Supervisor's plan:\n" + plan))
+    assign_workstreams(state, io)
+    return tasks
+
+
+def replan_failed_workstreams(state, io):
+    """Give each failed task one bounded Supervisor repair attempt.
+
+    Called only at the parallel-round barrier, after all seat threads joined,
+    so the stateless planner call never holds the loop lock or changes a task
+    beneath a running worker. Replacement tasks reuse their failed ids and
+    retain their original dependencies, which keeps the existing DAG valid.
+    A planner failure leaves the objective failure visible and final; it never
+    loops, fabricates a task, or erases the first attempt's verification.
+    """
+    tasks = state.get("workstreams") or []
+    failed = [t for t in tasks
+              if t.get("status") == "failed"
+              and int(t.get("replans") or 0) < 1]
+    if not failed or state.get("mode") != "supervisor":
+        return []
+
+    # Spend the attempt before the side call. A crashed or malformed planner
+    # must not be invoked again on every later round.
+    for t in failed:
+        t["replans"] = int(t.get("replans") or 0) + 1
+    state["store"].save(state)
+
+    lines = []
+    for t in failed:
+        v = t.get("verified") or {}
+        problems = []
+        if v.get("missing"):
+            problems.append("missing=" + ",".join(v["missing"]))
+        if v.get("stale"):
+            problems.append("unchanged=" + ",".join(v["stale"]))
+        if not problems:
+            problems.append("verification failed")
+        lines.append(
+            f"- {t['id']}: owner={t.get('owner')!r}; "
+            f"files={','.join(t.get('files') or []) or '(none)'}; "
+            f"brief={t.get('brief')}; {'; '.join(problems)}")
+    prompt = SUPERVISOR_REPLAN_PROMPT.format(
+        roster=supervisor_roster_block(state),
+        goal=(state.get("topic") or "").strip(),
+        failures="\n".join(lines))
+    try:
+        reply = build_supervisor(state).turn(prompt)
+        _body, replacements, _unknown = parse_task_directives(
+            reply or "", slot_ids=list(state["slot_ids"]))
+    except Exception as e:
+        io.emit("status", {"text": "Supervisor could not repair failed "
+                                   f"work ({str(e)[:120]}) — failures remain "
+                                   "visible; no retry was invented"})
+        state["store"].save(state)
+        return []
+
+    wanted = {t["id"]: t for t in failed}
+    by_id = {}
+    for replacement in replacements:
+        tid = replacement["id"]
+        if tid in wanted and tid not in by_id:
+            by_id[tid] = replacement
+    if not by_id:
+        io.emit("status", {"text": "Supervisor returned no valid replacement "
+                                   "for the failed tasks; failures remain "
+                                   "visible"})
+        state["store"].save(state)
+        return []
+
+    repaired = []
+    for pos, old in enumerate(list(tasks)):
+        new = by_id.get(old.get("id"))
+        if new is None or old not in failed:
+            continue
+        new["deps"] = list(old.get("deps") or [])
+        new["replans"] = old["replans"]
+        tasks[pos] = new
+        repaired.append(new)
+        note = (f"Supervisor replanned [{new['id']}] after filesystem "
+                f"verification failed: {_seat_name(state, new['owner'])} — "
+                f"{new['brief']}")
+        io.emit("message", state["log"]("relay", note))
+    assign_workstreams(state, io)
+    state["store"].save(state)
+    return repaired
+
+
+def assign_workstreams(state, io):
+    """Start every task that can run right now. Overlapping file claims are
+    serialized into dependencies first (an ordered plan beats a rejected one),
+    and a task owned by a seat that isn't at this table fails loudly rather
+    than sitting pending forever."""
+    tasks = state.get("workstreams")
+    if not tasks:
+        return
+    # capability BEFORE ordering: a task moved to another seat may collide
+    # with different files than the one it was planned against
+    for kind, tid, old_owner, new_owner in workstreams.capability_gate(
+            tasks, workstream_writers(state)):
+        if kind == "reassigned":
+            note = (f"[{tid}] reassigned from {_seat_name(state, old_owner)} "
+                    f"to {_seat_name(state, new_owner)} — the planned owner's "
+                    f"CLI cannot write files.")
+        else:
+            note = (f"[{tid}] NOT delivered (it claims files and no seat in "
+                    f"this conversation can write them).")
+        io.emit("message", state["log"]("relay", note))
+    workstreams.serialize_conflicts(tasks)
+    ids = list(state["slot_ids"])
+    for t in workstreams.next_assignments(tasks):
+        if t["owner"] not in ids:
+            t["status"] = "failed"
+            t["verified"] = {"ok": False, "missing": list(t.get("files") or []),
+                             "stale": [], "delivered": [], "extra": [],
+                             "unverifiable": False}
+            note = (f"[{t['id']}] {t['brief']} — NOT delivered (no seat "
+                    f"{t['owner']!r} in this conversation).")
+            row = state["log"]("relay", note)
+            io.emit("message", row)
+            continue
+        j = ids.index(t["owner"])
+        t["status"] = "active"
+        t["started_ts"] = time.time()
+        brief = f"Your task [{t['id']}]: {t['brief']}"
+        if t.get("files"):
+            brief += ("\nYou own these paths for this task (no one else will "
+                      "touch them): " + ", ".join(t["files"]) +
+                      "\nCreate or update them for real — the result is "
+                      "verified against the filesystem, not against your "
+                      "report.")
+        brief += ("\nYou are working independently: the other seats are not "
+                  "hearing this, and will get a one-line summary when you "
+                  "finish. Reply when the task is complete.")
+        state["pending"][j].append(brief)
+    io.emit("workstreams", {"tasks": tasks})
 
 
 def commit_skip(state, i, note, io, fatal=False, kind=None, retried=None):
@@ -4055,6 +4857,31 @@ def moderator_pick(state, io, moderator):
 
 
 def run_rounds(state, io):
+    """Thin wrapper around the loop; the loop itself is `_run_rounds`.
+
+    The session's outcome record is written HERE, in a `finally`, because this
+    is the single point every mode and BOTH front ends pass through (parallel
+    and free dispatch from inside `_run_rounds`, and the app's `_rounds` calls
+    this). So the facts land exactly once whether a run ended on the cap, a
+    wrap, /stop, a fatal seat error or an exception on the way out — and no
+    front end has to remember to do it.
+
+    Best-effort by contract: a feedback record that can fail a conversation is
+    strictly worse than no feedback record, so every failure here is swallowed.
+    """
+    ended = None
+    try:
+        ended = _run_rounds(state, io)
+        return ended
+    finally:
+        try:
+            write_outcome(state["store"].dir,
+                          workspace=state.get("workspace"), ended=ended)
+        except Exception:
+            pass
+
+
+def _run_rounds(state, io):
     """The one conversation loop both front ends run.
 
     Per-turn scheduler: each iteration picks ONE seat (closing list, then
@@ -4070,6 +4897,14 @@ def run_rounds(state, io):
 
     Returns how the run ended: 'cap' | 'wrapped' | 'stopped' | 'fatal'.
     """
+    # A run that is starting or resuming re-arms every seat: cancellation is
+    # sticky for the duration of a turn, so without this a seat stopped last
+    # run would refuse to speak forever.
+    rearm_seats(state)
+    if state.get("mode") == "supervisor":
+        if not state.get("workstreams"):
+            plan_workstreams(state, io)
+        return run_parallel(state, io)
     if state.get("mode") == "parallel":
         return run_parallel(state, io)
     if state.get("mode") == "free":
@@ -4206,7 +5041,7 @@ def run_rounds(state, io):
                 if source != "closing":
                     state["cursor"] = slot_ids[(i + 1) % len(agents)]
                 commit_skip(state, i, error_excerpt(e1), io,
-                            kind="timeout", retried=False)
+                            kind=skip_kind(e1), retried=False)
                 continue
             note_retry(state, io, agent, e1)
             # fresh sink: the failed attempt's narration must not double up
@@ -4219,7 +5054,7 @@ def run_rounds(state, io):
                     state["cursor"] = slot_ids[(i + 1) % len(agents)]
                 if no_retry(e2):
                     commit_skip(state, i, error_excerpt(e2), io,
-                                kind="timeout", retried=False)
+                                kind=skip_kind(e2), retried=False)
                 else:
                     commit_skip(state, i,
                                 f"{agent.name} failed twice; skipping this "
@@ -4239,7 +5074,26 @@ def run_rounds(state, io):
                         f"this round (nothing sent to the others).", io)
             continue
 
-        wrapped_now = state["closing"] is None and wrap_called(reply)
+        worker_turn = active_workstream(state, i)
+        # During drafting, TASK lines are the plan and [[WRAP]] means "the
+        # plan is ready", NOT "the conversation is over" — so it opens the
+        # approval gate instead of closing remarks. Reusing the existing
+        # tokens keeps one grammar; a new PLAN directive could drift from it.
+        # During drafting, TASK lines are the plan and [[WRAP]] means "the
+        # plan is ready", NOT "the conversation is over" — so it opens the
+        # approval gate instead of closing remarks. Reusing the existing
+        # tokens keeps ONE grammar; a new PLAN directive could drift from it.
+        # The gate itself runs AFTER commit_reply (below), for the same reason
+        # the ask directive does: the question must ride a reply that is
+        # already recorded and whose queues are already saved.
+        drafting = plan_phase(state) == "drafting"
+        if drafting:
+            collect_plan_tasks(state, reply)
+        wrapped_now = (not worker_turn and state["closing"] is None
+                       and wrap_called(reply))
+        plan_ready = wrapped_now and drafting
+        if plan_ready:
+            wrapped_now = False          # wrap means "plan done", not "chat done"
         if wrapped_now:
             start_closing(state, i)
         elif state["mode"] == "speaker" and state["closing"] is None:
@@ -4253,6 +5107,10 @@ def run_rounds(state, io):
         # after the commit: the question rides the recorded reply, and the
         # wait (possibly minutes) happens with every queue already saved
         handle_ask_directive(state, i, reply, io)
+        if plan_ready:
+            # blocks until Josh answers; declining leaves every seat read-only
+            plan_gate(state, io)
+            store.save(state)
         if wrapped_now:
             io.emit("status", {"text": f"{agent.name} called it — "
                                        f"closing remarks…"})
@@ -4439,6 +5297,7 @@ def run_parallel(state, io):
                     return
                 try:
                     with lock:
+                        worker_turn = active_workstream(state, i)
                         consume_closing_slot()
                         commit_reply(state, i, reply, consumed, io,
                                      activity=acts)
@@ -4457,7 +5316,8 @@ def run_parallel(state, io):
                 # OUTSIDE the lock: the ask wait can take minutes, and the
                 # round barrier (which keeps /stop live) waits for it
                 handle_ask_directive(state, i, reply, io, lock=lock)
-                results[i] = "wrap" if wrap_called(reply) else "ok"
+                results[i] = ("wrap" if not worker_turn and wrap_called(reply)
+                              else "ok")
             finally:
                 io.emit("thinking_done", {"speaker": key})
 
@@ -4470,6 +5330,13 @@ def run_parallel(state, io):
                 stopped = True          # takes effect at the barrier
             for t in threads:
                 t.join(timeout=0.25)
+
+        # Supervisor repair is deliberately a barrier operation: every worker
+        # has stopped, so a stateless side call cannot block sibling commits or
+        # mutate a task beneath its owner. Each failed task gets one attempt.
+        if (not closing_round and not stopped and not io.should_stop()
+                and not any(r == "fatal" for r in results.values())):
+            replan_failed_workstreams(state, io)
 
         if closing_round:
             io.emit("status", {"text": "Conversation wrapped."})
@@ -4730,10 +5597,12 @@ def run_free(state, io):
             with cond:
                 fails = 0
                 state["rnd"] = 1 + state["turn"] // n    # lap for captions
+                worker_turn = active_workstream(state, i)
                 commit_reply(state, i, reply, consumed, io, activity=acts)
                 handle_spawn_directives(state, i, reply, io, mgr)
                 taken[i] += 1
                 wrapped_now = (state["closing"] is None
+                               and not worker_turn
                                and wrap_called(reply))
                 if wrapped_now:
                     state["closing"] = [slot_ids[k] for k in range(n)
@@ -4889,10 +5758,11 @@ def main():
     ap.add_argument("--ceiling", type=int, default=DEFAULT_CEILING,
                     help=f"until-done safety ceiling: hard stop after N "
                          f"total turns (default {DEFAULT_CEILING})")
-    ap.add_argument("--claude-model", default=None,
+    ap.add_argument("--claude-model", default=DEFAULT_CLAUDE_MODEL,
                     help="e.g. claude-fable-5, claude-opus-5, claude-opus-4-8, "
                          "claude-sonnet-5, claude-haiku-4-5, or aliases "
-                         "opus/sonnet/haiku (default: CLI default, Opus 4.8)")
+                         "opus/sonnet/haiku (default: {})".format(
+                             DEFAULT_CLAUDE_MODEL))
     ap.add_argument("--claude-effort", default=None,
                     help="low|medium|high|xhigh|max (default: CLI default)")
     ap.add_argument("--gpt-model", default=None,

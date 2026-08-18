@@ -115,27 +115,66 @@
   }
   .chat-row {
     position: relative; display: flex; align-items: center; gap: 7px;
-    border-radius: 9px; padding: 5px 24px 5px 9px;
+    border-radius: 9px; padding: 5px 50px 5px 9px;
     cursor: pointer; margin-bottom: 1px; border: 1px solid transparent;
   }
   .chat-row:hover { background: var(--surface); }
   .chat-row.active { background: var(--surface2); border-color: rgba(255,255,255,.10); }
   .chat-row .who { display: flex; gap: 2px; flex: 0 0 auto; }
   .chat-row .who i { width: 6px; height: 6px; border-radius: 50%; display: block; }
+  .chat-row .run-state {
+    width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%;
+    background: var(--muted); opacity: .65;
+  }
+  .chat-row .run-state[data-state=running],
+  .chat-row .run-state[data-state=thinking] { background: var(--gpt); opacity: 1; }
+  .chat-row .run-state[data-state=thinking] { animation: railPulse 1.35s ease-in-out infinite; }
+  .chat-row .run-state[data-state=waiting] { background: #F1C75B; opacity: 1; }
+  .chat-row .run-state[data-state=error],
+  .chat-row .run-state[data-state=failed] { background: var(--danger); opacity: 1; }
+  .chat-row .run-state[data-state=stopping] { background: #E7915C; opacity: 1; }
+  .chat-row .run-state[data-state=stopped] { background: var(--muted); opacity: .75; }
+  .chat-row .run-state[data-state=done],
+  .chat-row .run-state[data-state=idle] { display: none; }
+  @keyframes railPulse { 50% { opacity: .25; transform: scale(.72); } }
+  @media (prefers-reduced-motion: reduce) {
+    .chat-row .run-state[data-state=thinking] { animation: none; }
+  }
   .chat-row .t {
     flex: 1; min-width: 0; font-size: 13px; line-height: 1.35; color: var(--text);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  .chat-row .twrap { flex: 1; min-width: 0; }
+  .chat-row .sub {
+    color: #D9B95F; font-size: 10.5px; line-height: 1.25;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .chat-row .sub[hidden] { display: none; }
+  .chat-row .unread {
+    flex: 0 0 auto; min-width: 17px; height: 17px; padding: 0 5px;
+    display: grid; place-items: center; border-radius: 999px;
+    background: var(--alloy); color: #17151B; font-size: 10px; font-weight: 700;
+  }
+  .chat-row.done .unread { background: #75C995; }
+  .chat-row .unread[hidden] { display: none; }
   .chat-row.legacy .t { color: var(--muted); }
-  .chat-row .x {
+  .chat-row .chat-actions {
     position: absolute; top: 50%; transform: translateY(-50%); right: 3px;
+    display: flex; align-items: center; gap: 1px;
+  }
+  .chat-row .x, .chat-row .chat-stop {
     width: 20px; height: 20px;
     border: 0; border-radius: 6px; background: transparent; color: var(--muted);
     cursor: pointer; font-size: 12px; line-height: 1; opacity: 0;
     transition: opacity .12s;
   }
+  .chat-row .chat-stop { color: #E7915C; }
+  .chat-row.running .chat-stop, .chat-row.thinking .chat-stop,
+  .chat-row.waiting .chat-stop, .chat-row.stopping .chat-stop,
   .chat-row:hover .x, .chat-row .x[data-arm] { opacity: 1; }
+  .chat-row:hover .chat-stop { opacity: 1; }
   .chat-row .x:hover, .chat-row .x[data-arm] { background: var(--surface2); color: var(--danger); }
+  .chat-row .chat-stop:hover { background: var(--surface2); color: var(--danger); }
   .chat-row .x[data-arm] { width: auto; padding: 0 6px; font-size: 10.5px; }
   .chat-row input.rename {
     flex: 1; min-width: 0; background: var(--bg); color: var(--text);
@@ -143,6 +182,65 @@
     padding: 4px 6px; font: inherit; font-size: 13px;
   }
   .chat-empty { padding: 14px 10px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+  .new-boundary {
+    display: flex; align-items: center; gap: 9px; margin: 17px 0 13px;
+    color: var(--alloy); font-size: 10.5px; letter-spacing: .06em;
+    text-transform: uppercase;
+  }
+  .new-boundary::before, .new-boundary::after {
+    content: ""; height: 1px; flex: 1; background: color-mix(in srgb, var(--alloy) 45%, transparent);
+  }
+  .plan-card {
+    margin: 14px 0; padding: 14px; border: 1px solid rgba(185,171,213,.28);
+    border-radius: 11px; background: color-mix(in srgb, var(--surface) 88%, #7965A5 12%);
+  }
+  .plan-head { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; }
+  .plan-head strong { color: var(--text); font-size: 13px; font-weight: 550; }
+  .plan-phase {
+    margin-left: auto; padding: 2px 7px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); font-size: 10.5px;
+  }
+  .plan-card[data-phase=awaiting] .plan-phase { color: #D9B95F; border-color: #89763C; }
+  .plan-card[data-phase=execution] .plan-phase { color: var(--alloy); }
+  .plan-goal { color: var(--muted); font-size: 12.5px; line-height: 1.45; margin-bottom: 10px; }
+  textarea.plan-goal-edit {
+    width: 100%; resize: vertical; min-height: 48px; margin-bottom: 10px;
+    border: 1px solid var(--line); border-radius: 7px; background: rgba(0,0,0,.12);
+    color: var(--text); padding: 7px 8px; font: 12.5px/1.45 inherit; outline: none;
+  }
+  textarea.plan-goal-edit:focus { border-color: var(--alloy); }
+  .plan-tasks { display: grid; gap: 5px; }
+  .plan-task {
+    display: grid; grid-template-columns: 18px minmax(0,1fr) 110px auto auto;
+    align-items: center; gap: 7px; min-height: 30px; padding: 4px 6px;
+    border-radius: 7px; background: rgba(0,0,0,.12);
+  }
+  .plan-task input[type=text], .plan-task select {
+    min-width: 0; width: 100%; background: transparent; border: 1px solid transparent;
+    border-radius: 5px; color: var(--text); padding: 4px 5px; font: 12px inherit;
+  }
+  .plan-task input[type=text]:not(:disabled):focus,
+  .plan-task select:not(:disabled):focus { outline: none; border-color: var(--alloy); }
+  .plan-task select { color: var(--muted); }
+  .plan-task .task-state { color: var(--muted); font-size: 10.5px; text-transform: capitalize; }
+  .plan-task[data-status=completed] .task-state,
+  .plan-task[data-status=done] .task-state { color: #75C995; }
+  .plan-task[data-status=in_progress] .task-state,
+  .plan-task[data-status=active] .task-state { color: var(--alloy); }
+  .task-order { display: flex; gap: 1px; }
+  .task-order button {
+    width: 21px; height: 21px; padding: 0; border: 0; border-radius: 5px;
+    background: transparent; color: var(--muted); cursor: pointer; font-size: 11px;
+  }
+  .task-order button:hover { background: var(--surface2); color: var(--text); }
+  .task-order .task-delete:hover { color: var(--danger); }
+  .plan-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 11px; }
+  .plan-note { margin-right: auto; color: var(--muted); font-size: 10.5px; }
+  .plan-approve {
+    border: 1px solid var(--alloy); background: transparent; color: var(--text);
+    border-radius: 7px; padding: 6px 11px; cursor: pointer; font-size: 12px;
+  }
+  .plan-approve:hover { background: var(--surface2); }
   #seatList.locked { opacity: .72; pointer-events: none; }
 
   #seatRail {
@@ -183,6 +281,23 @@
   .seat-head .name:focus { border-bottom-color: var(--seat); }
   .seat-head .state { font-size: 11px; color: var(--muted); }
   .seat.thinking .state { color: var(--seat); }
+  .seat-head .seat-stop {
+    display: none; border: 0; border-radius: 6px; background: transparent;
+    color: var(--danger); cursor: pointer; width: 22px; height: 22px;
+    font-size: 11px; line-height: 1;
+  }
+  .seat.thinking .seat-stop { display: block; }
+  .seat-head .seat-stop:hover { background: var(--surface2); }
+  .seat-workstream {
+    display: none; margin-top: 7px; padding: 5px 7px; border-radius: 6px;
+    background: var(--surface2); color: var(--muted);
+    font: 11px/1.35 "Cascadia Mono", Consolas, monospace;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .seat-workstream.show { display: block; }
+  .seat-workstream[data-status=active] { color: var(--seat); }
+  .seat-workstream[data-status=failed] { color: var(--danger); }
+  .seat-workstream[data-status=done] { color: var(--text); opacity: .72; }
   .seat select {
     width: 100%; margin-top: 7px; background: var(--surface2); color: var(--text);
     border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px;
@@ -457,9 +572,32 @@
   .yolo-note { font-size: 11px; color: var(--danger); margin-top: 5px; display: none; }
 
   /* ---------- transcript ---------- */
-  .stage { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .stage { flex: 1; display: flex; flex-direction: column; min-width: 0;
+           position: relative; }
   #feed { flex: 1; overflow-y: auto; padding: 22px 26px; scroll-behavior: smooth; }
   @media (prefers-reduced-motion: reduce) { #feed { scroll-behavior: auto; } }
+  /* Josh reading history must never be yanked to the bottom by a new
+     message (his words, 2026-08-18). #feed only auto-scrolls while he is
+     ALREADY at the bottom; otherwise this button appears and says how much
+     he has not seen. Clicking it is the only other way the feed jumps. */
+  #jumpBtn {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    bottom: 14px; z-index: 6;
+    display: flex; align-items: center; gap: 7px;
+    padding: 7px 14px; border-radius: 999px;
+    background: #23262b; color: var(--fg);
+    border: 1px solid rgba(255,255,255,.18);
+    box-shadow: 0 6px 18px rgba(0,0,0,.45);
+    font-size: 12px; cursor: pointer;
+  }
+  #jumpBtn:hover { border-color: var(--alloy); }
+  #jumpBtn[hidden] { display: none; }
+  #jumpBtn .arw { font-size: 13px; line-height: 1; }
+  #jumpBtn .n {
+    background: var(--alloy); color: #1b1b1b; font-weight: 600;
+    border-radius: 999px; padding: 1px 6px; font-size: 11px;
+  }
+  #jumpBtn .n[hidden] { display: none; }
   .empty {
     height: 100%; display: flex; flex-direction: column; align-items: center;
     justify-content: center; gap: 10px; color: var(--muted); text-align: center;
@@ -716,6 +854,32 @@
     font-size: 12px; line-height: 1; padding: 0;
   }
   .att-chip button:hover { color: var(--danger); }
+
+  /* Optional session feedback: present at the natural pause, never modal and
+     never in the way of continuing the conversation. */
+  #feedbackCard {
+    display: none; align-items: center; gap: 9px; flex-wrap: wrap;
+    margin: 0 18px 10px; padding: 10px 13px; border: 1px solid var(--line);
+    border-radius: 9px; background: var(--surface); color: var(--muted);
+    font-size: 12.5px;
+  }
+  #feedbackCard.show { display: flex; }
+  #feedbackCard strong { color: var(--text); font-weight: 500; margin-right: 3px; }
+  .feedback-actions { display: flex; gap: 6px; }
+  .feedback-detail { display: none; flex-basis: 100%; gap: 7px; flex-wrap: wrap; }
+  .feedback-detail.show { display: flex; }
+  .feedback-reasons { display: flex; gap: 6px; flex-wrap: wrap; }
+  .feedback-reason {
+    border: 1px solid var(--line); background: var(--surface2); color: var(--muted);
+    border-radius: 999px; padding: 3px 9px; font-size: 11.5px; cursor: pointer;
+  }
+  .feedback-reason.on { border-color: var(--josh); color: var(--text); }
+  #feedbackNote {
+    flex: 1; min-width: 220px; background: var(--surface2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px;
+    font: 12px/1.4 inherit; outline: none;
+  }
+  #feedbackStatus { flex-basis: 100%; color: var(--danger); }
 </style>
 </head>
 <body>
@@ -759,16 +923,17 @@
 
     <div class="rail-label">Conversation</div>
     <div class="ctl">
-      <label>Turn order — who speaks when</label>
-      <select id="modeSel" title="How the next speaker is chosen. Locked once the conversation starts.">
+      <label>Orchestration — how seats work</label>
+      <select id="modeSel" title="How seats coordinate or split work. Locked once the conversation starts.">
         <option value="round_robin">Round-robin — fixed order</option>
         <option value="speaker">Speaker picks next</option>
         <option value="moderator">Moderator decides</option>
+        <option value="supervisor">Supervisor — parallel workstreams</option>
         <option value="parallel">Parallel — everyone answers at once</option>
         <option value="free">Free-running — reply as they please</option>
       </select>
       <div id="modCtl" hidden>
-        <label>Moderator — the AI that picks each speaker</label>
+        <label id="modLabel">Moderator — the AI that picks each speaker</label>
         <select id="modProv" title="A cheap stateless side call per turn — it never speaks in the conversation.">
           <option value="claude">Claude</option>
           <option value="gpt">GPT</option>
@@ -785,6 +950,10 @@
       </div>
       <label style="display:flex;align-items:center;gap:8px;margin:8px 0 0;font-size:12.5px;color:var(--muted)">
         <input type="checkbox" id="untilDone"> Until done — they decide when to stop
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;margin:8px 0 0;font-size:12.5px;color:var(--muted)"
+             title="Agents draft a read-only plan and wait for your approval before writes are enabled">
+        <input type="checkbox" id="planMode"> Plan before execution
       </label>
     </div>
     <div class="ctl">
@@ -846,6 +1015,28 @@
            line, ↑ recalls what you last sent. /help lists commands like /clear
            and /compact.</p>
       </div>
+    </div>
+    <button id="jumpBtn" hidden title="Jump to the newest message">
+      <span class="arw">&#8595;</span><span>Newest</span><span class="n" hidden></span>
+    </button>
+    <div id="feedbackCard" aria-live="polite">
+      <strong>Was this conversation helpful?</strong>
+      <div class="feedback-actions">
+        <button class="btn-sm" data-feedback="helpful">Helpful</button>
+        <button class="btn-sm" id="feedbackNo">Not helpful</button>
+        <button class="btn-sm" data-feedback="skipped">Skip</button>
+      </div>
+      <div class="feedback-detail" id="feedbackDetail">
+        <div class="feedback-reasons">
+          <button class="feedback-reason" data-reason="incorrect">Incorrect</button>
+          <button class="feedback-reason" data-reason="incomplete">Incomplete</button>
+          <button class="feedback-reason" data-reason="inefficient">Inefficient</button>
+          <button class="feedback-reason" data-reason="poor_coordination">Poor coordination</button>
+        </div>
+        <input id="feedbackNote" maxlength="2000" placeholder="Optional note">
+        <button class="btn-sm" id="feedbackSave">Save</button>
+      </div>
+      <span id="feedbackStatus" hidden></span>
     </div>
     <div class="composer">
       <button id="askPill" hidden
@@ -986,6 +1177,43 @@ let transcriptPath = null, workspacePath = null, customFolder = null;
 let rounds = 6;
 const EMPTY_HTML = document.getElementById("feed").innerHTML;
 
+// Live execution belongs to a CHAT, not to whichever transcript happens to be
+// visible. Python includes chat_id on every run event; older builds omit it and
+// transparently retain the original single-chat behaviour.
+const chatRuns = new Map();       // chat id -> live state + attention metadata
+const LIVE_RUN_STATES = new Set(["running", "thinking", "waiting", "stopping"]);
+const RUN_STATE_ALIASES = {waiting_human: "waiting", completed: "done", failed: "failed"};
+function canonicalRunState(status) { return RUN_STATE_ALIASES[status] || status; }
+function eventChatId(packet) {
+  const p = packet.payload || {};
+  return packet.chat_id || p.chat_id || p.session_id || p.session?.id || null;
+}
+function runFor(id, seed) {
+  if (!id) return null;
+  if (!chatRuns.has(id)) chatRuns.set(id, {
+    status: canonicalRunState(seed?.status) || (seed?.running ? "running" : "idle"),
+    thinkers: new Set(), question: seed?.question || null,
+    unread: Number(seed?.unread || 0), completionUnread: false,
+    plan: seed?.plan || null
+  });
+  return chatRuns.get(id);
+}
+function setRunStatus(id, status, patch={}) {
+  const run = runFor(id);
+  if (!run) return;
+  run.status = canonicalRunState(status) || run.status;
+  Object.assign(run, patch);
+  if (typeof renderChats === "function") renderChats();
+  if (id === activeId) syncActiveRun();
+}
+function syncActiveRun(seed) {
+  const run = activeId ? runFor(activeId, seed) : null;
+  running = !!run && LIVE_RUN_STATES.has(run.status);
+  $("stopBtn").hidden = !running;
+  $("stopBtn").textContent = run?.status === "stopping" ? "Stopping…" : "Stop";
+  $("say").placeholder = running ? RUN_PH : canContinue ? CONT_PH : IDLE_PH;
+}
+
 /* ---------- markdown-lite ---------- */
 function esc(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 // Mirror of relay.peel_directives: trailing [[NAME]]/[[NAME: arg]] blocks
@@ -1089,7 +1317,7 @@ async function fetchImage(path, full) {
   const key = (full ? "F|" : "T|") + path;
   if (imgCache.has(key)) return imgCache.get(key);
   let r;
-  try { r = await pywebview.api.read_image(path, !!full); }
+  try { r = await pywebview.api.read_image(path, !!full, activeId); }
   catch (e) { r = { error: String(e) }; }
   imgCache.set(key, r);
   return r;
@@ -1119,6 +1347,10 @@ function attachThumbs(container, refs) {
     }
     const img = document.createElement("img");
     img.alt = r.name || path; img.title = path;
+    // Loading a thumbnail changes scrollHeight after the message append. Keep
+    // following only if Josh still wants the live tail; never move him while
+    // he is reading history.
+    img.onload = () => stickBottom();
     img.onerror = () => missingCell(cell, path);   // corrupt bytes, not a broken tag
     img.src = r.data_uri;
     cell.onclick = () => openLightbox(path, r.name || path);
@@ -1158,6 +1390,46 @@ async function copyText(t, btn) {
 }
 
 /* ---------- feed ---------- */
+// ---- scroll stickiness -------------------------------------------------
+// The feed follows new messages ONLY while Josh is already parked at the
+// bottom. The moment he scrolls up to read something, `stick` goes false and
+// every later append leaves his viewport exactly where it is; the floating
+// #jumpBtn tells him how many he has not seen. BOTTOM_SLOP absorbs the
+// sub-pixel scrollHeight drift that would otherwise make "at the bottom"
+// flicker false while images and typing lines resize the feed underneath him.
+const BOTTOM_SLOP = 80;
+let stick = true, unread = 0;
+function atBottom() {
+  const f = $("feed");
+  return f.scrollHeight - f.scrollTop - f.clientHeight <= BOTTOM_SLOP;
+}
+function renderJump() {
+  const b = $("jumpBtn"); if (!b) return;
+  b.hidden = stick;
+  const n = b.querySelector(".n");
+  n.textContent = unread > 99 ? "99+" : String(unread);
+  n.hidden = unread === 0;
+}
+// force=true is for things JOSH just did (sending, switching chats, replay):
+// his own action is consent to move, an agent's message is not.
+function stickBottom(force) {
+  if (force) { stick = true; unread = 0; }
+  // the one place that actually moves the feed
+  if (stick) $("feed").scrollTop = $("feed").scrollHeight;
+  renderJump();
+}
+function bindFeedScroll() {
+  const f = $("feed"), b = $("jumpBtn");
+  f.addEventListener("scroll", () => {
+    const now = atBottom();
+    if (now === stick) return;
+    stick = now;
+    if (stick) unread = 0;
+    renderJump();
+  }, { passive: true });
+  b.addEventListener("click", () => stickBottom(true));
+}
+bindFeedScroll();
 function addMsg(kind, name, text, meta, role, ts, activity) {
   // kind: "josh" | "system" | a provider id ("claude"/"gpt"/"gemini")
   // `role` is the role the seat held WHEN IT SPOKE (stamped into the stored
@@ -1194,11 +1466,33 @@ function addMsg(kind, name, text, meta, role, ts, activity) {
   $("feed").appendChild(d);
   // parallel modes: keep live typing indicators below the new message
   typingEls.forEach(el => $("feed").appendChild(el));
-  $("feed").scrollTop = $("feed").scrollHeight;
+  if (!stick) unread++;
+  stickBottom();
+  return d;
+}
+function addNewBoundary() {
+  const d = document.createElement("div");
+  d.className = "new-boundary";
+  d.textContent = "New since you were here";
+  $("feed").appendChild(d);
+}
+// An interjection is rendered TWICE without this: once optimistically when
+// Josh hits send (so he sees it landed while a turn is still running), and
+// again when the engine drains the queue, logs the real row and emits it.
+// The placeholder is the one to drop — the engine's row is the persisted
+// truth and carries the round number and timestamp.
+function dropQueuedEcho(text) {
+  for (const el of $("feed").querySelectorAll('.msg.josh[data-queued]')) {
+    if (el.dataset.queued === (text || "")) { el.remove(); return; }
+  }
 }
 // One indicator PER SEAT (keyed by seat id): in parallel modes several seats
 // think at once, and duplicate-provider seats need their own rows.
 const typingEls = new Map();
+// Exact text relay emits when every seat played the wrap token. Kept as a
+// constant because the `done` handler folds its own notice into that row.
+const WRAP_NOTICE = "Conversation wrapped.";
+let wrapNoticeEl = null;
 function showTyping(speakerId, provider, name) {
   hideTyping(speakerId);
   const el = document.createElement("div");
@@ -1207,7 +1501,7 @@ function showTyping(speakerId, provider, name) {
   el.innerHTML = `<span class="trow"><span class="dot"></span> ${esc(name)} is thinking…</span>`;
   typingEls.set(speakerId, el);
   $("feed").appendChild(el);
-  $("feed").scrollTop = $("feed").scrollHeight;
+  stickBottom();
 }
 // Live narration under the dots: the last few things the seat is DOING
 // ("$ pytest", "editing app.py"), streamed as `activity` events mid-turn.
@@ -1230,7 +1524,7 @@ function typingActivity(speakerId, payload) {
     }
     p.textContent = payload.text || "";
     log.appendChild(p);                  // stays at the bottom
-    $("feed").scrollTop = $("feed").scrollHeight;
+    stickBottom();
     return;
   }
   const ln = document.createElement("div");
@@ -1241,7 +1535,7 @@ function typingActivity(speakerId, payload) {
   const prog = log.querySelector(".k-progress");
   if (prog) log.appendChild(prog);       // counter stays last
   while (log.children.length > 6) log.firstChild.remove();
-  $("feed").scrollTop = $("feed").scrollHeight;
+  stickBottom();
 }
 function hideTyping(speakerId) {
   const el = typingEls.get(speakerId);
@@ -1269,26 +1563,236 @@ function clearFatal() {              // only when the chat itself changes
   fatalSeats = new Set();
 }
 
+/* Work ownership is separate from transient "thinking/ready/error" state.
+   Engine contract: emit `workstreams` with the persisted task dictionaries
+   from workstreams.py in payload.tasks. */
+function renderWorkstreams(tasks) {
+  const rank = {active: 0, blocked: 1, pending: 2, failed: 3, done: 4};
+  seats.forEach(s => {
+    const line = s.el.querySelector(".seat-workstream");
+    const owned = tasks.filter(t => String(t.owner) === String(s.id))
+      .sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9));
+    const task = owned[0];
+    if (!task) {
+      line.classList.remove("show");
+      line.textContent = "";
+      line.removeAttribute("data-status");
+      line.removeAttribute("title");
+      return;
+    }
+    const deps = task.deps || [];
+    const status = task.status || "pending";
+    const lead = status === "active" ? "Working"
+      : status === "blocked" || (status === "pending" && deps.length)
+        ? `Waiting for ${deps.join(", ")}`
+        : status === "pending" ? "Queued"
+        : status === "done" ? "Done"
+        : status === "failed" ? "Failed" : status;
+    line.textContent = `${lead} · ${task.brief || task.id}`;
+    line.title = line.textContent;
+    line.dataset.status = status;
+    line.classList.add("show");
+  });
+}
+
+/* Plan Mode is a capability gate, not an orchestration mode. The engine emits
+   `plan` with {id, phase, goal, tasks}; awaiting plans are editable here, and
+   approval sends the selected task graph back before writes are unlocked. */
+function planPhase(phase) {
+  return ({awaiting_approval: "awaiting", approved: "execution",
+           executing: "execution"})[phase] || phase || "drafting";
+}
+function renderPlan(plan) {
+  if (!plan || !Array.isArray(plan.tasks)) return;
+  const phase = planPhase(plan.phase), editable = phase === "awaiting";
+  let card = document.querySelector(".plan-card[data-active-plan]");
+  const isNew = !card;
+  if (!card) {
+    card = document.createElement("section");
+    card.className = "plan-card";
+    card.dataset.activePlan = "1";
+  }
+  card.dataset.phase = phase;
+  card.replaceChildren();
+
+  const head = document.createElement("div"); head.className = "plan-head";
+  const title = document.createElement("strong"); title.textContent = "Plan";
+  const pill = document.createElement("span"); pill.className = "plan-phase";
+  pill.textContent = ({drafting: "Drafting", awaiting: "Needs approval",
+    execution: "Executing", completed: "Completed"})[phase] || phase;
+  head.append(title, pill);
+  const goal = document.createElement(editable ? "textarea" : "div");
+  goal.className = editable ? "plan-goal-edit" : "plan-goal";
+  if (editable) {
+    goal.value = plan.goal || ""; goal.rows = 2;
+    goal.placeholder = "What should this plan accomplish?";
+  } else goal.textContent = plan.goal || "Proposed work";
+  const tasks = document.createElement("div"); tasks.className = "plan-tasks";
+
+  plan.tasks.forEach((task, index) => {
+    const row = document.createElement("div"); row.className = "plan-task";
+    row.dataset.id = task.id || `task-${index + 1}`;
+    row.dataset.status = task.status || "pending";
+    const include = document.createElement("input"); include.type = "checkbox";
+    include.className = "plan-include"; include.checked = task.selected !== false;
+    include.disabled = !editable || ["active", "in_progress", "done", "completed"].includes(row.dataset.status);
+    const text = document.createElement("input"); text.type = "text";
+    text.className = "plan-title"; text.value = task.title || task.brief || row.dataset.id;
+    text.disabled = !editable;
+    const owner = document.createElement("select"); owner.className = "plan-owner";
+    const ownerValue = String(task.owner ?? "");
+    seats.forEach(seat => {
+      const opt = document.createElement("option"); opt.value = String(seat.id);
+      opt.textContent = seat.role || seatDisplayName(seat); owner.appendChild(opt);
+    });
+    if (ownerValue && ![...owner.options].some(o => o.value === ownerValue)) {
+      const opt = document.createElement("option"); opt.value = ownerValue;
+      opt.textContent = ownerValue; owner.appendChild(opt);
+    }
+    owner.value = ownerValue || owner.options[0]?.value || ""; owner.disabled = !editable;
+    const state = document.createElement("span"); state.className = "task-state";
+    state.textContent = (task.status || "pending").replaceAll("_", " ");
+    const order = document.createElement("span"); order.className = "task-order";
+    if (editable) {
+      const up = document.createElement("button"); up.textContent = "↑"; up.title = "Move task up";
+      up.onclick = () => { const prev = row.previousElementSibling; if (prev) tasks.insertBefore(row, prev); };
+      const down = document.createElement("button"); down.textContent = "↓"; down.title = "Move task down";
+      down.onclick = () => { const next = row.nextElementSibling; if (next) tasks.insertBefore(next, row); };
+      const del = document.createElement("button"); del.textContent = "×";
+      del.className = "task-delete"; del.title = "Delete task"; del.onclick = () => row.remove();
+      order.append(up, down, del);
+    }
+    row.append(include, text, owner, state, order); tasks.appendChild(row);
+  });
+
+  const actions = document.createElement("div"); actions.className = "plan-actions";
+  const note = document.createElement("span"); note.className = "plan-note";
+  note.textContent = editable ? "Edit, assign, reorder or remove tasks, then approve."
+    : phase === "execution" ? "Editing is locked while work is active." : "";
+  actions.appendChild(note);
+  if (editable) {
+    const approve = document.createElement("button"); approve.className = "plan-approve";
+    approve.textContent = "Approve & Execute";
+    approve.onclick = async () => {
+      const selected = [...tasks.querySelectorAll(".plan-task")]
+        .filter(row => row.querySelector(".plan-include").checked)
+        .map(row => ({id: row.dataset.id,
+          title: row.querySelector(".plan-title").value.trim(),
+          owner: row.querySelector(".plan-owner").value,
+          status: "pending"}));
+      if (!selected.length || selected.some(t => !t.title)) {
+        addMsg("system", "relay", "Keep at least one plan task with a title.", ""); return;
+      }
+      const editedGoal = editable ? goal.value.trim() : plan.goal || "";
+      if (!editedGoal) {
+        addMsg("system", "relay", "Give the plan a goal before approval.", ""); return;
+      }
+      approve.disabled = true; approve.textContent = "Approving…";
+      let r;
+      try { r = await pywebview.api.approve_plan(activeId, plan.id || null,
+                                                  {revision: plan.revision || 1,
+                                                   goal: editedGoal, tasks: selected}); }
+      catch (e) { r = {error: "Plan approval is not available yet."}; }
+      if (r?.error) {
+        approve.disabled = false; approve.textContent = "Approve & Execute";
+        addMsg("system", "relay", r.error, ""); return;
+      }
+      renderPlan({...plan, goal: editedGoal, phase: "execution", tasks: selected});
+    };
+    actions.appendChild(approve);
+  }
+  card.append(head, goal, tasks, actions);
+  if (isNew) $("feed").appendChild(card);
+  stickBottom();
+}
+function mergePlanTasks(chatId, updates) {
+  const run = runFor(chatId);
+  if (!run?.plan || !Array.isArray(updates)) return;
+  const byId = new Map(updates.map(t => [String(t.id), t]));
+  run.plan.tasks = (run.plan.tasks || []).map(task => {
+    const next = byId.get(String(task.id));
+    return next ? {...task, ...next, title: next.title || next.brief || task.title} : task;
+  });
+  if (run.plan.tasks.length && run.plan.tasks.every(t => t.status === "done" || t.status === "completed"))
+    run.plan.phase = "completed";
+  else if (run.plan.tasks.some(t => t.status === "active" || t.status === "in_progress"))
+    run.plan.phase = "execution";
+  if (chatId === activeId) renderPlan(run.plan);
+}
+
 /* ---------- events from python ---------- */
-window.uiEvent = ({event, payload}) => {
+window.uiEvent = packet => {
+  const event = packet.event, payload = packet.payload || {};
+  const chatId = eventChatId(packet);
+  // Maintain the rail even when this event belongs to a background chat. The
+  // active transcript is updated only below, after the chat-id routing gate.
+  if (chatId && event === "workstreams") {
+    mergePlanTasks(chatId, payload.tasks || []);
+  } else if (chatId && event === "plan") {
+    const run = runFor(chatId); run.plan = payload;
+    if (planPhase(payload.phase) === "awaiting") setRunStatus(chatId, "waiting");
+  } else if (chatId && event === "run_status") {
+    const patch = {};
+    if (payload.pending_ask !== undefined) patch.question = payload.pending_ask;
+    if (Number.isFinite(payload.unread_count)) patch.unread = payload.unread_count;
+    setRunStatus(chatId, payload.status || "running", patch);
+  } else if (event === "started" && payload.session?.id) {
+    const id = payload.session.id;
+    activeId = id;                 // starts are initiated from the visible draft
+    sessions = [payload.session, ...sessions.filter(s => s.id !== id)];
+    setRunStatus(id, "running");
+  } else if (chatId && event === "thinking") {
+    const run = runFor(chatId); run.thinkers.add(String(payload.speaker));
+    setRunStatus(chatId, run.question ? "waiting" : "thinking");
+  } else if (chatId && event === "thinking_done") {
+    const run = runFor(chatId); run.thinkers.delete(String(payload.speaker));
+    setRunStatus(chatId, run.question ? "waiting" : run.thinkers.size ? "thinking" : "running");
+  } else if (chatId && event === "question") {
+    setRunStatus(chatId, "waiting", {question: payload});
+  } else if (chatId && event === "question_done") {
+    const run = runFor(chatId); run.question = null;
+    setRunStatus(chatId, run.thinkers.size ? "thinking" : "running");
+  } else if (chatId && event === "done") {
+    setRunStatus(chatId, "done", {question: null});
+  } else if (chatId && event === "error") {
+    setRunStatus(chatId, "error", {question: null});
+  }
+  if (chatId && chatId !== activeId) {
+    const run = runFor(chatId);
+    if (event === "message") {
+      run.unread = (run.unread || 0) + 1;
+      renderChats();
+    } else if (event === "done" ||
+               (event === "run_status" && canonicalRunState(payload.status) === "done")) {
+      run.completionUnread = true;
+      renderChats();
+    }
+    // The session store is authoritative; refresh terminal rows for their new
+    // timestamp/continuation state without stealing focus from Josh.
+    if (event === "done" || event === "error" ||
+        (event === "run_status" && ["done", "failed", "stopped"].includes(
+          canonicalRunState(payload.status)))) refreshChats();
+    return;
+  }
   if (event === "started") {
     transcriptPath = payload.transcript; workspacePath = payload.workspace;
     convProviders = (payload.participants || []).map(p => p.provider);
+    renderWorkstreams(payload.tasks || []);
     if (payload.mode) $("modeSel").value = payload.mode;
     syncModCtl();
     setSeated(true);       // roles are now APPLIED (a turn each), not just typed
     imgCache.clear(); resetEditing();      // new chat = new workspace boundary
     scheduleFilesRefresh();
     $("openTranscript").style.display = ""; $("openWorkspace").style.display = "";
-    if (payload.session) {                    // rail row for the chat just born
-      activeId = payload.session.id;
-      sessions = [payload.session, ...sessions.filter(s => s.id !== activeId)];
-      renderChats();
-    } else { refreshChats(); }
+    if (payload.session) renderChats();       // inserted by routing prelude
+    else refreshChats();
   } else if (event === "auth_status") {
     renderAccounts(payload);
   } else if (event === "mcp_status") {
     renderConns(payload);
+  } else if (event === "run_status") {
+    if (canonicalRunState(payload.status) === "waiting" && payload.pending_ask)
+      showQuestion(payload.pending_ask);
   } else if (event === "thinking") {
     $("roundBadge").textContent = payload.until_done
       ? `turn ${payload.turn}/${payload.ceiling}`
@@ -1305,6 +1809,7 @@ window.uiEvent = ({event, payload}) => {
       onEditActivity(payload.path, payload.provider);
   } else if (event === "message") {
     hideTyping(payload.speaker);         // backstop; thinking_done owns it
+    if (payload.speaker === "josh") dropQueuedEcho(payload.text);
     // rows carry their true caption (e.g. "helper for Claude"); fall back to
     // the round number for payloads that predate stored metas
     addMsg(payload.provider || payload.speaker, payload.name, payload.text,
@@ -1312,15 +1817,29 @@ window.uiEvent = ({event, payload}) => {
            payload.role, payload.ts, payload.activity);
     scheduleFilesRefresh();              // the turn may have written files
   } else if (event === "question") {
-    showQuestion(payload);
+    const run = runFor(activeId);
+    const planAsk = run?.plan && planPhase(run.plan.phase) === "awaiting" &&
+      (payload.kind === "plan_approval" ||
+       (run.plan.qid && run.plan.qid === payload.qid));
+    if (planAsk) {
+      run.plan.qid = payload.qid;       // approval lives in the plan card, not a modal
+      renderPlan(run.plan);
+    } else showQuestion(payload);
   } else if (event === "question_done") {
     // engine-side resolution (answered elsewhere, skipped, stop) — the wait
     // is over whether or not this window answered it
     if (!payload.qid || payload.qid === askQid) clearAsk();
   } else if (event === "role_applied") {
     roleApplied(payload);
+  } else if (event === "workstreams") {
+    renderWorkstreams(payload.tasks || []);
+  } else if (event === "plan") {
+    renderPlan(payload);
   } else if (event === "status") {
-    addMsg("system", "relay", payload.text, "");
+    const el = addMsg("system", "relay", payload.text, "");
+    // remember this row so `done` can fold its own notice into it rather
+    // than printing a second line about the same state (see WRAP_NOTICE)
+    if (el && payload.text === WRAP_NOTICE) wrapNoticeEl = el;
   } else if (event === "agent_error") {
     addMsg("system", "relay", payload.message, "");
     if (payload.fatal) markFatal(payload.speaker, true);
@@ -1332,10 +1851,25 @@ window.uiEvent = ({event, payload}) => {
   } else if (event === "done") {
     clearAsk();
     canContinue = !!payload.can_continue;
-    if (transcriptPath) addMsg("system", "relay", canContinue
-      ? "Conversation paused. Reply to continue it, or start a new one."
-      : "Conversation ended. Transcript saved.", "");
+    const resume = "Reply to continue it, or start a new one.";
+    if (transcriptPath) {
+      // A wrapped run printed "Conversation wrapped." a moment ago; adding
+      // "Conversation paused." underneath describes the SAME state twice and
+      // reads like two different things happened. Fold them into that row.
+      // If the engine's wording ever changes, the match simply fails and the
+      // old two-line behaviour returns — cosmetic, never wrong.
+      if (canContinue && wrapNoticeEl && wrapNoticeEl.isConnected) {
+        const body = wrapNoticeEl.querySelector(".msg-body");
+        if (body) body.innerHTML = md(WRAP_NOTICE + " " + resume);
+      } else {
+        addMsg("system", "relay", canContinue
+          ? "Conversation paused. " + resume
+          : "Conversation ended. Transcript saved.", "");
+      }
+    }
+    wrapNoticeEl = null;
     finish();
+    showFeedback(payload.feedback);
     refreshChats();          // updated timestamp / round count / title
     refreshFiles();
   }
@@ -1351,6 +1885,56 @@ function finish() {
   if (transcriptPath) $("afterRow").classList.add("show");
   $("say").focus();
 }
+
+/* ---------- optional session feedback ---------- */
+const feedbackReasons = new Set();
+function hideFeedback() {
+  $("feedbackCard").classList.remove("show");
+  $("feedbackDetail").classList.remove("show");
+  $("feedbackStatus").hidden = true;
+  $("feedbackStatus").textContent = "";
+  $("feedbackNote").value = "";
+  feedbackReasons.clear();
+  document.querySelectorAll(".feedback-reason").forEach(b => b.classList.remove("on"));
+}
+function showFeedback(feedback) {
+  hideFeedback();
+  // A rating survives outcome rebuilds and continuations. Do not ask again
+  // and accidentally replace it merely because the same chat ran more turns.
+  if (!feedback || feedback.rating) return;
+  $("feedbackCard").classList.add("show");
+}
+async function saveFeedback(rating) {
+  const card = $("feedbackCard");
+  card.querySelectorAll("button").forEach(b => b.disabled = true);
+  let r;
+  try {
+    r = await pywebview.api.submit_feedback(
+      rating, [...feedbackReasons], $("feedbackNote").value.trim(), activeId);
+  } catch (e) {
+    r = {error: "Could not save feedback."};
+  }
+  if (r?.error) {
+    card.querySelectorAll("button").forEach(b => b.disabled = false);
+    $("feedbackStatus").textContent = r.error;
+    $("feedbackStatus").hidden = false;
+    return;
+  }
+  hideFeedback();
+}
+document.querySelectorAll("[data-feedback]").forEach(b => {
+  b.onclick = () => saveFeedback(b.dataset.feedback);
+});
+$("feedbackNo").onclick = () => $("feedbackDetail").classList.add("show");
+document.querySelectorAll(".feedback-reason").forEach(b => {
+  b.onclick = () => {
+    const reason = b.dataset.reason;
+    if (feedbackReasons.has(reason)) feedbackReasons.delete(reason);
+    else feedbackReasons.add(reason);
+    b.classList.toggle("on", feedbackReasons.has(reason));
+  };
+});
+$("feedbackSave").onclick = () => saveFeedback("not_helpful");
 
 /* ---------- seats ---------- */
 const PROVIDER_NAMES = { claude: "Claude", gpt: "GPT", gemini: "Gemini" };
@@ -1394,15 +1978,20 @@ function addSeat(provider, forceId) {
         title="Seat name — click to rename (blank = automatic)">
       <button class="rn" title="Rename this seat">✎</button>
       <span class="state">ready</span>
+      <button class="seat-stop" title="Stop only this agent">■</button>
       <input type="checkbox" class="switch" checked>
       <button class="rm" title="Remove seat">✕</button>
     </div>
+    <div class="seat-workstream"></div>
     <select class="model"></select>
     <select class="effort"></select>
     <button class="role-btn" title="Give this seat a role — a public name plus private instructions"></button>`;
   seat.el = d;
   refreshRoleBtn(seat);
   d.querySelector(".role-btn").onclick = () => openRole(seat);
+  d.querySelector(".seat-stop").onclick = e => {
+    e.stopPropagation(); stopOneSeat(seat.id);
+  };
   d.querySelector(".rn").onclick = () => {
     const n = d.querySelector(".name");
     n.focus(); n.select();
@@ -1445,11 +2034,23 @@ function fillSeat(seat) {
   }
 }
 
-/* ---------- moderator picker ---------- */
+/* ---------- moderator / supervisor side-call picker ---------- */
 // Mirrors fillSeat but for the one shared #modCtl block. Defaults match the
 // engine's build_moderator fallback (claude-haiku-4-5, low) so an untouched
-// picker is truthful about what will actually moderate.
-function syncModCtl() { $("modCtl").hidden = $("modeSel").value !== "moderator"; }
+// picker is truthful about the stateless orchestrator that will actually run.
+function syncModCtl() {
+  const mode = $("modeSel").value;
+  const on = mode === "moderator" || mode === "supervisor";
+  $("modCtl").hidden = !on;
+  if (!on) return;
+  const supervisor = mode === "supervisor";
+  $("modLabel").textContent = supervisor
+    ? "Supervisor — the AI that plans independent work"
+    : "Moderator — the AI that picks each speaker";
+  $("modProv").title = supervisor
+    ? "One stateless planning call decomposes the goal into verified workstreams."
+    : "A cheap stateless side call per turn — it never speaks in the conversation.";
+}
 $("modeSel").addEventListener("change", syncModCtl);
 function fillModerator(prov, model, effort) {
   if (!uiCfg) return;
@@ -1475,14 +2076,14 @@ function fillModerator(prov, model, effort) {
 }
 $("modProv").onchange = () => fillModerator($("modProv").value);
 function moderatorCfg() {
-  if ($("modeSel").value !== "moderator") return null;
+  if (!["moderator", "supervisor"].includes($("modeSel").value)) return null;
   const p = $("modProv").value;
   const m = $("modModel").value, e = $("modEffort").value;
   // agy model ids carry the thinking level, same as cfgFor
   if (p === "gemini") return {provider: p, model: m + "-" + e, effort: ""};
   return {provider: p, model: m, effort: e};
 }
-// Reopened chats show the moderator they actually ran with — a saved value
+// Reopened chats show the moderator/supervisor they actually ran with — a saved value
 // missing from today's lists is added as an option, never silently swapped.
 function restoreModerator(spec) {
   if (!uiCfg) return;
@@ -1586,6 +2187,7 @@ function setSeated(on) {
   $("modModel").disabled = seated;
   $("modEffort").disabled = seated;
   $("untilDone").disabled = seated;
+  $("planMode").disabled = seated;
   $("spawnSel").disabled = seated;
   $("teamSel").disabled = seated;
   // the project context is injected in each seat's FIRST preamble, so it is
@@ -1603,7 +2205,7 @@ async function applyRole(seat) {
   const inst = $("roleInst").value.trim();
   btn.disabled = true;
   try {
-    const r = await pywebview.api.apply_role(seat.id, role, inst);
+    const r = await pywebview.api.apply_role(seat.id, role, inst, activeId);
     if (r?.error) { addMsg("system", "relay", r.error, ""); return; }
     if (r?.note) addMsg("system", "relay", r.note, "");
   } finally { btn.disabled = false; }
@@ -1667,7 +2269,7 @@ function clearAsk() {
 async function answerAsk(text) {
   if (!askQid) return;
   try {
-    const r = await pywebview.api.answer_question(askQid, text);
+    const r = await pywebview.api.answer_question(askQid, text, activeId);
     if (r?.error) addMsg("system", "relay", r.error, "");
   } finally { clearAsk(); }
 }
@@ -2135,7 +2737,9 @@ function applyAuthToSeats() {
     s.el.classList.toggle("noauth", bad);
     if (!running)
       s.el.querySelector(".state").textContent =
-        bad ? "sign-in needed" : seatLabel(s.id);
+        bad ? (st.state === "not_installed" ? "CLI not installed"
+                                            : "sign-in needed")
+            : seatLabel(s.id);
   });
 }
 
@@ -2277,12 +2881,13 @@ function takeAtt() { const a = pendingAtt.splice(0); renderAtt(); return a; }
 async function sendSay() {
   const t = $("say").value.trim();
   if ((!t && !pendingAtt.length) || starting) return;
+  stickBottom(true);   // Josh sending IS consent to move; a new agent reply is not
   if (t && sayHist[0] !== t) sayHist.unshift(t);
   sayHist.length = Math.min(sayHist.length, 50);
   if (t.startsWith("/")) {         // commands never take attachments — chips stay
     clearSay();
     addMsg("josh", "Josh", t, "command");
-    const r = await pywebview.api.command(t);
+    const r = await pywebview.api.command(t, activeId);
     if (r?.error) addMsg("system", "relay", r.error, "");
     else if (r?.note) addMsg("system", "relay", r.note, "");
     return;
@@ -2290,22 +2895,25 @@ async function sendSay() {
   if (running) {
     clearSay();
     const att = takeAtt();
-    const r = await pywebview.api.interject(t, att);
+    const r = await pywebview.api.interject(t, att, activeId);
     if (r?.error) {                // put the chips back — nothing was saved
       pendingAtt.push(...att); renderAtt();
       addMsg("system", "relay", r.error, ""); return;
     }
     // r.text carries the attachment lines Python appended — show what was sent
-    addMsg("josh", "Josh", r?.text || t, "queued for next turn");
+    const echo = addMsg("josh", "Josh", r?.text || t, "queued for next turn");
+    if (echo) echo.dataset.queued = (r?.text || t);
     return;
   }
   if (canContinue) {
     if (authBlocked(convProviders)) return;
     starting = true;
     const r = await pywebview.api.continue_chat(
-      {opener: t, turns: rounds, ceiling: ceiling, attachments: pendingAtt});
+      {opener: t, turns: rounds, ceiling: ceiling, attachments: pendingAtt,
+       session_id: activeId});
     starting = false;
     if (r.error) { addMsg("system", "relay", r.error, ""); return; }
+    hideFeedback();
     takeAtt();
     clearSay();
     running = true;
@@ -2324,6 +2932,7 @@ async function sendSay() {
   // typing into a reopened view-only chat starts a NEW one — don't leave the
   // rail highlighting the old row while a fresh session dir fills up
   activeId = null; $("seatList").classList.remove("locked");
+  hideFeedback();
   clearFatal(); renderChats();
   document.querySelectorAll(".msg").forEach(e => e.remove());
   $("afterRow").classList.remove("show");
@@ -2333,8 +2942,10 @@ async function sendSay() {
     connectors: $("connectors").checked, workspace: customFolder,
     brief: $("projBrief").checked,
     mode: $("modeSel").value,
-    moderator: moderatorCfg(),
+    moderator: $("modeSel").value === "moderator" ? moderatorCfg() : null,
+    supervisor: $("modeSel").value === "supervisor" ? moderatorCfg() : null,
     until_done: untilDoneOn(), ceiling: ceiling,
+    plan: {enabled: $("planMode").checked},
     spawn: {tier1: true, max_helpers: parseInt($("spawnSel").value, 10) || 0,
             max_teams: parseInt($("teamSel").value, 10) || 0},
     seats: seats.map(cfgFor), attachments: pendingAtt,
@@ -2370,10 +2981,33 @@ $("say").addEventListener("keydown", e => {
   }
 });
 autoGrow();
-$("stopBtn").onclick = async () => {
-  await pywebview.api.stop();
-  addMsg("system", "relay", "Stopping after the current turn…", "");
-};
+async function stopChat(id) {
+  if (!id) return;
+  const before = runFor(id).status;
+  setRunStatus(id, "stopping");
+  const r = await pywebview.api.stop(id);
+  if (r?.error) {
+    setRunStatus(id, before);
+    if (id === activeId) addMsg("system", "relay", r.error, "");
+  }
+  else if (id === activeId)
+    addMsg("system", "relay", "Stopping this conversation and its active agents…", "");
+}
+async function stopOneSeat(seatId) {
+  if (!activeId) return;
+  seatState(seatId, "", "stopping…");
+  const r = await pywebview.api.stop_seat(activeId, seatId);
+  if (r?.error) {
+    seatState(seatId, "", "error");
+    addMsg("system", "relay", r.error, "");
+  } else if (!r?.stopped) {
+    seatState(seatId, "", seatLabel(seatId));
+    addMsg("system", "relay", "That agent was no longer mid-turn.", "");
+  } else {
+    seatState(seatId, "", "stopped");
+  }
+}
+$("stopBtn").onclick = () => stopChat(activeId);
 
 /* ---------- files rail ---------- */
 // Lists the active working folder newest-first (bridge: list_workspace_files,
@@ -2393,7 +3027,7 @@ async function refreshFiles() {
   if (filesBusy) { scheduleFilesRefresh(); return; }
   filesBusy = true;
   let r;
-  try { r = await pywebview.api.list_workspace_files(); }
+  try { r = await pywebview.api.list_workspace_files(activeId); }
   catch (e) { r = { workspace: null, files: [] }; }
   finally { filesBusy = false; }
   renderFiles(r);
@@ -2531,7 +3165,7 @@ async function fetchCode(absFallback) {
   if (!window.pywebview || !codeFile || codeBusy) return;
   codeBusy = true;
   let r;
-  try { r = await pywebview.api.read_text(codeFile); }
+  try { r = await pywebview.api.read_text(codeFile, activeId); }
   catch (e) { r = null; }
   finally { codeBusy = false; }
   const body = $("codeBody");
@@ -2624,6 +3258,8 @@ function bindRail(cls, storeKey, collapseBtnId, railSel) {
 bindRail("no-chats", "hideChatRail", "chatsCollapse", "#chatRail");
 bindRail("no-seats", "hideSeatRail", "seatsCollapse", "#seatRail");
 bindRail("no-files", "hideFileRail", "filesCollapse", "#fileRail");
+// bindFeedScroll() is called at its definition — one binding only, or the
+// scroll and #jumpBtn click handlers fire twice per event.
 
 let ceiling = 60;               // until-done safety ceiling (total turns)
 function untilDoneOn() { return $("untilDone").checked; }
@@ -2647,9 +3283,42 @@ $("rPlus").onclick = () => {
   syncRoundsCtl();
 };
 $("untilDone").onchange = syncRoundsCtl;
+// The chosen working folder survives a restart. It is a per-machine
+// preference, not conversation state (a saved chat records its OWN workspace
+// and restoring one must never touch this), so it lives in localStorage like
+// the rail collapse state — best effort, and a WebView2 profile that drops
+// storage simply forgets it rather than breaking.
+const FOLDER_KEY = "lastWorkingFolder";
+const FOLDER_AUTO = "auto (fresh per conversation)";
+// display only — no preference is recorded. Used when a saved chat is opened,
+// where the label must describe THAT chat's folder rather than whatever the
+// next new chat would use.
+function showFolder(f) {
+  $("folderPath").textContent = f || FOLDER_AUTO;
+  $("folderPath").style.color = f ? "var(--text)" : "";
+}
+function setFolder(f) {
+  customFolder = f || null;
+  showFolder(f);
+  try {
+    if (f) localStorage.setItem(FOLDER_KEY, f);
+    else localStorage.removeItem(FOLDER_KEY);
+  } catch (e) {}
+}
+async function restoreFolder() {
+  let saved = null;
+  try { saved = localStorage.getItem(FOLDER_KEY); } catch (e) {}
+  if (!saved) return;
+  // verify before trusting it: a remembered folder that has since been moved
+  // or deleted must be forgotten, not silently handed to the next chat
+  let live = false;
+  try { live = await pywebview.api.folder_exists(saved); } catch (e) { live = false; }
+  if (live) setFolder(saved);
+  else { try { localStorage.removeItem(FOLDER_KEY); } catch (e) {} }
+}
 $("pickFolder").onclick = async () => {
   const f = await pywebview.api.pick_folder();
-  if (f) { customFolder = f; $("folderPath").textContent = f; $("folderPath").style.color = "var(--text)"; }
+  if (f) setFolder(f);
 };
 $("yolo").onchange = () => { $("yoloNote").style.display = $("yolo").checked ? "block" : "none"; };
 $("connectors").onchange = () => { $("connNote").style.display = $("connectors").checked ? "block" : "none"; };
@@ -2689,23 +3358,29 @@ function renderChats() {
                      'shows up here — click one to pick it back up.</div>';
     return;
   }
-  // Group by project (custom working folder). sessions arrive newest-first, so
-  // Map insertion order ranks groups by their most recent chat automatically.
+  // A blocked background question is the one state Josh must not miss. Give
+  // those chats one calm, static priority group; everything else keeps its
+  // project grouping and newest-first order.
   const groups = new Map();
-  sessions.forEach(s => {
+  const waiting = sessions.filter(s => runFor(s.id, s.run || s).status === "waiting");
+  if (waiting.length) groups.set("\u0000needs-input", waiting);
+  sessions.filter(s => !waiting.includes(s)).forEach(s => {
     const key = s.project || "";
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(s);
   });
   groups.forEach((rows, name) => {
+    const needsInput = name === "\u0000needs-input";
     const g = document.createElement("div");
-    g.className = "chat-group" + (closedGroups[name || "*"] ? " closed" : "");
+    g.className = "chat-group" + (!needsInput && closedGroups[name || "*"] ? " closed" : "");
     const h = document.createElement("button");
     h.className = "chat-group-h";
     h.innerHTML = `<span class="chev">▾</span><span class="gname"></span>`;
-    h.querySelector(".gname").textContent = name || "No project";
-    h.title = name ? "Working folder: " + name : "Chats with their own private folder";
+    h.querySelector(".gname").textContent = needsInput ? "Needs input" : name || "No project";
+    h.title = needsInput ? "Conversations waiting for your answer"
+      : name ? "Working folder: " + name : "Chats with their own private folder";
     h.onclick = () => {
+      if (needsInput) return;
       closedGroups[name || "*"] = g.classList.toggle("closed") ? 1 : 0;
       try { localStorage.setItem("closedChatGroups", JSON.stringify(closedGroups)); }
       catch (e) {}
@@ -2720,23 +3395,49 @@ function renderChats() {
 
 function chatRow(s) {
   const d = document.createElement("div");
+  const run = runFor(s.id, s.run || s);
+  const runState = run?.status || "idle";
   d.className = "chat-row" + (s.legacy ? " legacy" : "") +
-                (s.id === activeId ? " active" : "");
+                (s.id === activeId ? " active" : "") + " " + runState;
   // single-line row — time, seats and view-only status live in the tooltip
   const who = (s.participants || []).map(p => p.name).join(" · ");
   const spawnedBy = s.parent
     ? `↳ spawned by ${s.parent.label || "a seat"} in '${s.parent.id}'` : "";
-  d.title = [s.title, [relTime(s.updated), who].filter(Boolean).join(" · "),
+  const stateLabel = {thinking: "An agent is thinking", running: "Conversation is running",
+    waiting: "Waiting for your answer", stopping: "Stopping", stopped: "Stopped",
+    done: "Completed", failed: "Run failed", error: "Run failed"}[runState];
+  d.title = [s.title, stateLabel, [relTime(s.updated), who].filter(Boolean).join(" · "),
              spawnedBy, s.can_continue_reason].filter(Boolean).join("\n");
   const dots = (s.participants || [])
     .map(p => `<i style="background:var(--${p.provider},#6C6677)"></i>`).join("");
   d.innerHTML =
     `<span class="who">${dots || '<i style="background:#6C6677"></i>'}</span>
-     <div class="t"></div>
-     <button class="x" title="Delete this chat">✕</button>`;
+     <span class="run-state" data-state="${esc(runState)}"></span>
+     <div class="twrap"><div class="t"></div><div class="sub" hidden></div></div>
+     <span class="unread" hidden></span>
+     <span class="chat-actions">
+       <button class="chat-stop" title="Stop this conversation">■</button>
+       <button class="x" title="Delete this chat">✕</button>
+     </span>`;
   d.querySelector(".t").textContent = (s.parent ? "↳ " : "") + s.title;
-  d.onclick = e => { if (!e.target.closest(".x, input")) openChat(s.id); };
+  const sub = d.querySelector(".sub");
+  if (runState === "waiting") {
+    const q = String(run.question?.question || "").replace(/\s+/g, " ").trim();
+    sub.textContent = q ? `Waiting for input · ${q}` : "Waiting for input";
+    sub.hidden = false;
+  }
+  const unread = d.querySelector(".unread");
+  if (run.unread > 0 || run.completionUnread) {
+    unread.textContent = run.unread > 0 ? (run.unread > 99 ? "99+" : run.unread) : "✓";
+    unread.hidden = false;
+    unread.title = run.unread > 0 ? `${run.unread} unread message${run.unread === 1 ? "" : "s"}`
+      : "Completed since you last viewed this chat";
+  }
+  d.onclick = e => { if (!e.target.closest("button, input")) openChat(s.id); };
   d.querySelector(".t").ondblclick = e => { e.stopPropagation(); startRename(d, s); };
+  const stop = d.querySelector(".chat-stop");
+  stop.hidden = !LIVE_RUN_STATES.has(runState);
+  stop.onclick = e => { e.stopPropagation(); stopChat(s.id); };
   d.querySelector(".x").onclick = e => { e.stopPropagation(); armDelete(e.currentTarget, s); };
   return d;
 }
@@ -2786,27 +3487,31 @@ async function deleteChat(s) {
 }
 
 async function openChat(id) {
-  if (running) {
-    addMsg("system", "relay",
-           "Stop the current conversation before opening another chat.", "");
-    return;
-  }
   if (id === activeId) return;
   const r = await pywebview.api.open_session(id);
   if (r?.error) { addMsg("system", "relay", r.error, ""); return; }
+  clearAsk(); hideAllTyping();
+  hideFeedback();
   const s = r.session || {}, msgs = r.messages || [];
   activeId = s.id;
+  const runSeed = r.run || s.run || s;
+  const run = runFor(activeId, runSeed);
+  const missed = Math.min(Number(run.unread || 0), msgs.length);
+  if (runSeed.status) run.status = canonicalRunState(runSeed.status);
+  else if (runSeed.running) run.status = "running";
   canContinue = !!s.can_continue;
   workspacePath = s.workspace || null;
   transcriptPath = s.transcript || null;   // absent today — button hides itself
   customFolder = null;
+  showFolder(s.project ? s.workspace : null);   // this chat's folder, not the preference
   convProviders = (s.participants || []).map(p => p.provider);
   imgCache.clear(); resetEditing();                     // this chat's workspace, not the last one's
   refreshFiles();
   $("modeSel").value = s.mode || "round_robin";   // truthful for old chats too
-  restoreModerator(s.moderator);
+  restoreModerator(s.mode === "supervisor" ? s.supervisor : s.moderator);
   syncModCtl();
   $("untilDone").checked = !!s.until_done;
+  $("planMode").checked = !!(s.plan?.enabled || (s.plan && Array.isArray(s.plan.tasks)));
   // truthful for chats that ran before this existed, and for ones that opted
   // out: no brief record means the seats were never given project context
   $("projBrief").checked = !!s.brief;
@@ -2817,14 +3522,25 @@ async function openChat(id) {
   syncRoundsCtl();
   clearFatal();
   restoreSeats(s.participants || []);
+  renderWorkstreams(s.tasks || []);
   $("feed").innerHTML = "";
-  msgs.forEach(m => addMsg(m.provider || m.speaker, m.name, m.text,
-                           m.meta || "", m.role, m.ts, m.activity));
-  setSeated(!!s.can_continue && (s.participants || []).length > 0);
-  addMsg("system", "relay", canContinue
-    ? "Reopened — the agents still remember this chat. Reply to pick it up."
+  stickBottom(true);   // a chat you just opened starts at its newest message
+  msgs.forEach((m, i) => {
+    if (missed && i === msgs.length - missed) addNewBoundary();
+    addMsg(m.provider || m.speaker, m.name, m.text,
+           m.meta || "", m.role, m.ts, m.activity);
+  });
+  run.unread = 0; run.completionUnread = false;
+  if (run.plan && Array.isArray(run.plan.tasks)) renderPlan(run.plan);
+  stickBottom(true);
+  const live = LIVE_RUN_STATES.has(run.status);
+  setSeated((live || !!s.can_continue) && (s.participants || []).length > 0);
+  addMsg("system", "relay", live
+    ? "Viewing this live conversation. You can interject while it continues."
+    : canContinue ? "Reopened — the agents still remember this chat. Reply to pick it up."
     : (s.can_continue_reason || "Reopened for reading."), "");
-  $("say").placeholder = canContinue ? CONT_PH : IDLE_PH;
+  if (run.question) showQuestion(run.question);
+  syncActiveRun(runSeed);
   $("openTranscript").style.display = transcriptPath ? "" : "none";
   $("openWorkspace").style.display = workspacePath ? "" : "none";
   $("afterRow").classList.toggle("show", !!(transcriptPath || workspacePath));
@@ -2890,10 +3606,13 @@ function addOption(sel, value, label) {
 function resetStage() {
   canContinue = false; transcriptPath = null; workspacePath = null;
   convProviders = []; clearFatal();
+  renderWorkstreams([]);
+  hideFeedback();
   $("afterRow").classList.remove("show");
   $("openTranscript").style.display = "";
   $("openWorkspace").style.display = "";
   $("feed").innerHTML = EMPTY_HTML;
+  stickBottom(true);
   renderEmptyRoster();               // the restored empty state is static HTML
   $("say").placeholder = IDLE_PH;
   $("seatList").classList.remove("locked");
@@ -2903,14 +3622,12 @@ function resetStage() {
 }
 
 async function newChat() {
-  if (running) {
-    addMsg("system", "relay", "Stop the current conversation first.", "");
-    return;
-  }
   const r = await pywebview.api.new_conversation();
   if (r?.error) { addMsg("system", "relay", r.error, ""); return; }
+  clearAsk(); hideAllTyping();
   activeId = null;
   resetStage();
+  await restoreFolder();     // resetStage cleared it; the preference persists
   await refreshChats();
   $("say").focus();
 }
@@ -2951,6 +3668,7 @@ window.addEventListener("pywebviewready", async () => {
   geminiFamilies = uiCfg.gemini_families;
   seats.forEach(fillSeat);
   fillModerator("claude");
+  await restoreFolder();
   await refreshChats();
   refreshFiles();
   $("say").focus();

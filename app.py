@@ -19,6 +19,7 @@ import threading
 
 import webview
 
+import outcome
 import relay
 from relay import (AGENT_TYPES, PROVIDERS, SESSIONS_DIR, HELP_TEXT,
                    MODES, DEFAULT_MODE, IMPLEMENTED_MODES, DEFAULT_CEILING,
@@ -119,31 +120,142 @@ def agy_path():
         os.environ.get("LOCALAPPDATA", ""), "agy", "bin", "agy.exe")
 
 
+class Run:
+    """One conversation this window owns — live, paused, or just being drafted.
+
+    Everything here USED to be a singular attribute on Api (`_conv`,
+    `_thread`, `_stop_flag`, …), which is precisely why a second chat could
+    not start without ending the first. One Run per chat; Api keeps a map.
+
+    `id` is the session dir basename and is None until the chat is actually
+    started (a draft has no identity yet — that is what `adopt` is for).
+    """
+
+    def __init__(self, chat_id=None):
+        self.id = chat_id
+        self.state = None            # relay state dict (the old Api._conv)
+        self.thread = None
+        self.stop_flag = threading.Event()
+        self.human_q = queue.Queue()
+        self.session_dir = None
+        self.view_workspace = None   # reopened view-only chat's workspace
+        self.staged_roles = {}       # seat index -> staged role change
+        # Per-run on purpose: a global one made a question in chat B queue
+        # invisibly behind an unanswered question in chat A.
+        self.ask_lock = threading.Lock()
+        self.status = "idle"         # the RunState vocabulary (see set_status)
+        self.pending_ask = None
+        self.unread = 0
+
+    def is_running(self):
+        return bool(self.thread and self.thread.is_alive())
+
+
+class RunManager:
+    """Every chat this window is holding, keyed by chat id, plus the draft.
+
+    Deliberately dumb: a dict, a focus pointer and a lock. The rule it does
+    enforce is the one that corrupts data if broken — a session may be live
+    in AT MOST ONE run. Two Agent objects sharing a CLI session id shred
+    continuity, because `claude -p --resume` mints a NEW id on every call and
+    whichever thread writes last wins.
+    """
+
+    def __init__(self):
+        self._runs = {}              # chat_id -> Run
+        self._draft = Run()          # the unstarted new-chat stage
+        self._focus = None           # chat_id, or None meaning the draft
+        self._lock = threading.RLock()
+
+    def focused(self):
+        with self._lock:
+            if self._focus is None:
+                return self._draft
+            return self._runs.get(self._focus) or self._draft
+
+    def get(self, chat_id):
+        with self._lock:
+            return self._runs.get(chat_id)
+
+    def all(self):
+        with self._lock:
+            return list(self._runs.values())
+
+    def live(self):
+        """Runs with a loop thread still going — what a new chat must not
+        disturb, and what a window close has to stop."""
+        with self._lock:
+            return [r for r in self._runs.values() if r.is_running()]
+
+    def adopt(self, run, chat_id):
+        """Give a run its identity the moment its session dir exists."""
+        with self._lock:
+            run.id = chat_id
+            self._runs[chat_id] = run
+            if run is self._draft:
+                self._draft = Run()          # a fresh stage for the next chat
+            self._focus = chat_id
+            return run
+
+    def focus(self, chat_id):
+        """Switch which chat the window is SHOWING. Never touches threads:
+        looking at another conversation must not stop this one."""
+        with self._lock:
+            if chat_id is None:
+                self._focus = None
+                return self._draft
+            run = self._runs.get(chat_id)
+            if run is None:
+                run = self._runs[chat_id] = Run(chat_id)
+            self._focus = chat_id
+            return run
+
+    def new_draft(self):
+        """Start composing another chat, leaving live runs untouched."""
+        with self._lock:
+            self._focus = None
+            return self._draft
+
+    def forget(self, chat_id):
+        with self._lock:
+            run = self._runs.pop(chat_id, None)
+            if self._focus == chat_id:
+                self._focus = None
+            return run
+
+
 class _AppIO(LoopIO):
     """LoopIO for the desktop app. A module-level class on purpose: public
     attributes on the js_api object are walked by the pywebview bridge at page
     load (deadlock), so this wrapper lives outside Api and holds it privately.
     """
 
-    def __init__(self, api):
+    def __init__(self, api, run=None):
         self._api = api
+        # Captured ONCE, never re-read from the focus pointer: this loop keeps
+        # answering to its own chat after Josh switches to another one. Reading
+        # api._stop_flag here instead would make Stop in the visible chat kill
+        # a background run — the exact bug the registry exists to prevent.
+        self._run = run if run is not None else api._runs.focused()
 
     def emit(self, event, payload=None):
+        payload = dict(payload or {})
+        payload.setdefault("chat_id", self._run.id)
         self._api.emit(event, payload)
 
     def drain_human(self):
         out = []
-        while not self._api._human_q.empty():
-            out.append(self._api._human_q.get_nowait())
+        while not self._run.human_q.empty():
+            out.append(self._run.human_q.get_nowait())
         return out
 
     def should_stop(self):
-        return self._api._stop_flag.is_set()
+        return self._run.stop_flag.is_set()
 
     def on_turn_boundary(self, state):
         # a staged role lands here, so the seat about to speak gets its fresh
         # preamble with the new role rather than switching identity mid-turn
-        if self._api._staged_roles:
+        if self._run.staged_roles:
             self._api._commit_roles(state)
 
     def ask_human(self, payload, abort=None):
@@ -152,14 +264,15 @@ class _AppIO(LoopIO):
         # UI. _ask_lock serializes simultaneous questions (parallel mode) into
         # consecutive modals instead of stacked ones; it is app-level only, so
         # no lock-order interaction with state["lock"].
-        api = self._api
+        api, run = self._api, self._run
         q = queue.Queue()
-        with api._ask_lock:
+        with run.ask_lock:               # per-RUN: chat B must not queue behind A
             api._ask_waiters[payload["qid"]] = q
-            api.emit("question", payload)
+            run.pending_ask = dict(payload)
+            self.emit("question", payload)
             try:
                 while True:
-                    if api._stop_flag.is_set() or (abort and abort()):
+                    if run.stop_flag.is_set() or (abort and abort()):
                         return None
                     try:
                         return q.get(timeout=0.5)
@@ -167,26 +280,27 @@ class _AppIO(LoopIO):
                         pass
             finally:
                 api._ask_waiters.pop(payload["qid"], None)
-                api.emit("question_done", {"qid": payload["qid"]})
+                run.pending_ask = None
+                self.emit("question_done", {"qid": payload["qid"]})
 
 
 class Api:
     def __init__(self):
         self._window = None
-        self._thread = None
-        self._stop_flag = threading.Event()
-        self._human_q = queue.Queue()
-        self._session_dir = None
-        self._view_workspace = None    # reopened view-only chat's workspace
+        # Every per-chat thing now lives on a Run; these underscore properties
+        # below are views onto the FOCUSED run, so the whole existing body of
+        # Api (and its tests) keeps working while chat-scoped call sites move
+        # over one at a time. Half-migrating is how confinement bugs appear,
+        # so the views stay until every caller passes a chat id.
+        self._runs = RunManager()
         self._config_cache = None
         self._config_ready = threading.Event()
-        self._conv = None  # finished-conversation state, kept for continuation
         self._auth_cache = {}          # provider id -> status dict (relay probe)
         self._auth_lock = threading.Lock()
         self._login_procs = {}         # provider id -> Popen of open login console
-        self._staged_roles = {}        # seat index -> staged role change (apply_role)
+        # qids are globally unique, so ONE map is correct here even with many
+        # runs; the LOCK is what had to become per-run (see Run.ask_lock).
         self._ask_waiters = {}         # qid -> Queue awaiting answer_question
-        self._ask_lock = threading.Lock()
         self._roles_lock = threading.Lock()
         self._roles_busy = False       # an idle-path commit worker is running
         # Serialized emitter: evaluate_js is only ever called from ONE thread
@@ -195,6 +309,97 @@ class Api:
         # guarantees FIFO ordering across all producers.
         self._emit_q = queue.Queue()
         threading.Thread(target=self._drain_emits, daemon=True).start()
+
+    # ---- focused-run views (the old singular attributes) -----------------
+    # Underscore-prefixed on purpose: pywebview walks PUBLIC attrs at page
+    # load and deadlocks, so none of this may be public.
+    @property
+    def _conv(self):
+        return self._runs.focused().state
+
+    @_conv.setter
+    def _conv(self, value):
+        self._runs.focused().state = value
+
+    @property
+    def _thread(self):
+        return self._runs.focused().thread
+
+    @_thread.setter
+    def _thread(self, value):
+        self._runs.focused().thread = value
+
+    @property
+    def _stop_flag(self):
+        return self._runs.focused().stop_flag
+
+    @property
+    def _human_q(self):
+        return self._runs.focused().human_q
+
+    @property
+    def _staged_roles(self):
+        return self._runs.focused().staged_roles
+
+    @property
+    def _ask_lock(self):
+        return self._runs.focused().ask_lock
+
+    @property
+    def _session_dir(self):
+        return self._runs.focused().session_dir
+
+    @_session_dir.setter
+    def _session_dir(self, value):
+        # The moment a chat has a directory it has an identity, so this is the
+        # one hook that registers it. Doing it here rather than at each call
+        # site means no start path can forget and leave a run untracked.
+        run = self._runs.focused()
+        run.session_dir = value
+        if value:
+            self._runs.adopt(run, os.path.basename(os.path.normpath(value)))
+
+    @property
+    def _view_workspace(self):
+        return self._runs.focused().view_workspace
+
+    @_view_workspace.setter
+    def _view_workspace(self, value):
+        self._runs.focused().view_workspace = value
+
+    # ---- lifecycle status ------------------------------------------------
+    # The canonical RunState wire vocabulary. Lifecycle answers "what is this
+    # run doing"; attention metadata (unread, pending_ask) answers "does Josh
+    # need to look" — kept separate so neither multiplies the other.
+    RUN_STATES = ("idle", "running", "thinking", "waiting",
+                  "stopping", "stopped", "failed", "done")
+
+    def _set_status(self, run, status, **extra):
+        """Record a run's lifecycle state and tell the UI. Never raises: a
+        status emit failing must not take a conversation down with it."""
+        if run is None:
+            return
+        if status not in self.RUN_STATES:      # a typo'd state would silently
+            status = "running"                 # freeze a rail row forever
+        run.status = status
+        payload = {"chat_id": run.id, "status": status,
+                   "unread": run.unread,
+                   "pending_ask": run.pending_ask}
+        payload.update(extra)
+        self.emit("run_status", payload)
+
+    def run_status(self, chat_id=None):
+        """Snapshot for the rail — pure cache read, safe on the bridge thread.
+
+        `chat_id=None` returns every chat this window is holding, which is what
+        the UI needs after a restart or a focus switch to repaint truthfully
+        instead of guessing from the last event it happened to see.
+        """
+        runs = self._runs.all() if not chat_id else             [r for r in [self._runs.get(chat_id)] if r]
+        return {"runs": [{"chat_id": r.id, "status": r.status,
+                          "running": r.is_running(),
+                          "unread": r.unread,
+                          "pending_ask": r.pending_ask} for r in runs]}
 
     # ---------------------------------------------------------- to the UI --
     def emit(self, event, payload=None):
@@ -222,8 +427,8 @@ class Api:
     @staticmethod
     def _fallback_config():
         return {
-            "claude_models": [{"id": "claude-opus-4-8", "label": "Opus 4.8"}],
-            "claude_default_model": "claude-opus-4-8",
+            "claude_models": [{"id": "claude-opus-5", "label": "Opus 5"}],
+            "claude_default_model": "claude-opus-5",
             "claude_default_effort": "high",
             "gpt_models": [{"id": "gpt-5.6-sol", "label": "GPT-5.6-Sol",
                             "levels": ["low", "medium", "high"],
@@ -324,8 +529,10 @@ class Api:
         self._config_cache = {
             "gpt_default_model": gpt_default_model,
             "gpt_default_effort": gpt_default_effort,
-            # matches the account default (interactive sessions run Opus 4.8 high)
-            "claude_default_model": "claude-opus-4-8",
+            # newest Opus. Pinned rather than inherited: the claude CLI
+            # would otherwise fall back to ~/.claude/settings.json, which
+            # is Josh's own global default and drifts independently.
+            "claude_default_model": "claude-opus-5",
             "claude_default_effort": "high",
             "gemini_families": gemini_families,
             "gemini_default_family": "gemini-3.7-flash",
@@ -352,6 +559,17 @@ class Api:
             return result[0]
         return None
 
+    def folder_exists(self, path):
+        """Is this still a real folder? Bridge-thread safe (one stat call, no
+        subprocess). Used to validate the remembered working folder at
+        startup: silently restoring a path that has since been moved or
+        deleted would hand the next conversation a workspace that isn't
+        there, which surfaces much later as confusing seat failures."""
+        try:
+            return bool(path) and os.path.isdir(path)
+        except (OSError, ValueError):
+            return False
+
     def open_path(self, path):
         if path and os.path.exists(path):
             os.startfile(path)
@@ -361,13 +579,24 @@ class Api:
     # subprocess, no unbounded walks. Errors come back as {"error": …} so the
     # UI can render a quiet placeholder instead of a broken tag.
 
-    def _active_workspace(self):
-        """The LIVE workspace value: the running/continuable conversation's,
-        else the reopened (view-only) chat's. Never rebuilt from a session id."""
-        return (self._conv or {}).get("workspace") or self._view_workspace
+    def _active_workspace(self, chat_id=None):
+        """The LIVE workspace value for ONE chat: its running/continuable
+        conversation's, else its reopened (view-only) one. Never rebuilt from
+        a session id — a path derived from an id would let a renamed or
+        deleted chat resolve somewhere it no longer owns.
 
-    def read_image(self, path, full=False):
-        ws = self._active_workspace()
+        With several chats live, "the workspace" stopped having a referent.
+        Answering an UNKNOWN chat_id from the focused run is how chat A's
+        thumbnails start resolving inside chat B's folder, so an unknown id
+        resolves to nothing rather than to a default.
+        """
+        run = self._runs.get(chat_id) if chat_id else self._runs.focused()
+        if run is None:
+            return None
+        return (run.state or {}).get("workspace") or run.view_workspace
+
+    def read_image(self, path, full=False, chat_id=None):
+        ws = self._active_workspace(chat_id)
         if not ws:
             return {"error": "No active conversation workspace."}
         real = confine_to_workspace(ws, path)
@@ -395,11 +624,11 @@ class Api:
                 "data_uri": f"data:{mime};base64,"
                             f"{base64.b64encode(data).decode('ascii')}"}
 
-    def read_text(self, path, max_bytes=None):
+    def read_text(self, path, max_bytes=None, chat_id=None):
         """Text of a workspace file for the live code viewer. Mirrors
         read_image's posture exactly: confined path, and forbidden/missing
         are the IDENTICAL quiet error (no existence disclosure)."""
-        ws = self._active_workspace()
+        ws = self._active_workspace(chat_id)
         if not ws:
             return {"error": "No active conversation workspace."}
         real = confine_to_workspace(ws, path)
@@ -420,8 +649,8 @@ class Api:
                 "text": text, "truncated": st.st_size > cap,
                 "mtime": st.st_mtime}
 
-    def list_workspace_files(self):
-        ws = self._active_workspace()
+    def list_workspace_files(self, chat_id=None):
+        ws = self._active_workspace(chat_id)
         if not ws or not os.path.isdir(ws):
             return {"workspace": None, "files": []}
         root = os.path.realpath(ws)
@@ -753,6 +982,7 @@ class Api:
             # session_dir and deliberately refuses to trust meta["id"] as a
             # path, while open_session already holds the validated one.
             state["brief"] = read_project_context(path, meta)
+        state["_run"] = self._runs.focused()
         self._conv = state
         return {"ok": True, "session": summary, "messages": messages}
 
@@ -811,6 +1041,24 @@ class Api:
 
     def new_conversation(self):
         return self.reset_conversation()
+
+    def submit_feedback(self, rating, reasons=None, note=""):
+        """Persist the optional end-card response for the active chat.
+
+        Bridge-thread safe: this is one bounded, atomic JSON update.  The UI
+        never writes outcome.json itself, so outcome.set_feedback remains the
+        single validator and owner of the v1 vocabulary.
+        """
+        if not self._session_dir or not os.path.isdir(self._session_dir):
+            return {"error": "There is no active conversation to rate."}
+        try:
+            rec = outcome.set_feedback(self._session_dir, rating,
+                                       reasons or [], note or "")
+        except ValueError as e:
+            return {"error": str(e)}
+        if rec is None:
+            return {"error": "Could not save feedback for this conversation."}
+        return {"ok": True, "feedback": rec.get("human_feedback") or {}}
 
     # ------------------------------------------------------- conversation --
     def start(self, cfg):
@@ -1027,9 +1275,112 @@ class Api:
             "role": agent.role or "",
             "role_instructions": agent.role_instructions or ""})
 
-    def stop(self):
-        self._stop_flag.set()
+    def _chat_id(self):
+        """The id of the run this Api currently owns (session dir basename).
+
+        Until the run registry lands there is exactly one, so this is the
+        single point that has to change when there are many."""
+        d = self._session_dir
+        return os.path.basename(os.path.normpath(d)) if d else None
+
+    def _resolve_chat(self, chat_id):
+        """(run, error) for a chat-scoped call.
+
+        An unknown chat_id is REFUSED, never silently applied to whichever run
+        happens to be focused — stopping the wrong conversation is worse than
+        not stopping at all. `None` still means "the chat I'm showing".
+        """
+        run = self._runs.get(chat_id) if chat_id else self._runs.focused()
+        if run is None:
+            return None, "No such chat in this window."
+        if not run.state:
+            return None, "No conversation is running."
+        return run, None
+
+    def stop(self, chat_id=None):
+        """ONE press stops the whole conversation — Josh should never have to
+        stop each seat (2026-08-18).
+
+        Two halves, both required. The flag ends the LOOP at its next
+        boundary; `cancel_all` kills the CLI children that would otherwise
+        keep the loop from reaching that boundary for minutes, with replies
+        still landing the whole time. The flag alone is what made Stop feel
+        like it did nothing.
+        """
+        run, err = self._resolve_chat(chat_id)
+        if err:
+            self._stop_flag.set()      # nothing live: still honour the press
+            return {"ok": True, "stopped": 0, "note": err}
+        run.stop_flag.set()            # THAT chat's flag, not the focused one
+        run.status = "stopping"
+        killed = relay.cancel_all(run.state)
+        if killed:
+            self.emit("status", {"text": f"Stopping — interrupted {killed} "
+                                         f"seat{'s' if killed != 1 else ''} "
+                                         f"mid-turn."})
+        return {"ok": True, "stopped": killed}
+
+    def approve_plan(self, chat_id=None, plan_id=None, payload=None):
+        """Josh approved (or rejected) the plan card.
+
+        This ANSWERS the question the loop is blocked on — it does not flip
+        capability flags itself. Doing that directly was a real deadlock: the
+        flags changed, the card said "Executing", and the conversation thread
+        stayed asleep in ask_human forever with nobody left to wake it. The
+        gate in relay.plan_gate owns the unlock, and it only runs when this
+        answer arrives (caught by GPT's audit, 2026-08-18).
+
+        Bridge-thread safe: a pure queue put, exactly like answer_question.
+        """
+        run, err = self._resolve_chat(chat_id)
+        if err:
+            return {"ok": False, "error": err}
+        plan = (run.state or {}).get("plan") or {}
+        qid = plan.get("qid")
+        if not qid or qid not in self._ask_waiters:
+            return {"ok": False, "error": "No plan is waiting for approval."}
+        # Stale-card guard: an old window must not approve over a newer draft.
+        data = dict(payload or {})
+        if plan_id and plan.get("id") and plan_id != plan["id"]:
+            return {"ok": False, "error": "That plan card is out of date."}
+        rev = data.get("revision")
+        if rev is not None and rev != plan.get("revision"):
+            return {"ok": False, "error": "That plan card is out of date."}
+        self._ask_waiters[qid].put({
+            "approved": data.get("approved", True),
+            "goal": data.get("goal"),
+            "tasks": data.get("tasks"),
+        })
         return {"ok": True}
+
+    def stop_seat(self, chat_id, seat_id):
+        """Stop ONE seat without ending the conversation.
+
+        Deliberately does NOT set the stop flag: the other seats keep going
+        and this one takes the ordinary never-forge-a-turn skip path, so
+        nothing it half-said is relayed to anybody.
+        """
+        run, err = self._resolve_chat(chat_id)
+        if err:
+            return {"ok": False, "error": err}
+        state = run.state
+        agents = state.get("agents") or []
+        # the UI sends the slot id it saw on the `thinking` event; fall back to
+        # the label resolver so "claude 2" works from /commands too
+        slots = state.get("slot_ids") or []
+        if seat_id in slots:
+            i = slots.index(seat_id)
+            hit = [i] if agents[i].cancel() else []
+        else:
+            hit = relay.cancel_seat(state, str(seat_id or ""))
+        if not hit:
+            return {"ok": True, "stopped": 0,
+                    "note": "That seat is not mid-turn."}
+        names = ", ".join(agents[i].name for i in hit)
+        self.emit("status", {"text": f"Stopped {names} mid-turn; the rest of "
+                                     f"the conversation continues."})
+        return {"ok": True, "stopped": len(hit),
+                "seats": [slots[i] if i < len(slots) else i for i in hit]}
 
     def _run(self, cfg):
         try:
@@ -1160,6 +1511,14 @@ class Api:
             "ask": True,
         }
         state["log"] = log = make_log(state, store)
+        # _session_dir was set above, so the focused run is this chat's — pin
+        # it to the state before any thread can move the focus pointer.
+        state["_run"] = self._runs.focused()
+        if (cfg.get("plan") or {}).get("enabled"):
+            # Read-only from the FIRST turn, before any seat has spoken:
+            # starting in execution and downgrading later would leave a window
+            # in which a seat could already have written something.
+            relay.start_plan(state, cfg.get("opener") or cfg.get("topic") or "")
         self._conv = state
         # Persist before the first turn: if the app dies here, Josh's opener is
         # the only content that exists and it must still be resumable.
@@ -1254,15 +1613,32 @@ class Api:
 
         The loop itself lives in relay.run_rounds — anything loop-shaped goes
         there, once, for both front ends."""
-        run_rounds(state, _AppIO(self))
+        # Bound to THIS chat's run, not the focused one: Josh switching to
+        # another chat mid-run must not redirect this loop's stop flag,
+        # human queue or staged roles to the chat he happens to be viewing.
+        run = state.get("_run")
+        self._set_status(run, "running")
+        try:
+            outcome_kind = run_rounds(state, _AppIO(self, run))
+        except BaseException:
+            # `failed` is a distinct terminal state from `done` and `stopped`:
+            # a run Josh killed did not finish, and one that finished did not
+            # break. Collapsing the three is how a rail lies to him.
+            self._set_status(run, "failed")
+            raise
         store = state["store"]
         store.save(state)
         with open(state["transcript"], "a", encoding="utf-8") as f:
             f.write("\n---\n*paused — reply in the app to continue*\n")
         summary = session_summary(self._session_dir)
+        rec = outcome.read_outcome(self._session_dir) or {}
+        self._set_status(run, "stopped" if outcome_kind == "stopped"
+                         else "failed" if outcome_kind == "fatal" else "done",
+                         outcome=outcome_kind)
         self.emit("done", {"transcript": state["transcript"],
                            "session_dir": self._session_dir,
                            "session": summary,
+                           "feedback": rec.get("human_feedback") or {},
                            # read back from what was actually persisted rather
                            # than asserted — if a seat's id didn't save, the
                            # composer must say so instead of promising a resume
@@ -1272,7 +1648,7 @@ class Api:
     # --------------------------------------------------- slash commands --
     def _do_command(self, state, text):
         """Idle-path shim: the shared dispatcher does the work (relay.py)."""
-        return dispatch_command(state, text, _AppIO(self))
+        return dispatch_command(state, text, _AppIO(self, state.get("_run")))
 
 
 ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
