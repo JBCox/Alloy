@@ -1564,13 +1564,19 @@ class Api:
         state = {
             "agents": agents, "slot_ids": slot_ids, "providers": providers,
             "transcript": store.transcript, "workspace": workspace,
-            "topic": topic, "title": title_src, "created": store.created,
+            "topic": topic or opener, "title": title_src, "created": store.created,
             "yolo": yolo, "connectors": connectors,
             "turns": turns, "store": store, "ended": False,
             "pending": {i: [] for i in range(len(agents))},
             "introduced": [False] * len(agents),
             "rnd": 0, "max": turns, "mode": mode,
             "moderator": moderator_spec,
+            "supervisor": cfg.get("supervisor") if mode == "supervisor" else None,
+            "supervisor_trace": [],
+            "supervisor_goal": None,
+            "supervisor_waves": 0,
+            "supervisor_wave_index": 1,
+            "workstreams": None,
             "until_done": bool(cfg.get("until_done")),
             "turn_ceiling": (max(1, int(cfg.get("ceiling")
                                         or DEFAULT_CEILING))
@@ -1628,6 +1634,8 @@ class Api:
                               on_status=brief_status_row)
         if brief.get("status") != "off":
             state["brief"] = brief
+            if brief.get("usage"):
+                relay.record_usage(state, brief["usage"], kind="brief")
             write_project_context(self._session_dir, brief)
             store.save(state)
 

@@ -254,6 +254,19 @@ def build_outcome(session_dir, workspace=None, ended=None):
         turns += 1
         if speaker in by_id:
             by_id[speaker]["turns"] += 1
+            u = row.get("usage")
+            if isinstance(u, dict):
+                su = by_id[speaker].setdefault("usage", {
+                    "cost_usd": None,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0
+                })
+                if isinstance(u.get("cost_usd"), (int, float)):
+                    su["cost_usd"] = round((su["cost_usd"] or 0.0) + float(u["cost_usd"]), 6)
+                su["input_tokens"] += int(u.get("input_tokens") or 0)
+                su["output_tokens"] += int(u.get("output_tokens") or 0)
+                su["total_tokens"] += int(u.get("total_tokens") or ((u.get("input_tokens") or 0) + (u.get("output_tokens") or 0)))
         dirs = _trailing_directives(text)
         if "ASK" in dirs:
             asked += 1
@@ -278,6 +291,35 @@ def build_outcome(session_dir, workspace=None, ended=None):
         guess = os.path.join(session_dir, "workspace")
         workspace = guess if os.path.isdir(guess) else None
 
+    meta_usage = meta.get("usage")
+    total_cost = None
+    total_input = 0
+    total_output = 0
+    total_tokens = 0
+    has_usage = False
+    for s in seats:
+        su = s.get("usage")
+        if su:
+            has_usage = True
+            if su.get("cost_usd") is not None:
+                total_cost = round((total_cost or 0.0) + su["cost_usd"], 6)
+            total_input += su.get("input_tokens", 0)
+            total_output += su.get("output_tokens", 0)
+            total_tokens += su.get("total_tokens", 0)
+
+    if has_usage:
+        usage_fact = {
+            "total_cost_usd": total_cost,
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "total_tokens": total_tokens,
+            "by_seat": {str(s["id"]): s["usage"] for s in seats if s.get("id") is not None and "usage" in s}
+        }
+    elif isinstance(meta_usage, dict):
+        usage_fact = meta_usage
+    else:
+        usage_fact = None
+
     hard = {
         "turns": turns,
         "rounds_run": meta.get("rnd", 0),
@@ -294,6 +336,7 @@ def build_outcome(session_dir, workspace=None, ended=None):
                  "unanswered": max(0, asked - answered)},
         "system_notes": {"count": len(system_notes), "samples": system_notes},
         "artifacts": workspace_artifacts(workspace, first_ts),
+        "usage": usage_fact,
         "started": rows[0].get("ts") if rows else None,
         "ended_at": rows[-1].get("ts") if rows else None,
         "duration_s": (int(last_ts - first_ts)

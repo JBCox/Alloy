@@ -17,9 +17,11 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import relay
 import app
+import outcome
 from relay import (Agent, ClaudeAgent, CodexAgent, LoopIO, TurnTimeout,
                    make_activity_sink, run_rounds,
                    ACTIVITY_MAX, ACTIVITY_KEEP)
@@ -572,6 +574,196 @@ class ReadTextBridgeTests(unittest.TestCase):
         self.api._conv = None
         self.api._view_workspace = None
         self.assertIn("error", self.api.read_text("x.txt"))
+
+
+class UsageTelemetryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ai-chat-usage-test-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_claude_agent_parse_extracts_usage_and_cost(self):
+        agent = ClaudeAgent(self.tmp, name="Claude")
+        stdout = "\n".join([
+            json.dumps({"type": "progress", "text": "thinking"}),
+            json.dumps({
+                "type": "result",
+                "subtype": "success",
+                "result": "Here is the code.",
+                "total_cost_usd": 0.0425,
+                "usage": {
+                    "input_tokens": 1200,
+                    "output_tokens": 350,
+                    "cache_read_input_tokens": 500,
+                    "cache_creation_input_tokens": 100,
+                },
+                "duration_ms": 4200,
+                "session_id": "sess-123",
+            }),
+        ])
+        reply = agent.parse(stdout)
+        self.assertEqual(reply, "Here is the code.")
+        self.assertIsNotNone(agent.last_usage)
+        self.assertEqual(agent.last_usage["cost_usd"], 0.0425)
+        self.assertEqual(agent.last_usage["input_tokens"], 1200)
+        self.assertEqual(agent.last_usage["output_tokens"], 350)
+        self.assertEqual(agent.last_usage["cached_tokens"], 600)
+        self.assertEqual(agent.last_usage["total_tokens"], 1550)
+        self.assertEqual(agent.last_usage["duration_ms"], 4200)
+
+    def test_claude_agent_error_captures_usage_without_forging_reply(self):
+        agent = ClaudeAgent(self.tmp, name="Claude")
+        stdout = json.dumps({
+            "type": "result",
+            "subtype": "api_error",
+            "is_error": True,
+            "result": "API Rate Limit Exceeded",
+            "total_cost_usd": 0.005,
+            "usage": {"input_tokens": 150, "output_tokens": 0},
+        })
+        reply = agent.parse(stdout)
+        self.assertEqual(reply, "")
+        self.assertIsNotNone(agent.last_usage)
+        self.assertEqual(agent.last_usage["cost_usd"], 0.005)
+        self.assertEqual(agent.last_usage["input_tokens"], 150)
+
+    def test_codex_agent_parse_extracts_token_usage(self):
+        agent = CodexAgent(self.tmp, name="Codex")
+        with open(agent._lastmsg, "w", encoding="utf-8") as f:
+            f.write("Task completed successfully.")
+        stdout = "\n".join([
+            json.dumps({"type": "thread.started", "thread_id": "t1"}),
+            json.dumps({
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 2500,
+                    "output_tokens": 800,
+                    "cached_tokens": 1000,
+                    "total_tokens": 3300,
+                }
+            }),
+        ])
+        reply = agent.parse(stdout)
+        self.assertEqual(reply, "Task completed successfully.")
+        self.assertIsNotNone(agent.last_usage)
+        self.assertIsNone(agent.last_usage["cost_usd"])
+        self.assertEqual(agent.last_usage["input_tokens"], 2500)
+        self.assertEqual(agent.last_usage["output_tokens"], 800)
+        self.assertEqual(agent.last_usage["cached_tokens"], 1000)
+        self.assertEqual(agent.last_usage["total_tokens"], 3300)
+
+    def test_gemini_agent_leaves_usage_blank(self):
+        agent = relay.GeminiAgent(self.tmp, name="Gemini")
+        stdout = json.dumps({"response": "Analysis complete.", "conversation_id": "conv-1"})
+        reply = agent.parse(stdout)
+        self.assertEqual(reply, "Analysis complete.")
+        self.assertIsNone(agent.last_usage)
+
+    def test_session_store_persists_usage_on_message_and_meta(self):
+        store = relay.SessionStore(self.tmp)
+        usage_sample = {"cost_usd": 0.015, "input_tokens": 500, "output_tokens": 150, "total_tokens": 650}
+        row = store.record("Claude", "Done.", speaker=0, provider="claude", round=1, usage=usage_sample)
+        self.assertEqual(row.get("usage"), usage_sample)
+
+        msgs = relay.read_messages(self.tmp)
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0].get("usage"), usage_sample)
+
+        agent1 = ClaudeAgent(self.tmp, name="Claude")
+        agent1.session_id = "sess-1"
+        agent2 = CodexAgent(self.tmp, name="Codex")
+        agent2.session_id = "sess-2"
+        state = {
+            "agents": [agent1, agent2],
+            "slot_ids": [0, 1],
+            "providers": ["claude", "gpt"],
+            "workspace": self.tmp,
+            "turns": 1,
+            "rnd": 1,
+            "max": 1,
+            "introduced": [True, True],
+            "pending": {0: [], 1: []},
+            "usage": {
+                "total_cost_usd": 0.015,
+                "input_tokens": 500,
+                "output_tokens": 150,
+                "total_tokens": 650,
+                "by_seat": {"0": {"cost_usd": 0.015, "input_tokens": 500, "output_tokens": 150, "total_tokens": 650, "turns": 1}}
+            }
+        }
+        meta = store.save(state)
+        self.assertIn("usage", meta)
+        self.assertEqual(meta["usage"]["total_cost_usd"], 0.015)
+
+        summary = relay.session_summary(self.tmp, meta)
+        self.assertEqual(summary.get("usage"), meta["usage"])
+
+        rehydrated = relay.rehydrate(meta)
+        self.assertEqual(rehydrated.get("usage"), meta["usage"])
+
+    def test_commit_reply_accumulates_usage_additively(self):
+        agent = ClaudeAgent(self.tmp, name="Claude")
+        agent.last_usage = {"cost_usd": 0.02, "input_tokens": 1000, "output_tokens": 200, "total_tokens": 1200}
+        store = relay.SessionStore(self.tmp)
+        state = {
+            "agents": [agent],
+            "slot_ids": [0],
+            "providers": ["claude"],
+            "workspace": self.tmp,
+            "turns": 5,
+            "rnd": 1,
+            "max": 5,
+            "introduced": [False],
+            "pending": {0: ["prompt"]},
+            "store": store,
+        }
+        state["log"] = relay.make_log(state, store)
+
+        class FakeIO:
+            def emit(self, event, payload):
+                pass
+
+        relay.commit_reply(state, 0, "reply 1", 1, FakeIO())
+        self.assertEqual(state["usage"]["total_cost_usd"], 0.02)
+        self.assertEqual(state["usage"]["total_tokens"], 1200)
+        self.assertEqual(state["usage"]["by_seat"]["0"]["turns"], 1)
+
+        # Second turn adds up
+        agent.last_usage = {"cost_usd": 0.03, "input_tokens": 1500, "output_tokens": 300, "total_tokens": 1800}
+        state["pending"][0].append("prompt 2")
+        relay.commit_reply(state, 0, "reply 2", 1, FakeIO())
+        self.assertEqual(state["usage"]["total_cost_usd"], 0.05)
+        self.assertEqual(state["usage"]["total_tokens"], 3000)
+        self.assertEqual(state["usage"]["by_seat"]["0"]["turns"], 2)
+
+    def test_outcome_hard_facts_incorporates_usage(self):
+        store = relay.SessionStore(self.tmp)
+        store.record("Claude", "turn 1", speaker=0, provider="claude", round=1,
+                     usage={"cost_usd": 0.012, "input_tokens": 800, "output_tokens": 200, "total_tokens": 1000})
+        store.record("Codex", "turn 2", speaker=1, provider="gpt", round=1,
+                     usage={"cost_usd": None, "input_tokens": 1200, "output_tokens": 400, "total_tokens": 1600})
+        meta = {
+            "v": 2, "id": store.id, "title": "Test", "created": "", "updated": "",
+            "workspace": self.tmp, "rnd": 1, "max": 1,
+            "seats": [
+                {"id": 0, "provider": "claude", "label": "Claude"},
+                {"id": 1, "provider": "gpt", "label": "Codex"}
+            ]
+        }
+        with open(store.meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+
+        res = outcome.build_outcome(self.tmp)
+        usage = res["hard_facts"].get("usage")
+        self.assertIsNotNone(usage)
+        self.assertEqual(usage["total_cost_usd"], 0.012)
+        self.assertEqual(usage["input_tokens"], 2000)
+        self.assertEqual(usage["output_tokens"], 600)
+        self.assertEqual(usage["total_tokens"], 2600)
+        self.assertEqual(usage["by_seat"]["0"]["cost_usd"], 0.012)
+        self.assertIsNone(usage["by_seat"]["1"]["cost_usd"])
+        self.assertEqual(usage["by_seat"]["1"]["total_tokens"], 1600)
 
 
 if __name__ == "__main__":

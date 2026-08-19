@@ -28,7 +28,11 @@ you can jump in anytime.
    decide when the task is finished — and how many **Helpers** (one-shot AIs
    a seat can spawn) and **Teams** (whole sub-conversations that report back)
    they're allowed. These are locked once a conversation starts and restored
-   when you reopen a chat. There's no topic box — type your opening
+   when you reopen a chat. In **Supervisor** mode, a collapsible control log
+   above the transcript shows the planner's public rationale, exact task briefs,
+   routing changes, filesystem verification, and bounded repair attempts live;
+   the log is saved with the session and explicitly excludes private model
+   reasoning. There's no topic box — type your opening
    message in the bottom bar and hit **Send** to start the conversation (it's
    delivered to every seat as your kickoff); anything you type after that joins
    as an interjection, and the header shows a **Stop** button while it runs.
@@ -88,7 +92,8 @@ Options:
 | `--start X` | first listed | Who speaks first: slot number (1-based), label (`"claude 2"`), or provider |
 | `--role "SEAT=NAME"` | none | Public role name for a seat, shown to every seat in the roster line; repeatable. `SEAT` is the same label-or-provider grammar as `/clear`; a typo is a hard error, not a silent no-op |
 | `--role-instructions "SEAT=TEXT"` | none | Private role instructions only that seat sees; repeatable, same `SEAT` grammar |
-| `--yolo` | off | Full autonomy incl. shell access (use with care) |
+| `--permission LEVEL` | auto | Permission profile: `read_only`, `ask`, `auto` (sandboxed workspace), or `full` (no sandbox/approvals) |
+| `--yolo` | off | Backward-compatible alias for `--permission full` |
 | `--workspace PATH` | fresh scratch dir | Run the conversation inside an existing project folder instead of a private scratch dir. The folder's AI docs then become shared context for every seat (see below) |
 | `--no-brief` | on | Skip that shared context and leave each seat with whatever its own CLI happens to load |
 | `--mode M` | round-robin | Orchestration: `round-robin` (fixed), `speaker` (each reply ends with `[[NEXT: seat]]` naming who goes next), `moderator` (a cheap side call picks each turn), `supervisor` (a stateless planner decomposes the goal into isolated concurrent workstreams with capability gating and filesystem verification), `parallel` (everyone answers at once in simultaneous rounds), `free` (seats reply whenever messages arrive, interleaved live) |
@@ -139,8 +144,10 @@ silent swap. Untick **Share the folder's AI docs with every seat** (or pass
 `--no-brief`) to turn the whole thing off.
 
 Agents are also told a chosen folder is your real project and not to change
-files there unless you ask. That warning is advice, not a sandbox — `--yolo`
-removes the guardrails entirely, so point it at a git repo you can `git diff`.
+files there unless you ask. Choose **Read only**, **Ask first**, **Workspace**,
+or **Full access** in the app. `--permission full` (and its older `--yolo`
+alias) removes the guardrails entirely, so point it at a git repo you can
+`git diff`.
 
 ## While it's running
 
@@ -206,11 +213,14 @@ reopen the chat from the left rail and reply to continue it.
 
 ## Tools the agents get
 
-Sandboxed by default: web search/fetch + read/write inside the shared workspace.
-Claude runs with `--permission-mode acceptEdits` and an allow-list; Codex runs in
-its `workspace-write` sandbox with network on; Gemini runs agy with auto-approved
-tools inside agy's terminal sandbox. `--yolo` removes the guardrails on all of
-them — only for topics where you're happy with them running arbitrary commands.
+Four permission profiles are available. **Read only** disables writes and shell
+execution. **Ask first** routes Claude's individual write/command tools through
+an approval card; because Codex and Gemini's print-mode CLIs have no equivalent
+pre-tool hook, Alloy asks once before each potentially mutating turn and runs a
+denied turn read-only. **Workspace** is the default: Claude uses accepted edits,
+Codex uses its `workspace-write` sandbox with network on, and Gemini stays in its
+terminal sandbox. **Full access** removes those guardrails on all providers and
+is only for work where arbitrary commands are acceptable.
 
 Seats are also told they may use their own CLI's built-in subagents (Claude's
 Task tool, Codex's multi-agent mode) for small side-tasks inside a turn — but

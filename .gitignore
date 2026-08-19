@@ -17,3 +17,6 @@ app-stderr.log
 # chat-input attachments saved by the app when a conversation uses this repo
 # as its working folder — conversation artifacts, not source
 attachments/
+*.png
+*.jpg
+_*.txt

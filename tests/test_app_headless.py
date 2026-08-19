@@ -85,6 +85,134 @@ class HeadlessAppTests(unittest.TestCase):
         self.assertIsNotNone(api._conv, "run did not start")
         return api
 
+    def test_supervisor_picker_and_public_trace_reach_the_live_run(self):
+        relay.AGENT_TYPES["claude"] = scripted_agent_class(
+            "Claude", ["Claude finished the research."])
+        relay.AGENT_TYPES["gpt"] = scripted_agent_class("GPT", [
+            "Independent research tracks.\n"
+            "[[TASK: c | owner=0 | inspect the UI]]\n"
+            "[[TASK: g | owner=1 | inspect the engine]]",
+            "GPT finished the research.",
+        ])
+        api = app.Api()
+        api._window = FakeWindow()
+        api._conversation({
+            "opener": "audit the app", "turns": 1, "mode": "supervisor",
+            "supervisor": {"provider": "gpt", "model": "gpt-test",
+                           "effort": "low"},
+            "seats": [{"id": 0, "provider": "claude", "enabled": True},
+                      {"id": 1, "provider": "gpt", "enabled": True}],
+        })
+        api._emit_q.join()
+        self.assertEqual(api._conv["supervisor"],
+                         {"provider": "gpt", "model": "gpt-test",
+                          "effort": "low"})
+        phases = [e["phase"] for e in api._conv["supervisor_trace"]]
+        self.assertIn("planning", phases)
+        self.assertIn("instruction", phases)
+        self.assertIn("verification", phases)
+        events = api._window.events()
+        self.assertTrue(any(e["event"] == "supervisor" for e in events))
+
+    def _mid_job_supervised_chat(self):
+        """A supervised run that stops with work still open — the state Josh
+        actually reopens, and the one a drained-plan restore would misreport.
+        Task `g` depends on `c`, so it is dispatched at settlement and is
+        still live when the round cap ends the run."""
+        relay.AGENT_TYPES["claude"] = scripted_agent_class(
+            "Claude", ["Claude finished [c]."])
+        relay.AGENT_TYPES["gpt"] = scripted_agent_class("GPT", [
+            "Two tracks, the second waits on the first.\n"
+            "[[TASK: c | owner=0 | inspect the UI]]\n"
+            "[[TASK: g | owner=0 | deps=c | inspect the engine]]",
+            "Nothing assigned to me yet.",
+        ])
+        # a fresh Api resolves the id off disk through relay.SESSIONS_DIR, not
+        # the in-memory registry — patch both or the reopen looks deleted
+        old_relay = relay.SESSIONS_DIR
+        relay.SESSIONS_DIR = self.tmp
+        self.addCleanup(setattr, relay, "SESSIONS_DIR", old_relay)
+        api = app.Api()
+        api._window = FakeWindow()
+        api._conversation({
+            "opener": "audit the app", "turns": 1, "mode": "supervisor",
+            "supervisor": {"provider": "gpt", "model": "gpt-test",
+                           "effort": "low"},
+            "seats": [{"id": 0, "provider": "claude", "enabled": True},
+                      {"id": 1, "provider": "gpt", "enabled": True}],
+        })
+        api._emit_q.join()
+        return api
+
+    def test_reopening_mid_job_restores_a_LIVE_plan(self):
+        api = self._mid_job_supervised_chat()
+        sid = api._runs.focused().id
+        statuses = {t["id"]: t["status"] for t in api._conv["workstreams"]}
+        self.assertEqual(statuses["c"], "done")
+        self.assertEqual(statuses["g"], "active",
+                         "the dependent task should still be in flight")
+
+        # a SECOND Api is the honest simulation of reopening in a new process:
+        # nothing is inherited in memory, everything comes back off disk
+        fresh = app.Api()
+        fresh._window = FakeWindow()
+        r = fresh.open_session(sid)
+        self.assertNotIn("error", r)
+        summary = r["session"]
+        self.assertEqual(summary["mode"], "supervisor")
+        self.assertEqual({t["id"]: t["status"] for t in summary["tasks"]},
+                         {"c": "done", "g": "active"},
+                         "a reopened chat must show the plan as it stands, "
+                         "not a drained or restarted one")
+        self.assertTrue(summary["supervisor_trace"],
+                        "the control log survives the reopen")
+        self.assertTrue(all(isinstance(e.get("wave"), int)
+                            for e in summary["supervisor_trace"]),
+                        "and every entry still knows its wave")
+        self.assertEqual(summary["supervisor"],
+                         {"provider": "gpt", "model": "gpt-test",
+                          "effort": "low"},
+                         "including which model was managing")
+        self.assertEqual(summary["supervisor_goal"], "audit the app",
+                         "the goal the plan was judged against comes back too")
+        if summary["can_continue"]:
+            self.assertEqual(
+                [t["id"] for t in fresh._conv["workstreams"]], ["c", "g"],
+                "and the rebuilt live state carries the same plan")
+            self.assertEqual(fresh._conv["supervisor_goal"], "audit the app")
+
+    def test_rail_badge_prefers_live_work_over_a_past_non_verdict(self):
+        """The run above ended on the turn limit, so it recorded
+        goal_unresolved for that run — but the chat is resumable with a task
+        still open, and a row reading 'No verdict' would say the opposite of
+        what continuing actually does."""
+        api = self._mid_job_supervised_chat()
+        sid = api._runs.focused().id
+        fresh = app.Api()
+        fresh._window = FakeWindow()
+        summary = fresh.open_session(sid)["session"]
+        status = summary["supervisor_status"]
+        self.assertEqual(status["state"], "working")
+        self.assertEqual(status["open"], 1)
+        self.assertIn("open", status["label"])
+
+    def test_supervisor_status_distinguishes_every_ending(self):
+        base = {"mode": "supervisor", "supervisor_wave_index": 2,
+                "workstreams": [{"id": "a", "status": "done"}]}
+        self.assertIsNone(relay.supervisor_status({"mode": "parallel"}),
+                          "an ordinary chat carries no supervision badge")
+        self.assertEqual(
+            relay.supervisor_status(dict(base, workstreams=[]))["state"],
+            "planning")
+        self.assertEqual(relay.supervisor_status(base)["state"], "settled")
+        closed = dict(base, supervisor_trace=[{"type": "goal_accepted"}])
+        self.assertEqual(relay.supervisor_status(closed)["state"], "accepted")
+        self.assertEqual(relay.supervisor_status(closed)["label"],
+                         "Goal accepted")
+        spent = dict(base, supervisor_trace=[{"type": "goal_unresolved"}])
+        self.assertEqual(relay.supervisor_status(spent)["state"], "unresolved",
+                         "settled work with no verdict is NOT 'accepted'")
+
     def test_stop_sets_the_flag_and_cancels_every_seat(self):
         api = self._stopped_api()
         killed = []

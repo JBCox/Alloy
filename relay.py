@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -185,6 +186,216 @@ def confine_to_workspace(root, path):
     return cand
 
 
+# ------------------------------------------------------- permission levels --
+# Josh asked for "the different permission levels like they have on claude"
+# (2026-08-18): one mode where the seats just act, one where they have to ask.
+# The ladder below is conversation-level config, and it is REAL: every rung
+# maps to a switch the CLI actually enforces, never to a preamble sentence.
+# That distinction is the whole point — an instruction that a seat "should ask
+# first" leaves non-yolo claude holding Write/Edit and codex holding
+# workspace-write, so it changes what a seat is TOLD, not what it CAN do
+# (same rule as ROLES_DESIGN.md, same reason plan mode swaps real flags).
+#
+# `yolo` was a two-rung version of this (sandboxed / unsandboxed) and remains
+# the wire name for the top rung, so every saved session keeps resuming.
+PERMISSION_LEVELS = {
+    "read_only": {
+        "label": "Read-only",
+        "short": "read",
+        "blurb": "Seats can read, search and browse. Every write tool is off.",
+        "writes": False,
+    },
+    "ask": {
+        "label": "Ask first",
+        "short": "ask",
+        "blurb": ("Seats can read freely, but a write or a shell command "
+                  "pauses the conversation for your approval."),
+        "writes": True,
+    },
+    "auto": {
+        "label": "Auto (workspace)",
+        "short": "auto",
+        "blurb": ("Seats edit files and run commands inside the working "
+                  "folder without asking. Nothing outside it."),
+        "writes": True,
+    },
+    "full": {
+        "label": "Full access",
+        "short": "full",
+        "blurb": ("No sandbox at all: seats may touch anything this account "
+                  "can reach. Unattended runs can do real damage."),
+        "writes": True,
+    },
+}
+PERMISSION_ORDER = ("read_only", "ask", "auto", "full")
+DEFAULT_PERMISSION = "auto"
+
+# Everything a human might reasonably type or a legacy meta might carry.
+_PERMISSION_ALIASES = {
+    "readonly": "read_only", "read-only": "read_only", "read": "read_only",
+    "plan": "read_only", "planning": "read_only", "ro": "read_only",
+    "ask": "ask", "approve": "ask", "manual": "ask", "prompt": "ask",
+    "ask-first": "ask", "ask_first": "ask", "default": "ask",
+    "auto": "auto", "acceptedits": "auto", "accept-edits": "auto",
+    "workspace": "auto", "sandboxed": "auto", "normal": "auto",
+    "full": "full", "yolo": "full", "bypass": "full",
+    "bypasspermissions": "full", "danger": "full", "unsandboxed": "full",
+}
+
+
+def normalize_permission(value, default=DEFAULT_PERMISSION):
+    """Map anything Josh/meta/CLI can hand us onto a real rung.
+
+    Never raises and never invents a rung: an unrecognised value falls back to
+    `default` rather than silently granting more than was asked for. Booleans
+    are accepted because `yolo=True` is exactly what old callers pass.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return "full" if value else default
+    key = str(value).strip().lower().replace(" ", "_")
+    if key in PERMISSION_LEVELS:
+        return key
+    return _PERMISSION_ALIASES.get(key.replace("_", "-"),
+                                   _PERMISSION_ALIASES.get(key, default))
+
+
+# The four answers an approval modal offers. Order is the button order, and
+# "once" comes first on purpose: the safe answer should be the easy one.
+PERMISSION_ANSWERS = ("Allow once", "Allow rest of turn",
+                      "Deny", "Deny rest of turn")
+
+SESSION_PERMISSION_ANSWER_TEMPLATE = "Always allow {tool} this session"
+SESSION_ALLOW_WORDS = {"always allow", "allow session", "always allow this session"}
+
+
+def session_permission_label(tool):
+    """The canonical button text for a session-scoped tool grant."""
+    return SESSION_PERMISSION_ANSWER_TEMPLATE.format(tool=tool)
+
+_ALLOW_WORDS = {"allow", "allow once", "approve", "approve once",
+                "approved", "yes", "y", "ok"}
+
+
+def read_permission_answer(answer):
+    """Turn one modal answer into (allowed, standing).
+
+    Free text is welcome — Josh may type into the Other box — but anything
+    that is not recognisably an approval reads as a denial, because a typo
+    must cost a refused tool call, never an unintended write.
+    """
+    text = (answer or "").strip().lower() if isinstance(answer, str) else ""
+    standing = "rest of turn" in text or "rest of the turn" in text
+    if standing:
+        text = text.split("rest of")[0].strip()
+    return (text in _ALLOW_WORDS), standing
+
+
+def read_permission_decision(answer):
+    """Return (allowed, scope, feedback) for the richer approval hub.
+
+    `scope` is once|turn|session. Unknown text still fails closed. The older
+    read_permission_answer API stays intact for callers/tests that only need
+    the first two dimensions.
+    """
+    text = (answer or "").strip() if isinstance(answer, str) else ""
+    low = text.lower()
+    if (low.startswith("always allow ") and low.endswith(" this session")) \
+            or low in SESSION_ALLOW_WORDS \
+            or (low.startswith("always allow ") and "session" in low):
+        return True, "session", ""
+    if low == "deny with feedback":
+        return False, "once", ""
+    if low.startswith("deny:"):
+        return False, "once", text.partition(":")[2].strip()
+    allowed, standing = read_permission_answer(text)
+    return allowed, ("turn" if standing else "once"), ""
+
+
+_DESTRUCTIVE_COMMAND = re.compile(
+    r"(?:^|[;&|]\s*)(?:rm\b|del\b|rmdir\b|remove-item\b|format\b|"
+    r"shutdown\b|reboot\b|mv\b|move-item\b|ren\b|rename-item\b|"
+    r"pip\s+install\b|npm\s+(?:i\b|install\b|ci\b|add\b)|pnpm\s+(?:i\b|install\b|add\b)|"
+    r"yarn\s+add\b|cargo\s+install\b|gem\s+install\b)|"
+    r"git\s+(?:reset\s+--hard|clean\s+-[^\s]*f|push\b[^\n;&|]*(?:--force\b|-f\b|\+[^\s]+))|"
+    r"(?:curl|wget)\b[^\n|]*\|\s*(?:sh|bash|pwsh|powershell)\b|"
+    r"(?:setx?|export)\s+[A-Za-z_][A-Za-z0-9_]*=|"
+    r"(?:^|[^\d>&|])>\s*(?![>&|])\S+",
+    re.I)
+_LOW_RISK_COMMAND = re.compile(
+    r"^\s*(?:pytest|python\s+-m\s+pytest|npm\s+(?:test|run\s+test)|"
+    r"rg\b|git\s+(?:status|diff|log)\b|Get-ChildItem\b)", re.I)
+
+
+def approval_request_details(req, workspace):
+    """Structured, display-safe facts for an approval card.
+
+    This is deliberately deterministic rather than model-scored: the same
+    command always gets the same risk tier, and no extra AI call can hold the
+    safety gate open or hallucinate a lower blast radius.
+    """
+    tool = str(req.get("tool") or "a tool")
+    raw = req.get("input") if isinstance(req.get("input"), dict) else {}
+    low_tool = tool.lower()
+    cwd = str(req.get("cwd") or workspace or "")
+    risk, why = "medium", "May change files in the working folder."
+    kind, context = "json", json.dumps(raw, ensure_ascii=False, indent=2)
+    blast = "Working folder"
+    rationale = str(raw.get("description") or raw.get("reason") or "").strip()
+
+    command = raw.get("command") or raw.get("cmd")
+    path = (raw.get("file_path") or raw.get("path")
+            or raw.get("notebook_path"))
+    if isinstance(command, str) or low_tool in ("bash", "shell", "command"):
+        command = command if isinstance(command, str) else ""
+        kind, context = "command", command
+        blast = f"Shell command in {cwd or 'the working folder'}"
+        if _DESTRUCTIVE_COMMAND.search(command):
+            risk, why = "high", "Deletion, system, environment, or irreversible git syntax detected."
+        elif _LOW_RISK_COMMAND.search(command):
+            risk, why = "low", "Recognized read-only inspection or test command."
+        else:
+            risk, why = "medium", "Shell commands may modify files or process state."
+    elif low_tool in ("edit", "multiedit", "notebookedit"):
+        old = str(raw.get("old_string") or raw.get("old_text") or "")
+        new = str(raw.get("new_string") or raw.get("new_text") or "")
+        context = "--- current\n+++ proposed\n" \
+            + "\n".join("- " + line for line in old.splitlines()) \
+            + ("\n" if old and new else "") \
+            + "\n".join("+ " + line for line in new.splitlines())
+        kind = "diff"
+        blast = f"1 file · {path or 'path not supplied'} · -{len(old.splitlines())} +{len(new.splitlines())} lines"
+    elif low_tool == "write":
+        content = str(raw.get("content") or "")
+        context, kind = content, "write"
+        blast = f"1 file · {path or 'path not supplied'} · {len(content.splitlines())} lines"
+    elif low_tool in ("read", "glob", "grep", "webfetch", "websearch"):
+        risk, why = "low", "Read-only operation; no workspace mutation expected."
+        blast = "No file changes expected"
+    elif "workspace changes for this turn" in low_tool:
+        blast = "This provider's whole turn inside the working folder"
+        why = "Provider CLI exposes a turn-level gate rather than per-tool approval."
+
+    max_chars = 12000
+    truncated = len(context) > max_chars
+    if truncated:
+        context = context[:max_chars] + "\n… context truncated by Alloy …"
+    return {"tool": tool, "risk": risk, "risk_reason": why,
+            "blast_radius": blast, "cwd": cwd, "context_kind": kind,
+            "context": context, "context_truncated": truncated,
+            "rationale": rationale or "The agent supplied no separate rationale."}
+
+
+def permission_rank(level):
+    """Position on the ladder; -1 for anything unknown."""
+    try:
+        return PERMISSION_ORDER.index(normalize_permission(level))
+    except ValueError:
+        return -1
+
+
+
 class Agent:
     """Base adapter: run one turn against a CLI, keeping session continuity."""
 
@@ -196,6 +407,7 @@ class Agent:
     # lies. Drives both the scan set (project_doc_names) and the per-seat "you
     # already have this one" line, so adding a provider stays one entry.
     project_docs = ()
+    tool_approval_hook = False
 
     def native_spawn_note(self):
         """One preamble sentence when THIS seat's config actually allows its
@@ -205,9 +417,33 @@ class Agent:
         return None
 
     def __init__(self, workspace, yolo=False, model=None, effort=None, name=None,
-                 role=None, role_instructions=None, connectors=False):
+                 role=None, role_instructions=None, connectors=False,
+                 permission=None, on_approval=None):
         self.workspace = workspace
-        self.yolo = yolo
+        # PERMISSION LEVEL. The single source of truth for what this seat may
+        # do; `yolo` survives only as the legacy way of saying "full" and as a
+        # read-only property below, so every existing caller, saved meta and
+        # test keeps working while new code names a rung.
+        self.permission = normalize_permission(
+            permission if permission is not None else ("full" if yolo else None))
+        # Ask-first mode needs somewhere to send the approval request. The
+        # loop installs a callable here; when it is missing, `ask` degrades to
+        # read-only rather than to auto — a gate that cannot reach a human
+        # must fail CLOSED (granting writes because nobody was listening is
+        # the one outcome that turns a safety feature into a hazard).
+        self.on_approval = on_approval
+        self._turn_approved = False
+        self._turn_denial_reason = ""
+        # Standing verdict for the REST of this turn, set when Josh answers a
+        # request with a "rest of turn" option. None = ask every time. It
+        # exists because a denied tool is not the end of the story: verified
+        # live 2026-08-18, a Claude seat denied `Write` immediately retried
+        # the same edit as `Bash` ("echo ok > deny_proof.txt"), so one refusal
+        # cost two modals and a determined seat costs as many as it has ideas.
+        # Per TURN, never per conversation — a standing grant that outlived
+        # the turn it was given for would be a permission level Josh never
+        # picked, which is the whole failure mode this ladder exists to stop.
+        self._turn_verdict = None
         self.model = model
         self.effort = effort
         self.session_id = None
@@ -255,6 +491,130 @@ class Agent:
         # OUTRANKS yolo: the whole point is that nothing is written before
         # Josh approves, so a yolo conversation is not exempt.
         self.plan_mode = False
+        self.last_usage = None
+
+    @property
+    def yolo(self):
+        """Legacy name for the top rung. Read-only on purpose: two writable
+        spellings of one fact is how they drift apart."""
+        return self.permission == "full"
+
+    def effective_permission(self):
+        """The rung build_cmd must actually emit for the NEXT turn.
+
+        Plan mode outranks everything (nothing is written before Josh
+        approves, so a full-access conversation is not exempt), and `ask`
+        collapses to read-only when no approval channel is wired up.
+        """
+        if self.plan_mode:
+            return "read_only"
+        if self.permission == "ask" and self._turn_approved:
+            return "auto"
+        if self.permission == "ask" and not self.on_approval:
+            return "read_only"
+        return self.permission
+
+    def permission_label(self):
+        return PERMISSION_LEVELS[self.effective_permission()]["label"]
+
+    # ------------------------------------------------ ask-first approvals --
+    APPROVAL_TOOLS = "Write|Edit|MultiEdit|NotebookEdit|Bash|WebFetch"
+
+    def approval_dir(self):
+        """Where this seat's CLI child and the relay swap approval files.
+
+        A temp dir, not the workspace: the workspace is often Josh's real
+        repo, and a permission mechanism has no business leaving turds in it.
+        Keyed by the seat uid so duplicate-provider seats never collide.
+        """
+        d = os.path.join(tempfile.gettempdir(), "alloy-approvals", self.uid)
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _watch_approvals(self, stop):
+        """Poll this seat's request dir and answer each request via on_approval.
+
+        Runs on its own thread for the duration of ONE turn. Every path ends
+        in an answer file — an exception in the callback answers deny rather
+        than leaving the CLI child blocked until the hook's own timeout, which
+        would burn the whole turn window on a question nobody saw.
+        """
+        d = self.approval_dir()
+        while not stop.is_set():
+            try:
+                names = [n for n in os.listdir(d) if n.endswith(".req")]
+            except OSError:
+                names = []
+            for name in sorted(names):
+                path = os.path.join(d, name)
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        req = json.load(fh)
+                    os.remove(path)
+                except (OSError, ValueError):
+                    continue
+                req["seat"] = self.name
+                allow, reason = False, "Alloy could not ask Josh; declining."
+                standing = self._turn_verdict
+                if standing is not None:
+                    # Answered ahead of time; never re-prompt for this turn.
+                    self._write_answer(d, req, bool(standing),
+                                       "Josh allowed the rest of this turn."
+                                       if standing else
+                                       "Josh denied the rest of this turn.")
+                    continue
+                try:
+                    verdict = self.on_approval(req, stop) if self.on_approval else None
+                    if isinstance(verdict, tuple):
+                        allow, reason = bool(verdict[0]), (verdict[1] or reason)
+                    elif verdict is not None:
+                        allow = bool(verdict)
+                        reason = ("Josh approved this." if allow
+                                  else "Josh declined this.")
+                except Exception as e:  # never leave the child hanging
+                    allow, reason = False, f"Alloy approval failed ({e})."
+                self._write_answer(d, req, allow, reason)
+            stop.wait(0.2)
+
+    @staticmethod
+    def _write_answer(d, req, allow, reason):
+        """Hand one verdict back to the blocked CLI child. Never raises: the
+        hook fails closed on its own timeout, so a lost answer file costs a
+        denial, not a hung conversation."""
+        try:
+            ans = os.path.join(d, req.get("id", "x") + ".ans")
+            tmp = ans + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"allow": bool(allow), "reason": reason}, fh)
+            os.replace(tmp, ans)
+        except OSError:
+            pass
+
+    def set_turn_verdict(self, allow):
+        """Answer every remaining approval request in this turn the same way.
+
+        The front end calls this when Josh picks a "rest of turn" option. It
+        is deliberately the ONLY way to set a standing verdict, and `turn()`
+        clears it on both the way in and the way out.
+        """
+        self._turn_verdict = None if allow is None else bool(allow)
+
+    def _approval_settings(self):
+        """A --settings JSON string installing the PreToolUse approval hook.
+
+        Claude Code takes `--settings` as a file path OR a literal JSON
+        string (verified against the installed CLI's --help). Passing it
+        inline keeps the gate per-turn and per-seat: nothing is written to
+        Josh's settings files, so a crashed run cannot leave his everyday
+        CLI wearing our hook.
+        """
+        hook_py = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "approval_hook.py")
+        cmd = f'"{sys.executable}" "{hook_py}" "{self.approval_dir()}" "{self.name}"'
+        return json.dumps({"hooks": {"PreToolUse": [{
+            "matcher": self.APPROVAL_TOOLS,
+            "hooks": [{"type": "command", "command": cmd, "timeout": 600}],
+        }]}})
 
     def cancel(self):
         """Kill this seat's in-flight CLI child. Safe from ANY thread, safe to
@@ -290,6 +650,32 @@ class Agent:
         """One CLI call. `on_activity`, when given, receives {kind, text[, …]}
         dicts extracted live from the CLI's stdout stream (self.activity) —
         best-effort narration that must NEVER fail a turn."""
+        # Claude can ask at exact tool boundaries through a PreToolUse hook.
+        # Codex/Gemini print mode has no equivalent interactive seam, so their
+        # honest fallback is one approval for the whole mutating turn. A deny
+        # still runs the turn read-only, preserving useful analysis.
+        self._turn_approved = False
+        self._turn_denial_reason = ""
+        self._turn_verdict = None
+        self.last_usage = None
+        if (self.permission == "ask" and not self.plan_mode
+                and not self.tool_approval_hook and self.on_approval):
+            try:
+                verdict = self.on_approval({
+                    "id": uuid.uuid4().hex[:12], "seat": self.name,
+                    "tool": "workspace changes for this turn",
+                    "input": {}, "cwd": self.workspace,
+                }, None)
+                self._turn_approved = (bool(verdict[0]) if isinstance(verdict, tuple)
+                                       else bool(verdict))
+                if not self._turn_approved and isinstance(verdict, tuple) \
+                        and len(verdict) > 1 and verdict[1]:
+                    self._turn_denial_reason = str(verdict[1])
+            except Exception:
+                self._turn_approved = False
+            if self._turn_denial_reason:
+                message += ("\n\n[Permission decision from Josh: "
+                            + self._turn_denial_reason + "]")
         cmd = resolve_cmd(self.build_cmd(message))
         env = clean_env()
         self.before_run()
@@ -309,6 +695,11 @@ class Agent:
         # or between fan-out and dispatch: never start the child at all.
         if self.cancelled():
             raise TurnCancelled(f"{self.name}: stopped before its turn started")
+        approvals = None
+        if self.effective_permission() == "ask":
+            approvals = threading.Event()
+            threading.Thread(target=self._watch_approvals, args=(approvals,),
+                             daemon=True).start()
         try:
             rc, stdout, stderr = self._run_streaming(cmd, env, on_line)
         except TurnCancelled:
@@ -333,6 +724,14 @@ class Agent:
                 f"{len(message)} chars, whole command line "
                 f"{sum(len(c) + 1 for c in cmd)} chars "
                 f"(Windows allows about 32767)") from e
+        finally:
+            # The watcher must die with the turn even when the turn raised:
+            # a survivor would answer the NEXT turn's requests on stale state.
+            if approvals is not None:
+                approvals.set()
+            self._turn_approved = False
+            self._turn_denial_reason = ""
+            self._turn_verdict = None
         if rc != 0:
             raise RuntimeError(
                 f"{self.name} exited {rc}: "
@@ -482,6 +881,7 @@ class ClaudeAgent(Agent):
     name = "Claude"
     cli = "claude"
     project_docs = ("CLAUDE.md",)
+    tool_approval_hook = True
 
     def build_cmd(self, message):
         # Claude Code's print-mode resume path requires the prompt to be the
@@ -502,14 +902,23 @@ class ClaudeAgent(Agent):
             cmd += ["--effort", self.effort]
         if self.session_id:
             cmd += ["--resume", self.session_id]
-        if self.plan_mode:
+        level = self.effective_permission()
+        if level == "read_only":
             # `plan` is a real Claude Code permission mode (verified against
             # the installed CLI's own --help, not assumed). --disallowedTools
             # is belt and braces: unlike --allowedTools, which is only an
             # AUTO-APPROVE list, this one actually removes the tools.
             cmd += ["--permission-mode", "plan",
                     "--disallowedTools=Write,Edit,NotebookEdit,Bash"]
-        elif self.yolo:
+        elif level == "ask":
+            # Reads stay free; every write/exec tool is routed through the
+            # approval hook, which blocks this child until Josh answers in the
+            # app. `acceptEdits` is deliberate — the hook, not the CLI's own
+            # prompt, is the gate, because a print-mode CLI has no one to
+            # prompt and would simply deny.
+            cmd += ["--permission-mode", "acceptEdits",
+                    "--settings", self._approval_settings()]
+        elif level == "full":
             cmd += ["--dangerously-skip-permissions"]
         else:
             allowed = ["WebSearch", "WebFetch", "Read", "Write", "Edit",
@@ -553,6 +962,23 @@ class ClaudeAgent(Agent):
             return ""       # turn() raises the no-reply error with the tail
         # -p --resume forks to a fresh session id each call; track the newest
         self.session_id = data.get("session_id", self.session_id)
+        cost = data.get("total_cost_usd")
+        usage_dict = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        dur = data.get("duration_ms")
+        if cost is not None or usage_dict or dur is not None:
+            in_tokens = usage_dict.get("input_tokens") or 0
+            out_tokens = usage_dict.get("output_tokens") or 0
+            cached_in = usage_dict.get("cache_read_input_tokens") or 0
+            cache_create = usage_dict.get("cache_creation_input_tokens") or 0
+            cached_total = (cached_in + cache_create) if (cached_in or cache_create) else 0
+            self.last_usage = {
+                "cost_usd": float(cost) if isinstance(cost, (int, float)) else None,
+                "input_tokens": int(in_tokens) if in_tokens else 0,
+                "output_tokens": int(out_tokens) if out_tokens else 0,
+                "cached_tokens": int(cached_total) if cached_total else 0,
+                "total_tokens": int(in_tokens + out_tokens) if (in_tokens or out_tokens) else 0,
+                "duration_ms": int(dur) if isinstance(dur, (int, float)) else None,
+            }
         if data.get("is_error") or (data.get("subtype") or "success") != "success":
             # A FAILED result still carries `result` — but it holds the CLI's
             # error sentence ("API Error: …"), not the model's turn. Returning
@@ -710,13 +1136,28 @@ class CodexAgent(Agent):
             common += ["-m", self.model]
         if self.effort:
             common += ["-c", f'model_reasoning_effort="{self.effort}"']
-        if self.plan_mode:
+        level = self.effective_permission()
+        if level == "read_only":
             # `read-only` is one of codex's three documented sandbox policies.
             # Passed as a -c override, not -s, because `codex exec resume`
             # rejects -s (see the gotchas) and a planning turn is usually a
             # resumed one.
             common += ["-c", 'sandbox_mode="read-only"']
-        elif self.yolo:
+        elif level == "ask":
+            # codex exec has no interactive approval channel, so the gate is
+            # its sandbox: reads and reasoning run normally, writes land in a
+            # read-only sandbox and come back refused (verified live
+            # 2026-08-18 — asked for a file it answered "Cannot create
+            # codex_ro.txt because the current workspace filesystem is
+            # restricted to read-only access" and wrote nothing). Note what
+            # that transcript does NOT contain: any structured denial event.
+            # The refusal exists only as the model's own prose, so nothing
+            # downstream may sniff stdout to decide a turn "wanted" to write.
+            # The escalation is Josh's pre-turn answer (Agent.turn), which
+            # flips this seat to workspace-write for the turn.
+            common += ["-c", 'sandbox_mode="read-only"',
+                       "-c", "sandbox_workspace_write.network_access=true"]
+        elif level == "full":
             common += ["--dangerously-bypass-approvals-and-sandbox"]
         else:
             common += [
@@ -727,7 +1168,39 @@ class CodexAgent(Agent):
             return ["codex", "exec", "resume", self.session_id] + common + [message]
         return ["codex", "exec"] + common + [message]
 
+    @staticmethod
+    def _extract_usage(evt):
+        """Extract standard token usage from codex event payload."""
+        if not isinstance(evt, dict):
+            return None
+        u = evt.get("usage") or evt.get("token_usage")
+        if not isinstance(u, dict):
+            resp = evt.get("response")
+            if isinstance(resp, dict):
+                u = resp.get("usage")
+        if not isinstance(u, dict):
+            data = evt.get("data")
+            if isinstance(data, dict):
+                u = data.get("usage")
+        if isinstance(u, dict):
+            in_tok = u.get("input_tokens") or u.get("prompt_tokens") or u.get("input_token_count") or 0
+            out_tok = u.get("output_tokens") or u.get("completion_tokens") or u.get("output_token_count") or 0
+            cached_tok = u.get("cached_tokens") or u.get("cache_read_input_tokens") or 0
+            total_tok = u.get("total_tokens") or (in_tok + out_tok)
+            cost = u.get("cost_usd") or u.get("total_cost_usd")
+            if in_tok or out_tok or total_tok or cost is not None:
+                return {
+                    "cost_usd": float(cost) if isinstance(cost, (int, float)) else None,
+                    "input_tokens": int(in_tok),
+                    "output_tokens": int(out_tok),
+                    "cached_tokens": int(cached_tok),
+                    "total_tokens": int(total_tok),
+                    "duration_ms": None,
+                }
+        return None
+
     def parse(self, stdout):
+        usage_found = None
         for line in stdout.splitlines():
             line = line.strip()
             if not line.startswith("{"):
@@ -741,8 +1214,11 @@ class CodexAgent(Agent):
                 if found:
                     self.session_id = found
                     break
-            if self.session_id:
-                break
+            u = self._extract_usage(evt)
+            if u:
+                usage_found = u
+        if usage_found:
+            self.last_usage = usage_found
         try:
             with open(self._lastmsg, "r", encoding="utf-8", errors="replace") as f:
                 return f.read().strip()
@@ -961,13 +1437,29 @@ class GeminiAgent(Agent):
             cmd += ["--effort", self.effort]
         if self.session_id:
             cmd += ["--conversation", self.session_id]
-        if self.plan_mode or not self.yolo:
+        level = self.effective_permission()
+        if level == "full":
+            cmd += ["--dangerously-skip-permissions"]
+        else:
             # auto-approve tools but keep terminal restrictions on: print mode
             # can't answer interactive permission prompts, it would just stall.
-            # In plan mode the sandbox stays on even for a yolo conversation.
+            # Every rung below `full` keeps the sandbox on, plan mode included,
+            # so a full-access conversation is still gated while it plans.
             cmd += ["--dangerously-skip-permissions", "--sandbox"]
-        else:
-            cmd += ["--dangerously-skip-permissions"]
+            if level != "auto":
+                # `--mode plan` is agy's OWN read-only execution mode (listed
+                # in agy --help as "accept-edits, plan"; verified live
+                # 2026-08-18 — asked to write proof.txt it returned a plan and
+                # the file did not exist). It is load-bearing, not tidiness:
+                # without it every rung below `full` emitted an IDENTICAL
+                # command line, because --dangerously-skip-permissions
+                # auto-approves the write tools and --sandbox only restricts
+                # the terminal. So "Read-only" let Gemini write files, and an
+                # ask-first turn Josh DENIED wrote them anyway. A gate that
+                # does not gate is worse than no gate: it is a gate people
+                # trust. (Claude gates per tool via the PreToolUse hook and
+                # codex via sandbox_mode="read-only"; this is Gemini's.)
+                cmd += ["--mode", "plan"]
         return cmd
 
     def capability_note(self):
@@ -1883,7 +2375,7 @@ class SessionStore:
                     f"max {turns} rounds*\n")
 
     def record(self, name, text, *, speaker=None, provider=None,
-               round=0, meta="", role=None, activity=None):
+               round=0, meta="", role=None, activity=None, usage=None):
         """Append one message. Returns the row (== the UI `message` payload).
 
         `role` is stamped into the row AT RECORD TIME on purpose: captions and
@@ -1898,6 +2390,8 @@ class SessionStore:
             # what the seat DID before this reply (capped) — replayed chats
             # show the same collapsed activity block Josh watched live
             row["activity"] = list(activity)[-ACTIVITY_KEEP:]
+        if usage:
+            row["usage"] = dict(usage)
         clock = ts[11:16]  # HH:MM for the human transcript
         with self._lock:
             with open(self.transcript, "a", encoding="utf-8") as f:
@@ -1933,6 +2427,10 @@ class SessionStore:
             "workspace": state["workspace"],
             "topic": state.get("topic", ""),
             "yolo": bool(state.get("yolo")),
+            "permission": normalize_permission(
+                state.get("permission"),
+                "full" if state.get("yolo") else DEFAULT_PERMISSION),
+            "permission_grants": sorted(set(state.get("permission_grants") or [])),
             # additive like brief/ask: old code ignoring this merely reopens
             # the chat without connectors, never with them on by surprise
             "connectors": bool(state.get("connectors")),
@@ -1948,6 +2446,11 @@ class SessionStore:
             "closing": state.get("closing"),
             "moderator": state.get("moderator"),
             "supervisor": state.get("supervisor"),
+            "supervisor_goal": state.get("supervisor_goal"),
+            "supervisor_waves": int(state.get("supervisor_waves") or 0),
+            "supervisor_wave_index": int(
+                state.get("supervisor_wave_index") or 1),
+            "supervisor_trace": list(state.get("supervisor_trace") or []),
             "until_done": bool(state.get("until_done")),
             "turn_ceiling": state.get("turn_ceiling"),
             "spawn": state.get("spawn"),
@@ -1969,6 +2472,7 @@ class SessionStore:
             # additive like brief/ask: old code ignoring this loses task
             # tracking on resume, never continuity
             "workstreams": state.get("workstreams"),
+            "usage": state.get("usage"),
             "seats": [{
                 "id": state["slot_ids"][i],
                 "provider": state["providers"][i],
@@ -1995,7 +2499,7 @@ def make_log(state, store, echo=None):
     id — so the mapping lives here once instead of in each front end. Anything
     that isn't Josh or a seated agent is a relay note, not a speaker.
     """
-    def log(name, text, meta="", activity=None):
+    def log(name, text, meta="", activity=None, usage=None):
         if name.startswith("Josh"):
             row = store.record("Josh", text, speaker="josh", provider=None,
                                round=state["rnd"], meta=meta)
@@ -2004,11 +2508,13 @@ def make_log(state, store, echo=None):
                 if a.name == name:
                     # a.role is read at call time: rows carry the role the seat
                     # had WHEN IT SPOKE, not whatever it was later changed to
+                    u = usage if usage is not None else getattr(a, "last_usage", None)
                     row = store.record(name, text,
                                        speaker=state["slot_ids"][i],
                                        provider=state["providers"][i],
                                        round=state["rnd"], meta=meta,
-                                       role=a.role, activity=activity)
+                                       role=a.role, activity=activity,
+                                       usage=u)
                     break
             else:
                 row = store.system(text, round=state["rnd"])
@@ -2367,7 +2873,12 @@ def synthesize_brief(workspace, docs, spec=None):
         sources="\n".join(f"- {d['name']} ({d['bytes']} bytes)" for d in docs),
         limit=BRIEF_MAX)
     try:
-        return (agent.turn(prompt) or "").strip()
+        reply = (agent.turn(prompt) or "").strip()
+        synthesize_brief.last_usage = getattr(agent, "last_usage", None)
+        return reply
+    except Exception:
+        synthesize_brief.last_usage = getattr(agent, "last_usage", None)
+        raise
     finally:
         agent.session_id = None         # stateless by design
 
@@ -2384,7 +2895,8 @@ def project_brief(workspace, session_dir, spec=None, enabled=True,
     preamble can tell the seats plainly, rather than papered over with
     invented content."""
     out = {"status": "off", "mode": "", "digest": "", "quotes": "",
-           "path": "", "sources": [], "fingerprints": {}, "error": ""}
+           "path": "", "sources": [], "fingerprints": {}, "error": "",
+           "usage": None}
     if not enabled:
         return out
     # A default in-session workspace is empty scratch — nothing to brief.
@@ -2430,7 +2942,9 @@ def project_brief(workspace, session_dir, spec=None, enabled=True,
         f"Project brief: building from {', '.join(out['sources'])}")
     try:
         body = synthesize_brief(workspace, docs, spec)
+        out["usage"] = getattr(synthesize_brief, "last_usage", None)
     except Exception as e:
+        out["usage"] = getattr(synthesize_brief, "last_usage", None)
         out.update(status="failed", error=error_excerpt(e))
     else:
         if not body:
@@ -2578,6 +3092,41 @@ def brief_preamble_block(brief, agent=None):
             + (brief.get("digest") or "").strip() + "\n\n")
 
 
+def supervisor_status(meta):
+    """One-glance supervision state for a rail row, or None.
+
+    Derived HERE rather than in each front end, because the distinction that
+    matters — the manager closed this vs it merely stopped — is exactly the
+    one a UI re-deriving from raw trace entries gets wrong. Reads only what is
+    already in meta; no filesystem, no side calls.
+    """
+    if (meta or {}).get("mode") != "supervisor":
+        return None
+    trace = meta.get("supervisor_trace") or []
+    tasks = meta.get("workstreams") or []
+    types = {e.get("type") for e in trace if isinstance(e, dict)}
+    wave = max(1, int(meta.get("supervisor_wave_index") or 1))
+    open_tasks = [t for t in tasks
+                  if t.get("status") in ("pending", "active", "blocked")]
+    # Order matters. OPEN WORK OUTRANKS a past no-verdict ending: a run that
+    # hit the turn limit mid-job records goal_unresolved for THAT run, but the
+    # chat is still resumable with live tasks, and a rail row reading "No
+    # verdict" would tell Josh the opposite of what continuing would do.
+    if "goal_accepted" in types:
+        state, label = "accepted", "Goal accepted"
+    elif not tasks:
+        state, label = "planning", "Planning"
+    elif open_tasks:
+        state, label = "working", "Wave %d · %d open" % (wave, len(open_tasks))
+    elif "goal_unresolved" in types:
+        state, label = "unresolved", "No verdict"
+    else:
+        state, label = "settled", "Wave %d · settled" % wave
+    return {"state": state, "label": label, "wave": wave,
+            "open": len(open_tasks), "tasks": len(tasks),
+            "waves_used": int(meta.get("supervisor_waves") or 0)}
+
+
 def session_summary(session_dir, meta=None):
     """One sidebar row. Pure file reads (one meta.json + one stat)."""
     sid = os.path.basename(session_dir.rstrip("\\/"))
@@ -2612,8 +3161,20 @@ def session_summary(session_dir, meta=None):
         "rounds": meta.get("rnd", 0),
         "max": meta.get("max", 0),
         "mode": meta.get("mode", DEFAULT_MODE),
+        "permission": normalize_permission(
+            meta.get("permission"),
+            "full" if meta.get("yolo") else DEFAULT_PERMISSION),
+        "permission_grants": list(meta.get("permission_grants") or []),
+        "yolo": bool(meta.get("yolo")),
         "moderator": meta.get("moderator"),
         "supervisor": meta.get("supervisor"),
+        "supervisor_goal": meta.get("supervisor_goal"),
+        "supervisor_waves": int(meta.get("supervisor_waves") or 0),
+        "supervisor_wave_index": int(meta.get("supervisor_wave_index") or 1),
+        "supervisor_trace": list(meta.get("supervisor_trace") or []),
+        "supervisor_status": supervisor_status(meta),
+        "tasks": list(meta.get("workstreams") or []),
+        "goal": meta.get("topic", ""),
         "brief": meta.get("brief") or None,
         # so a reopened chat truthfully shows whether it was planned and
         # whether Josh ever approved it, rather than guessing from the rail
@@ -2624,6 +3185,7 @@ def session_summary(session_dir, meta=None):
         "workspace": meta.get("workspace", ""),
         "project": session_project(session_dir, meta.get("workspace", "")),
         "transcript": os.path.join(session_dir, "transcript.md"),
+        "usage": meta.get("usage"),
         "legacy": False,
         "can_continue": not reason,
         "can_continue_reason": reason,
@@ -2659,10 +3221,13 @@ def rehydrate(meta, workspace=None):
         raise ValueError(reason)
     ws = workspace or meta.get("workspace")
     seats = meta["seats"]
+    permission = normalize_permission(
+        meta.get("permission"),
+        "full" if meta.get("yolo") else DEFAULT_PERMISSION)
     agents = []
     for s in seats:
         a = AGENT_TYPES[s["provider"]](
-            ws, yolo=bool(meta.get("yolo")),
+            ws, yolo=bool(meta.get("yolo")), permission=permission,
             model=s.get("model") or None, effort=s.get("effort") or None,
             name=s.get("label") or None,
             role=s.get("role") or None,
@@ -2679,6 +3244,8 @@ def rehydrate(meta, workspace=None):
         "title": meta.get("title", ""),
         "created": meta.get("created", ""),
         "yolo": bool(meta.get("yolo")),
+        "permission": permission,
+        "permission_grants": list(meta.get("permission_grants") or []),
         "turns": meta.get("turns", 10),
         "rnd": meta.get("rnd", 0),
         "max": meta.get("max", meta.get("rnd", 0)),
@@ -2696,6 +3263,10 @@ def rehydrate(meta, workspace=None):
         "closing": meta.get("closing"),
         "moderator": meta.get("moderator"),
         "supervisor": meta.get("supervisor"),
+        "supervisor_goal": meta.get("supervisor_goal"),
+        "supervisor_waves": int(meta.get("supervisor_waves") or 0),
+        "supervisor_wave_index": int(meta.get("supervisor_wave_index") or 1),
+        "supervisor_trace": list(meta.get("supervisor_trace") or []),
         "until_done": bool(meta.get("until_done")),
         "turn_ceiling": meta.get("turn_ceiling"),
         "spawn": meta.get("spawn"),
@@ -2705,6 +3276,7 @@ def rehydrate(meta, workspace=None):
         "parent": meta.get("parent"),
         "children": meta.get("children"),   # hints — a child may be deleted
         "workstreams": meta.get("workstreams"),
+        "usage": meta.get("usage"),
     }
 
 
@@ -3661,6 +4233,55 @@ def compose_prompt(state, i):
     return "\n\n".join(parts), len(backlog), first_turn
 
 
+def record_usage(state, usage, seat_key=None, kind="seat"):
+    """Accumulate usage from any turn (seat, supervisor, moderator, helper, retry)
+    into state['usage']."""
+    if not usage or not isinstance(usage, dict) or not isinstance(state, dict):
+        return
+    ustate = state.setdefault("usage", {
+        "total_cost_usd": 0.0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "by_seat": {},
+        "by_kind": {}
+    })
+    if usage.get("cost_usd") is not None:
+        ustate["total_cost_usd"] = round(ustate.get("total_cost_usd", 0.0) + float(usage["cost_usd"]), 6)
+    ustate["input_tokens"] = int(ustate.get("input_tokens", 0) + (usage.get("input_tokens") or 0))
+    ustate["output_tokens"] = int(ustate.get("output_tokens", 0) + (usage.get("output_tokens") or 0))
+    ustate["total_tokens"] = int(ustate.get("total_tokens", 0) + (usage.get("total_tokens") or 0))
+
+    if kind:
+        k_dict = ustate.setdefault("by_kind", {}).setdefault(kind, {
+            "cost_usd": 0.0 if usage.get("cost_usd") is not None else None,
+            "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "calls": 0
+        })
+        if usage.get("cost_usd") is not None:
+            k_dict["cost_usd"] = round((k_dict.get("cost_usd") or 0.0) + float(usage["cost_usd"]), 6)
+        k_dict["input_tokens"] += (usage.get("input_tokens") or 0)
+        k_dict["output_tokens"] += (usage.get("output_tokens") or 0)
+        k_dict["total_tokens"] += (usage.get("total_tokens") or 0)
+        k_dict["calls"] += 1
+
+    if seat_key is not None:
+        sk = str(seat_key)
+        by_seat = ustate.setdefault("by_seat", {})
+        s_u = by_seat.setdefault(sk, {
+            "cost_usd": None,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "turns": 0
+        })
+        if usage.get("cost_usd") is not None:
+            s_u["cost_usd"] = round((s_u.get("cost_usd") or 0.0) + float(usage["cost_usd"]), 6)
+        s_u["input_tokens"] += (usage.get("input_tokens") or 0)
+        s_u["output_tokens"] += (usage.get("output_tokens") or 0)
+        s_u["total_tokens"] += (usage.get("total_tokens") or 0)
+        s_u["turns"] += 1
+
+
 def commit_reply(state, i, reply, consumed, io, activity=None):
     """Deliver a successful turn: consume exactly the composed backlog, flip
     introduced, log + emit the row, fan out to every other seat, count the
@@ -3679,8 +4300,10 @@ def commit_reply(state, i, reply, consumed, io, activity=None):
     for j, other in enumerate(agents):
         if other is not agent and workstream_hears(state, i, j):
             state["pending"][j].append(f"{agent.name} said:\n{reply}")
-    settle_workstream(state, i, io)
+    settle_workstream(state, i, io, reply=reply)
     state["turn"] = state.get("turn", 0) + 1
+    record_usage(state, getattr(agent, "last_usage", None),
+                 seat_key=state["slot_ids"][i], kind="seat")
     state["store"].save(state)
     return row
 
@@ -3708,7 +4331,12 @@ def active_workstream(state, i):
                for t in tasks)
 
 
-def settle_workstream(state, i, io):
+# How much of a worker's closing report is carried into the Supervisor's
+# review. Small on purpose (see the command-line length gotcha).
+WORKSTREAM_REPORT_MAX = 1200
+
+
+def settle_workstream(state, i, io, reply=None):
     """The seat that just replied owned an active task, so that task is done —
     verify it against the filesystem, publish the settlement summary to
     EVERYONE (the one thing that always crosses the isolation boundary), then
@@ -3728,7 +4356,17 @@ def settle_workstream(state, i, io):
         return
     for t in settled:
         workstreams.settle(t, state.get("workspace"))
+        if reply:
+            # kept for the Supervisor's review pass: for a task that claims no
+            # files this is the ONLY account of what happened, and it is
+            # labelled a claim there, never treated as verification
+            t["report"] = str(reply).strip()[:WORKSTREAM_REPORT_MAX]
         note = workstreams.summarize(t)
+        supervisor_trace(state, io, "verification",
+                         f"Verified [{t['id']}]: {t.get('status', 'done')}",
+                         note, task_id=t["id"], owner=t.get("owner"),
+                         files=list(t.get("files") or []),
+                         status=t.get("status"))
         row = state["log"]("relay", note)
         io.emit("message", row)
         for j in range(len(state["agents"])):
@@ -3757,6 +4395,54 @@ def _seat_name(state, slot_id):
     if slot_id in ids:
         return state["agents"][ids.index(slot_id)].name
     return str(slot_id)
+
+
+SUPERVISOR_TRACE_MAX = 120
+
+
+def supervisor_trace(state, io, phase, title, detail="", **facts):
+    """Persist and stream one public Supervisor control action.
+
+    This log contains observable orchestration facts (instructions, routing,
+    verification and retry decisions), never hidden chain-of-thought. Keeping
+    it in meta makes a reopened conversation as inspectable as a live one.
+    """
+    if state.get("mode") != "supervisor":
+        return None
+    entries = state.setdefault("supervisor_trace", [])
+    public_type = facts.pop("event_type", None) or {
+        "planning": "plan_started",
+        "plan": "plan_created",
+        "instruction": "task_assigned",
+        "routing": "handoff_routed",
+        "handoff": "handoff_routed",
+        "verification": "verification_review",
+        "replanning": "critique_issued",
+        "replanned": "course_correction",
+        "exhausted": "goal_unresolved",
+        "review": "work_reviewed",
+        "wave": "plan_created",
+        "accepted": "goal_accepted",
+        "error": "supervisor_error",
+    }.get(str(phase or ""), "supervisor_activity")
+    entry = {
+        "id": uuid.uuid4().hex[:12],
+        "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+        "type": public_type,
+        "wave": max(1, int(state.get("supervisor_wave_index") or 1)),
+        "phase": str(phase or "activity"),
+        "title": str(title or "Supervisor activity")[:240],
+        "detail": str(detail or "")[:8000],
+    }
+    for key in ("task_id", "owner", "files", "deps", "status", "goal",
+                "tasks", "before", "after"):
+        if key in facts and facts[key] is not None:
+            entry[key] = facts[key]
+    entries.append(entry)
+    if len(entries) > SUPERVISOR_TRACE_MAX:
+        del entries[:-SUPERVISOR_TRACE_MAX]
+    io.emit("supervisor", {"entry": entry})
+    return entry
 
 
 SUPERVISOR_PROMPT = (
@@ -3892,32 +4578,50 @@ def plan_workstreams(state, io, goal=None):
     A broken planner must never kill a run, and must never invent a plan: an
     empty result is honest, a fabricated one is not.
     """
-    goal = (goal or state.get("topic") or "").strip()
+    goal = (goal or state.get("topic") or state.get("title") or "").strip()
     if not goal:
         return []
     prompt = SUPERVISOR_PROMPT.format(roster=supervisor_roster_block(state),
                                       playbook=playbook_block(),
                                       goal=goal)
+    supervisor_trace(state, io, "planning", "Decomposing the goal",
+                     goal, goal=goal)
+    sup = build_supervisor(state)
     try:
-        reply = build_supervisor(state).turn(prompt)
+        reply = sup.turn(prompt)
     except Exception as e:
+        record_usage(state, getattr(sup, "last_usage", None), kind="supervisor")
+        supervisor_trace(state, io, "error", "Planning call failed",
+                         str(e)[:500], status="failed")
         io.emit("status", {"text": f"Supervisor could not plan "
                                    f"({str(e)[:120]}) - running as a normal "
                                    f"parallel conversation"})
         return []
+    record_usage(state, getattr(sup, "last_usage", None), kind="supervisor")
     try:
-        _body, tasks, _unknown = parse_task_directives(
+        body, tasks, _unknown = parse_task_directives(
             reply or "", slot_ids=list(state["slot_ids"]))
     except Exception as e:
+        supervisor_trace(state, io, "error", "Plan could not be parsed",
+                         str(e)[:500], status="failed")
         io.emit("status", {"text": f"Supervisor's plan did not parse "
                                    f"({str(e)[:120]}) - running as a normal "
                                    f"parallel conversation"})
         return []
     if not tasks:
+        supervisor_trace(state, io, "error", "No executable tasks returned",
+                         (reply or "")[:1000], status="failed")
         io.emit("status", {"text": "Supervisor produced no tasks - running "
                                    "as a normal parallel conversation"})
         return []
     state["workstreams"] = tasks
+    state["supervisor_goal"] = goal
+    state["supervisor_wave_index"] = 1
+    supervisor_trace(
+        state, io, "plan", f"Created {len(tasks)} parallel workstream"
+        f"{'s' if len(tasks) != 1 else ''}",
+        body or "The Supervisor returned task directives without a separate rationale.",
+        status="ready", goal=goal, tasks=tasks)
     plan = "\n".join(f"[{t['id']}] {_seat_name(state, t['owner'])}: "
                      f"{t['brief']}"
                      + (f"  (files: {', '.join(t['files'])})"
@@ -3949,6 +4653,10 @@ def replan_failed_workstreams(state, io):
     # must not be invoked again on every later round.
     for t in failed:
         t["replans"] = int(t.get("replans") or 0) + 1
+    supervisor_trace(state, io, "replanning",
+                     f"Repairing {len(failed)} failed workstream"
+                     f"{'s' if len(failed) != 1 else ''}",
+                     ", ".join(t["id"] for t in failed), status="active")
     state["store"].save(state)
 
     lines = []
@@ -3969,16 +4677,21 @@ def replan_failed_workstreams(state, io):
         roster=supervisor_roster_block(state),
         goal=(state.get("topic") or "").strip(),
         failures="\n".join(lines))
+    sup = build_supervisor(state)
     try:
-        reply = build_supervisor(state).turn(prompt)
+        reply = sup.turn(prompt)
         _body, replacements, _unknown = parse_task_directives(
             reply or "", slot_ids=list(state["slot_ids"]))
     except Exception as e:
+        record_usage(state, getattr(sup, "last_usage", None), kind="supervisor")
+        supervisor_trace(state, io, "error", "Repair call failed",
+                         str(e)[:500], status="failed")
         io.emit("status", {"text": "Supervisor could not repair failed "
                                    f"work ({str(e)[:120]}) — failures remain "
                                    "visible; no retry was invented"})
         state["store"].save(state)
         return []
+    record_usage(state, getattr(sup, "last_usage", None), kind="supervisor")
 
     wanted = {t["id"]: t for t in failed}
     by_id = {}
@@ -3987,6 +4700,9 @@ def replan_failed_workstreams(state, io):
         if tid in wanted and tid not in by_id:
             by_id[tid] = replacement
     if not by_id:
+        supervisor_trace(state, io, "error",
+                         "No valid replacement tasks returned",
+                         (reply or "")[:1000], status="failed")
         io.emit("status", {"text": "Supervisor returned no valid replacement "
                                    "for the failed tasks; failures remain "
                                    "visible"})
@@ -4006,9 +4722,263 @@ def replan_failed_workstreams(state, io):
                 f"verification failed: {_seat_name(state, new['owner'])} — "
                 f"{new['brief']}")
         io.emit("message", state["log"]("relay", note))
+        supervisor_trace(state, io, "replanned",
+                         f"Replanned [{new['id']}] for "
+                         f"{_seat_name(state, new['owner'])}",
+                         new["brief"], task_id=new["id"],
+                         owner=new["owner"], files=list(new.get("files") or []),
+                         deps=list(new.get("deps") or []), status="pending",
+                         before={"owner": old.get("owner"),
+                                 "brief": old.get("brief"),
+                                 "files": list(old.get("files") or [])},
+                         after={"owner": new.get("owner"),
+                                "brief": new.get("brief"),
+                                "files": list(new.get("files") or [])})
     assign_workstreams(state, io)
     state["store"].save(state)
     return repaired
+
+
+# ---------------------------------------------------------- rolling manager
+# The first plan is not the job. A Supervisor that decomposes once and then
+# goes quiet is a planner, not a manager: the moment its DAG drains, nobody is
+# deciding whether the goal was actually met or what comes next.
+# `supervise_next_wave` closes that loop — at the parallel barrier, with every
+# worker thread joined, the Supervisor reads the SETTLED record (verified
+# filesystem results plus each worker's own report) and either accepts the goal
+# as met or issues the next wave.
+#
+# Bounded on purpose: a manager that never says DONE would spend the account
+# indefinitely, so waves are capped and the round cap / turn ceiling still
+# applies on top. Running out of waves degrades to ordinary parallel
+# conversation and says so — it never fakes a completion.
+SUPERVISOR_MAX_WAVES = 6
+
+SUPERVISOR_REVIEW_PROMPT = (
+    "You are the Supervisor of a live multi-AI working session, managing it "
+    "as it runs. Every task you assigned has now settled. Read what actually "
+    "happened and decide the next move.\n\n"
+    "Roster - plan against these capabilities, not the model names:\n"
+    "{roster}\n\n"
+    "The goal:\n{goal}\n\n"
+    "Work so far. Status was verified against the filesystem, not against "
+    "what the worker claimed:\n{report}\n\n"
+    "Decide ONE of these:\n"
+    "A. The goal is genuinely met. Write a short closing summary of what was "
+    "delivered, then END your reply with nothing after it:\n"
+    "[[DONE: one-line verdict]]\n"
+    "B. Work remains - something failed, something is unfinished, or the goal "
+    "needs its next stage. Write one or two sentences saying what you "
+    "concluded and why, then END with the next wave of task directives, one "
+    "per line and nothing after them:\n"
+    "[[TASK: <id> | owner=<seat id> | files=<a,b> | deps=<id,id> | brief]]\n\n"
+    "Rules for a new wave:\n"
+    "1. Use NEW task ids. These are already taken: {used}\n"
+    "2. A task that creates or edits files may ONLY go to a seat marked "
+    "'can write files: yes'. List exact workspace-relative paths - no "
+    "wildcards, absolute paths, or '..'.\n"
+    "3. Do not re-assign work that is already done and verified. Redo failed "
+    "work only if it still matters to the goal.\n"
+    "4. Prefer independent tasks so seats work at the same time; give every "
+    "seat something if you can.\n"
+    "5. Do not pad. If the honest answer is that the goal is met, choose A - "
+    "inventing another wave to look busy is the worst outcome here.\n\n"
+    "{playbook}"
+    "You have {left} review wave{plural} left after this one."
+)
+
+
+def plan_drained(state):
+    """True when a Supervisor plan exists and nothing in it is still moving."""
+    tasks = state.get("workstreams") or []
+    if not tasks:
+        return False
+    return not any(t.get("status") in ("pending", "active", "blocked")
+                   for t in tasks)
+
+
+def wave_report(state):
+    """What the Supervisor reviews: the objective record of every task.
+
+    Verified filesystem results come FIRST and the worker's own words are
+    clearly labelled as a claim, because the entire point of the verification
+    layer is that a confident report cannot promote itself. A manager reading
+    this must be able to tell "said it shipped" from "shipped".
+    """
+    lines = []
+    for t in state.get("workstreams") or []:
+        v = t.get("verified") or {}
+        bits = []
+        if v.get("delivered"):
+            bits.append("on disk: " + ", ".join(v["delivered"]))
+        if v.get("missing"):
+            bits.append("never created: " + ", ".join(v["missing"]))
+        if v.get("stale"):
+            bits.append("unchanged: " + ", ".join(v["stale"]))
+        if v.get("unverifiable"):
+            bits.append("no files claimed, so nothing could be verified")
+        if v.get("extra"):
+            bits.append("also wrote: " + ", ".join(v["extra"]))
+        lines.append("[{}] {} - {}\n  brief: {}\n  verified: {}".format(
+            t["id"], _seat_name(state, t.get("owner")),
+            str(t.get("status") or "unknown").upper(), t.get("brief", ""),
+            "; ".join(bits) or "nothing to verify"))
+        report = (t.get("report") or "").strip()
+        if report:
+            lines.append("  worker reported: " + report)
+    return "\n".join(lines) or "No tasks were recorded."
+
+
+def parse_supervisor_verdict(reply, slot_ids=None, max_tasks=12):
+    """Return ``(body, tasks, done_reason)`` for a Supervisor review reply.
+
+    DONE is opted into here exactly the way TASK is, and for the same reason:
+    an ordinary seat playing [[DONE]] must stay visibly unknown rather than
+    silently acquiring the authority to close the conversation.
+    """
+    known = KNOWN_DIRECTIVES + ("TASK", "DONE")
+    body, hits, _unknown = peel_directives(reply, known=known,
+                                           max_peel=max_tasks + 2)
+    tasks = [parse_task(arg, slot_ids=slot_ids)
+             for name, arg in reversed(hits) if name == "TASK"]
+    done = next((arg for name, arg in hits if name == "DONE"), None)
+    return body, tasks, done
+
+
+def note_unfinished_supervision(state, io, outcome):
+    """Say so when a supervised run stops WITHOUT the manager closing it.
+
+    A run that hits the round cap or the safety ceiling looks, in the
+    transcript, exactly like one that finished — same silence, same last
+    message. This is the counterpart to `goal_accepted`: it is not an error,
+    it is a different ending, and conflating the two is how "is the supervisor
+    even doing anything?" gets asked three times.
+    """
+    if state.get("mode") != "supervisor" or outcome != "cap":
+        return None
+    trace = state.get("supervisor_trace") or []
+    if not trace or any(e.get("type") == "goal_accepted" for e in trace):
+        return None
+    if any(e.get("type") == "goal_unresolved" for e in trace):
+        return None
+    open_tasks = [t["id"] for t in (state.get("workstreams") or [])
+                  if t.get("status") in ("pending", "active", "blocked")]
+    detail = ("Still open: " + ", ".join(open_tasks) if open_tasks
+              else "Every task settled, but the Supervisor never returned a "
+                   "verdict.")
+    return supervisor_trace(state, io, "exhausted",
+                            "Stopped on the turn limit, not on a verdict",
+                            detail, status="unfinished")
+
+
+def supervise_next_wave(state, io):
+    """Manage the session forward. Returns "done", "assigned", or "idle".
+
+    Barrier-only, like `replan_failed_workstreams`: every seat thread has
+    joined, so this stateless side call cannot race a worker or mutate a task
+    beneath its owner. Every failure path returns "idle" — the seats keep
+    talking, nothing is forged, and the run ends on the ordinary cap.
+    """
+    if state.get("mode") != "supervisor" or not plan_drained(state):
+        return "idle"
+    waves = int(state.get("supervisor_waves") or 0)
+    if waves >= SUPERVISOR_MAX_WAVES:
+        if not state.get("supervisor_capped"):
+            state["supervisor_capped"] = True
+            note = ("Supervisor has spent its {} review waves without calling "
+                    "the goal done — the seats continue as an ordinary "
+                    "parallel conversation.".format(SUPERVISOR_MAX_WAVES))
+            supervisor_trace(state, io, "exhausted",
+                             "Ran out of review waves without a verdict",
+                             note, status="capped")
+            io.emit("message", state["log"]("relay", note))
+        return "idle"
+    goal = (state.get("supervisor_goal") or state.get("topic") or "").strip()
+    if not goal:
+        return "idle"
+    tasks = state.get("workstreams") or []
+    used = ", ".join(t["id"] for t in tasks) or "none"
+    left = SUPERVISOR_MAX_WAVES - waves - 1
+    state["supervisor_waves"] = waves + 1
+    report = wave_report(state)
+    supervisor_trace(state, io, "review",
+                     "Reviewing {} settled task{}".format(
+                         len(tasks), "" if len(tasks) == 1 else "s"),
+                     report, status="reviewing")
+    io.emit("status", {"text": "Supervisor is reviewing the delivered work…"})
+    prompt = SUPERVISOR_REVIEW_PROMPT.format(
+        roster=supervisor_roster_block(state), goal=goal, report=report,
+        used=used, left=left, plural="" if left == 1 else "s",
+        playbook=playbook_block())
+    sup = build_supervisor(state)
+    try:
+        reply = sup.turn(prompt)
+    except Exception as e:
+        record_usage(state, getattr(sup, "last_usage", None), kind="supervisor")
+        supervisor_trace(state, io, "error", "Review call failed",
+                         str(e)[:500], status="failed")
+        return "idle"
+    record_usage(state, getattr(sup, "last_usage", None), kind="supervisor")
+    try:
+        body, new_tasks, done = parse_supervisor_verdict(
+            reply or "", slot_ids=list(state["slot_ids"]))
+    except Exception as e:
+        supervisor_trace(state, io, "error", "Review could not be parsed",
+                         str(e)[:500], status="failed")
+        return "idle"
+    body = (body or "").strip()
+    if done is not None:
+        verdict = (done or "").strip() or "the goal is met"
+        supervisor_trace(state, io, "accepted", "Goal accepted as met",
+                         body or verdict, status="done")
+        io.emit("message", state["log"](
+            "relay", "Supervisor closed the job: " + verdict
+                     + (("\n\n" + body) if body else "")))
+        state["store"].save(state)
+        return "done"
+    known_ids = {t["id"] for t in tasks}
+    fresh, clashes = [], []
+    for t in new_tasks:
+        if t["id"] in known_ids:
+            clashes.append(t["id"])
+            continue
+        known_ids.add(t["id"])
+        fresh.append(t["id"])
+        tasks.append(t)
+    if clashes:
+        note = ("Supervisor reused task id" + ("s " if len(clashes) != 1
+                else " ") + ", ".join(clashes) + " — those were dropped so "
+                "existing dependencies keep pointing at the original work.")
+        supervisor_trace(state, io, "error", "Duplicate task ids dropped",
+                         note, status="failed")
+        io.emit("message", state["log"]("relay", note))
+    if not fresh:
+        supervisor_trace(state, io, "error",
+                         "Review produced neither a verdict nor new work",
+                         (reply or "")[:1000], status="failed")
+        return "idle"
+    picked = set(fresh)
+    state["supervisor_wave_index"] = 1 + max(
+        1, int(state.get("supervisor_wave_index") or 1))
+    supervisor_trace(
+        state, io, "wave",
+        "Wave {}: {} new task{}".format(waves + 2, len(fresh),
+                                        "" if len(fresh) == 1 else "s"),
+        body or "The Supervisor returned tasks without a separate rationale.",
+        # the WHOLE plan, not just the new slice: the UI's task map renders
+        # whatever this carries, and a wave that shipped only its own tasks
+        # would erase the completed work from the board
+        status="ready", goal=goal, tasks=[dict(t) for t in tasks])
+    plan = "\n".join(
+        "[{}] {}: {}".format(t["id"], _seat_name(state, t["owner"]),
+                             t["brief"])
+        + ("  (files: " + ", ".join(t["files"]) + ")" if t.get("files") else "")
+        for t in tasks if t["id"] in picked)
+    io.emit("message", state["log"]("relay",
+                                    "Supervisor's next wave:\n" + plan))
+    assign_workstreams(state, io)
+    state["store"].save(state)
+    return "assigned"
 
 
 def assign_workstreams(state, io):
@@ -4031,6 +5001,10 @@ def assign_workstreams(state, io):
             note = (f"[{tid}] NOT delivered (it claims files and no seat in "
                     f"this conversation can write them).")
         io.emit("message", state["log"]("relay", note))
+        supervisor_trace(state, io, "routing", note, task_id=tid,
+                         owner=new_owner, status=("reassigned" if
+                                                  kind == "reassigned" else
+                                                  "failed"))
     workstreams.serialize_conflicts(tasks)
     ids = list(state["slot_ids"])
     for t in workstreams.next_assignments(tasks):
@@ -4058,6 +5032,11 @@ def assign_workstreams(state, io):
                   "hearing this, and will get a one-line summary when you "
                   "finish. Reply when the task is complete.")
         state["pending"][j].append(brief)
+        supervisor_trace(state, io, "instruction",
+                         f"Assigned [{t['id']}] to {_seat_name(state, t['owner'])}",
+                         brief, task_id=t["id"], owner=t["owner"],
+                         files=list(t.get("files") or []),
+                         deps=list(t.get("deps") or []), status="active")
     io.emit("workstreams", {"tasks": tasks})
 
 
@@ -4362,6 +5341,10 @@ class SpawnManager:
             round=state["rnd"])
         self._io.emit("status", {"text": f"{requester} spawned a {label} "
                                          f"helper — running…"})
+        supervisor_trace(state, self._io, "handoff",
+                         f"{requester} delegated to a {label} helper",
+                         task, owner=state["slot_ids"][req_idx],
+                         status="active")
         state["store"].save(state)
         threading.Thread(
             target=self._run_helper,
@@ -4373,6 +5356,7 @@ class SpawnManager:
         state = self._state
         agent = AGENT_TYPES[provider](
             state["workspace"], yolo=bool(state.get("yolo")),
+            permission=state.get("permission"),
             model=model, effort=effort, name=f"Helper {hid}")
         requester = state["agents"][req_idx].name
         prompt = HELPER_PROMPT.format(requester=requester, task=task)
@@ -4383,6 +5367,9 @@ class SpawnManager:
         except Exception as e:
             self._results.put(("helper", hid, req_idx, provider, model,
                                None, error_excerpt(e)))
+        finally:
+            record_usage(state, getattr(agent, "last_usage", None),
+                         seat_key=state["slot_ids"][req_idx], kind="helper")
 
     # ------------------------------------------------- tier-3 teams -------
     def request_team(self, req_idx, slots, opts, opener):
@@ -4415,6 +5402,7 @@ class SpawnManager:
         workspace = state["workspace"]        # inherited: shared artifacts
         os.makedirs(child_dir, exist_ok=True)
         agents = [AGENT_TYPES[p](workspace, yolo=bool(state.get("yolo")),
+                                 permission=state.get("permission"),
                                  model=m, effort=e, name=lb)
                   for (p, m, e, _), lb in zip(slots, labels)]
         store = SessionStore(child_dir)
@@ -4425,8 +5413,13 @@ class SpawnManager:
             "providers": [p for p, _, _, _ in slots],
             "workspace": workspace, "transcript": store.transcript,
             "topic": "", "title": title, "created": store.created,
-            "yolo": bool(state.get("yolo")), "turns": rounds,
+            "yolo": bool(state.get("yolo")),
+            "permission": state.get("permission", DEFAULT_PERMISSION),
+            "permission_grants": [], "turns": rounds,
             "rnd": 0, "max": rounds, "ended": False, "mode": mode,
+            "supervisor": None, "supervisor_trace": [],
+            "supervisor_goal": None, "supervisor_waves": 0,
+            "supervisor_wave_index": 1,
             "until_done": True,
             "turn_ceiling": rounds * len(agents),
             # depth 1: children may use native subagents, nothing else —
@@ -4460,6 +5453,10 @@ class SpawnManager:
         self._io.emit("status", {"text": f"{requester} spawned a team "
                                          f"({', '.join(labels)}) — running "
                                          f"as '{store.id}'…"})
+        supervisor_trace(state, self._io, "handoff",
+                         f"{requester} delegated to team {store.id}",
+                         opener, owner=state["slot_ids"][req_idx],
+                         status="active")
         state["store"].save(state)
         self._inflight.append(f"team-{tid}")
         threading.Thread(target=self._run_team,
@@ -4495,6 +5492,9 @@ class SpawnManager:
                 note = (note or "no report was produced") + \
                     " — this is the team's last message instead"
             store.save(child, ended=True)
+            if child.get("usage"):
+                record_usage(self._state, child["usage"],
+                             seat_key=self._state["slot_ids"][req_idx], kind="team")
             with open(child["transcript"], "a", encoding="utf-8") as f:
                 f.write("\n---\n*team finished — reported back*\n")
             self._results.put(("team", tid, req_idx, store.id,
@@ -4830,11 +5830,13 @@ def moderator_pick(state, io, moderator):
     try:
         reply = moderator.turn(prompt)
     except Exception as e:
+        record_usage(state, getattr(moderator, "last_usage", None), kind="moderator")
         io.emit("status", {"text": f"Moderator error ({str(e)[:120]}) — "
                                    f"continuing in order"})
         return None, False
     finally:
         moderator.session_id = None     # stateless by design
+    record_usage(state, getattr(moderator, "last_usage", None), kind="moderator")
     pick = (reply or "").strip().strip('."\'`*: ')
     if pick.upper() == "DONE":
         return None, True
@@ -4869,6 +5871,61 @@ def run_rounds(state, io):
     Best-effort by contract: a feedback record that can fail a conversation is
     strictly worse than no feedback record, so every failure here is swallowed.
     """
+    # Wire the permission engine only once the front-end seam exists. The
+    # callback is per-seat and fail-closed; headless LoopIO returns None.
+    grant_lock = state.setdefault("_permission_lock", threading.RLock())
+    for i, agent in enumerate(state.get("agents") or ()):
+        if getattr(agent, "permission", None) != "ask":
+            agent.on_approval = None
+            continue
+
+        def ask_permission(req, abort=None, i=i, agent=agent):
+            tool = str(req.get("tool") or "a tool")
+            provider = state["providers"][i]
+            grant_key = f"{provider}:{tool.lower()}"
+            with grant_lock:
+                if grant_key in set(state.get("permission_grants") or []):
+                    return True, f"Josh allowed {tool} for this conversation."
+            details = approval_request_details(req, state.get("workspace"))
+            payload = {
+                "qid": "permission-" + str(req.get("id") or uuid.uuid4().hex[:8]),
+                "kind": "permission", "speaker": state["slot_ids"][i],
+                "provider": provider, "asker": agent.name,
+                "question": f"{agent.name} requests permission to use {tool}.",
+                "options": ["Approve once",
+                            session_permission_label(tool),
+                            "Deny", "Deny with feedback"],
+                **details,
+            }
+            answer = io.ask_human(payload, abort=abort)
+            allowed, scope, feedback = read_permission_decision(answer)
+            if allowed and scope == "session":
+                with grant_lock:
+                    grants = set(state.get("permission_grants") or [])
+                    grants.add(grant_key)
+                    state["permission_grants"] = sorted(grants)
+                    state["store"].save(state)
+                io.emit("status", {"text": f"Always allowing {agent.name}'s "
+                                           f"{tool} requests for this conversation."})
+            if scope == "turn":
+                # "…rest of turn" — every later request in THIS turn is
+                # answered from the same verdict, so a seat that reaches for
+                # Bash after its Write was refused does not re-open the modal.
+                agent.set_turn_verdict(allowed)
+            if allowed:
+                reason = (f"Josh allowed {tool} for this conversation."
+                          if scope == "session" else
+                          "Josh allowed the rest of this turn."
+                          if scope == "turn" else "Josh approved this.")
+            else:
+                reason = (f"Josh denied this: {feedback}" if feedback else
+                          "Josh denied the rest of this turn."
+                          if scope == "turn" else
+                          "Josh declined or did not answer.")
+            return allowed, reason
+
+        agent.on_approval = ask_permission
+
     ended = None
     try:
         ended = _run_rounds(state, io)
@@ -5038,11 +6095,15 @@ def _run_rounds(state, io):
                 outcome = "fatal"
                 break
             if no_retry(e1):
+                record_usage(state, getattr(agent, "last_usage", None),
+                             seat_key=key, kind="failed")
                 if source != "closing":
                     state["cursor"] = slot_ids[(i + 1) % len(agents)]
                 commit_skip(state, i, error_excerpt(e1), io,
                             kind=skip_kind(e1), retried=False)
                 continue
+            record_usage(state, getattr(agent, "last_usage", None),
+                         seat_key=key, kind="retry")
             note_retry(state, io, agent, e1)
             # fresh sink: the failed attempt's narration must not double up
             on_act, acts = make_activity_sink(io, key, providers[i],
@@ -5262,11 +6323,16 @@ def run_parallel(state, io):
                         return
                     if no_retry(e1):
                         with lock:
+                            record_usage(state, getattr(agent, "last_usage", None),
+                                         seat_key=key, kind="failed")
                             consume_closing_slot()
                             commit_skip(state, i, error_excerpt(e1), io,
                                         kind="timeout", retried=False)
                         results[i] = "skip"
                         return
+                    with lock:
+                        record_usage(state, getattr(agent, "last_usage", None),
+                                     seat_key=key, kind="retry")
                     note_retry(state, io, agent, e1)
                     on_act, acts = make_activity_sink(io, key, providers[i],
                                                       agent.name,
@@ -5334,9 +6400,19 @@ def run_parallel(state, io):
         # Supervisor repair is deliberately a barrier operation: every worker
         # has stopped, so a stateless side call cannot block sibling commits or
         # mutate a task beneath its owner. Each failed task gets one attempt.
+        supervised_done = False
         if (not closing_round and not stopped and not io.should_stop()
                 and not any(r == "fatal" for r in results.values())):
             replan_failed_workstreams(state, io)
+            # The manager only gets the floor once every task has settled,
+            # which is also the only moment its own repair pass can have
+            # finished. Ordering matters: repair first, then review, so a
+            # wave is decided on the final state of the plan.
+            supervised_done = supervise_next_wave(state, io) == "done"
+        if supervised_done:
+            io.emit("status", {"text": "Supervisor called the job done."})
+            outcome = "wrapped"
+            break
 
         if closing_round:
             io.emit("status", {"text": "Conversation wrapped."})
@@ -5362,6 +6438,7 @@ def run_parallel(state, io):
             io.emit("status", {"text": f"{names} called it — one closing "
                                        f"round…"})
     mgr.finish()
+    note_unfinished_supervision(state, io, outcome)
     return outcome
 
 
@@ -5522,12 +6599,17 @@ def run_free(state, io):
                         return
                     if no_retry(e1):
                         with cond:
+                            record_usage(state, getattr(agent, "last_usage", None),
+                                         seat_key=key, kind="failed")
                             commit_skip(state, i, error_excerpt(e1), io,
                                         kind="timeout", retried=False)
                         reply = None
                         timed_out = True
                         fails += 1
                     else:
+                        with cond:
+                            record_usage(state, getattr(agent, "last_usage", None),
+                                         seat_key=key, kind="retry")
                         note_retry(state, io, agent, e1)
                         on_act, acts = make_activity_sink(
                             io, key, providers[i], agent.name,
@@ -5717,7 +6799,10 @@ def main():
                     help="who speaks first: slot number (1-based), label "
                          "(e.g. \"claude 2\"), or provider name")
     ap.add_argument("--yolo", action="store_true",
-                    help="full autonomy incl. shell access (use with care)")
+                    help="deprecated alias for --permission full")
+    ap.add_argument("--permission", choices=PERMISSION_ORDER, default=None,
+                    help="agent permissions: read_only, ask, auto (workspace "
+                         "sandbox; default), or full (no sandbox/approvals)")
     ap.add_argument("--connectors", action="store_true",
                     help="let seats use your connected apps over MCP (Gmail, "
                          "Drive, Calendar, M365, ERP…). They can then act in "
@@ -5785,6 +6870,11 @@ def main():
                     help="private role instructions only that seat sees; "
                          "same SEAT grammar as --role; repeatable")
     args = ap.parse_args()
+
+    if args.yolo and args.permission not in (None, "full"):
+        ap.error("--yolo cannot be combined with another --permission level")
+    permission = normalize_permission(
+        args.permission, "full" if args.yolo else DEFAULT_PERMISSION)
 
     mode = args.mode.replace("-", "_")
     if mode not in IMPLEMENTED_MODES:
@@ -5864,7 +6954,8 @@ def main():
     transcript = os.path.join(session_dir, "transcript.md")
     say_file = os.path.join(session_dir, "say.txt")
 
-    agents = [AGENT_TYPES[p](workspace, yolo=args.yolo,
+    agents = [AGENT_TYPES[p](workspace, yolo=permission == "full",
+                             permission=permission,
                              model=m, effort=e, name=lb,
                              connectors=args.connectors)
               for p, m, e, lb in seats]
@@ -5892,7 +6983,7 @@ def main():
         print(f"rounds       : up to {args.turns}")
     if mode != DEFAULT_MODE:
         print(f"turn order   : {mode.replace('_', ' ')}")
-    print(f"tools        : {'YOLO (unsandboxed)' if args.yolo else 'web + shared workspace (sandboxed)'}")
+    print(f"permissions  : {PERMISSION_LEVELS[permission]['label']}")
     print(f"transcript   : {transcript}")
     print(f"interject    : type + Enter anytime · /stop ends · /turns N recaps "
           f"· /clear [seat] · /compact [seat]{RESET}")
@@ -5917,10 +7008,15 @@ def main():
              "providers": [p for p, _, _, _ in seats],
              "workspace": workspace, "transcript": transcript,
              "topic": args.topic, "title": args.topic, "created": store.created,
-             "yolo": bool(args.yolo), "connectors": bool(args.connectors),
+             "yolo": permission == "full", "permission": permission,
+             "permission_grants": [],
+             "connectors": bool(args.connectors),
              "turns": args.turns,
              "rnd": 0, "max": args.turns, "ended": False, "mode": mode,
              "moderator": moderator_spec,
+             "supervisor": None, "supervisor_trace": [],
+             "supervisor_goal": None, "supervisor_waves": 0,
+             "supervisor_wave_index": 1,
              "until_done": bool(args.until_done),
              "turn_ceiling": max(1, args.ceiling) if args.until_done else None,
              "spawn": {"tier1": not args.no_native_subagents,
@@ -5931,6 +7027,8 @@ def main():
              "ask": not args.no_ask,
              "pending": {i: [] for i in range(len(agents))},
              "introduced": [False] * len(agents), "store": store}
+    if brief and brief.get("usage"):
+        record_usage(state, brief["usage"], kind="brief")
 
     def echo(row):
         # rows carry the UI name ("Josh"); the console palette is keyed on the

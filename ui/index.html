@@ -48,6 +48,40 @@
   #stopBtn:hover { filter: brightness(1.15); }
   #stopBtn[hidden] { display: none; }
   #roundBadge { margin-left: auto; color: var(--alloy); font-size: 12.5px; white-space: nowrap; }
+  #permissionHud { position: relative; flex: 0 0 auto; }
+  #permissionBadge {
+    display: flex; align-items: center; gap: 7px; min-height: 30px;
+    border: 1px solid var(--line); border-radius: 999px; padding: 5px 10px;
+    background: var(--surface); color: var(--text); cursor: pointer;
+    font: 11.5px "Cascadia Mono", Consolas, monospace;
+  }
+  #permissionBadge:hover, #permissionBadge[aria-expanded=true] { border-color: var(--perm); }
+  #permissionBadge .perm-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--perm); }
+  #permissionBadge .perm-caret { color: var(--muted); font-size: 10px; }
+  #permissionHud[data-permission=read_only] { --perm: #87909D; }
+  #permissionHud[data-permission=ask] { --perm: #9E8BE6; }
+  #permissionHud[data-permission=auto] { --perm: #67C58E; }
+  #permissionHud[data-permission=full] { --perm: #E5AA52; }
+  #permissionHud[data-waiting=true] #permissionBadge {
+    border-color: var(--perm); box-shadow: 0 0 0 3px color-mix(in srgb, var(--perm) 14%, transparent);
+  }
+  #permissionHud[data-waiting=true] .perm-dot { animation: permPulse 1.1s ease-in-out infinite; }
+  @keyframes permPulse { 50% { opacity: .3; transform: scale(.72); } }
+  @media (prefers-reduced-motion: reduce) {
+    #permissionHud[data-waiting=true] .perm-dot { animation: none; }
+  }
+  #permissionPopover {
+    position: absolute; z-index: 30; right: 0; top: calc(100% + 8px); width: 315px;
+    padding: 12px 13px; border: 1px solid var(--line); border-radius: 11px;
+    background: #211D27; box-shadow: 0 14px 38px rgba(0,0,0,.42);
+    opacity: 0; transform: translateY(-4px); pointer-events: none;
+    transition: opacity .12s, transform .12s;
+  }
+  #permissionHud.open #permissionPopover { opacity: 1; transform: none; pointer-events: auto; }
+  #permissionPopover strong { display: block; font-size: 12.5px; color: var(--perm); margin-bottom: 5px; }
+  #permissionPopover p { color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+  #permissionScope { margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line);
+                     color: var(--muted); font-size: 10.5px; }
   /* app-chrome focus ring — participants never wear this color */
   :focus-visible { outline: 2px solid color-mix(in srgb, var(--alloy) 65%, transparent); outline-offset: 1px; }
   #say:focus { border-color: color-mix(in srgb, var(--alloy) 55%, transparent); }
@@ -265,6 +299,7 @@
   .seat[data-provider=gemini] { --seat: var(--gemini); }
   .seat.off { opacity: .45; }
   .seat.thinking { box-shadow: 0 0 18px -2px var(--seat); animation: pulse 1.6s ease-in-out infinite; }
+  .seat.waiting { box-shadow: 0 0 0 1px #D9B95F; }
   @keyframes pulse { 50% { box-shadow: 0 0 7px -2px var(--seat); } }
   @media (prefers-reduced-motion: reduce) { .seat.thinking { animation: none; } }
   .seat-head { display: flex; align-items: center; gap: 8px; }
@@ -281,6 +316,7 @@
   .seat-head .name:focus { border-bottom-color: var(--seat); }
   .seat-head .state { font-size: 11px; color: var(--muted); }
   .seat.thinking .state { color: var(--seat); }
+  .seat.waiting .state { color: #D9B95F; }
   .seat-head .seat-stop {
     display: none; border: 0; border-radius: 6px; background: transparent;
     color: var(--danger); cursor: pointer; width: 22px; height: 22px;
@@ -343,6 +379,30 @@
   #askQ { font-size: 13.5px; line-height: 1.55; margin-bottom: 12px; }
   #askOpts { margin-bottom: 10px; }
   #askOpts button { font-size: 12.5px; padding: 6px 13px; color: var(--text); }
+  #askModal.permission-request .modal { width: min(680px, 94vw); }
+  #approvalReview {
+    margin: 0 0 12px; padding: 11px; border: 1px solid var(--line);
+    border-radius: 9px; background: rgba(0,0,0,.13);
+  }
+  #approvalReview[hidden] { display: none; }
+  .approval-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  #approvalRisk {
+    border: 1px solid currentColor; border-radius: 999px; padding: 2px 8px;
+    font: 10.5px "Cascadia Mono", Consolas, monospace; text-transform: uppercase;
+  }
+  #approvalRisk[data-risk=low] { color: #67C58E; }
+  #approvalRisk[data-risk=medium] { color: #E5AA52; }
+  #approvalRisk[data-risk=high] { color: #EF7777; }
+  #approvalTool { color: var(--text); font: 12px "Cascadia Mono", Consolas, monospace; }
+  .approval-fact { margin-top: 5px; color: var(--muted); font-size: 11.5px; line-height: 1.4; }
+  .approval-fact b { color: var(--text); font-weight: 550; }
+  #approvalContext {
+    max-height: 260px; overflow: auto; margin-top: 10px; padding: 9px 10px;
+    border: 1px solid var(--line); border-radius: 7px; background: #111014;
+    color: #D8D2DF; white-space: pre-wrap; word-break: break-word;
+    font: 11.5px/1.5 "Cascadia Mono", Consolas, monospace;
+  }
+  #askModal.permission-request #askOpts button:nth-last-child(-n+2) { border-color: #8C4D55; }
   #askOther {
     width: 100%; background: var(--surface2); color: var(--text);
     border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px;
@@ -569,11 +629,104 @@
   }
   .btn-sm:hover { border-color: rgba(255,255,255,.25); }
   input[type=checkbox] { accent-color: var(--alloy); width: 15px; height: 15px; }
+  .permission-note { font-size: 11px; color: var(--muted); margin-top: 7px;
+                     line-height: 1.4; }
+  .permission-note.danger { color: var(--danger); }
   .yolo-note { font-size: 11px; color: var(--danger); margin-top: 5px; display: none; }
 
   /* ---------- transcript ---------- */
   .stage { flex: 1; display: flex; flex-direction: column; min-width: 0;
            min-height: 0; overflow: hidden; }
+  #supervisorPanel {
+    flex: 0 0 auto; margin: 10px 18px 0; border: 1px solid #4D465A;
+    border-radius: 11px; background: #1B1821; overflow: hidden;
+  }
+  #supervisorPanel[hidden] { display: none; }
+  #supervisorHead {
+    width: 100%; display: flex; align-items: center; gap: 8px; padding: 9px 12px;
+    border: 0; background: #24202B; color: var(--text); cursor: pointer;
+    font: 12.5px Bahnschrift, "Segoe UI", sans-serif; text-align: left;
+  }
+  #supervisorHead .sup-dot { width: 7px; height: 7px; border-radius: 50%;
+    background: var(--alloy); box-shadow: 0 0 0 3px rgba(130,172,214,.12); }
+  #supervisorCount { margin-left: auto; color: var(--muted);
+    font: 10.5px "Cascadia Mono", Consolas, monospace; }
+  #supervisorChevron { color: var(--muted); transition: transform .12s; }
+  #supervisorPanel.collapsed #supervisorChevron { transform: rotate(-90deg); }
+  #supervisorPanel.collapsed #supervisorTrace,
+  #supervisorPanel.collapsed #supervisorOverview,
+  #supervisorPanel.collapsed #supervisorDisclosure { display: none; }
+  #supervisorOverview { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  #supervisorGoalLabel { color: var(--muted); text-transform: uppercase;
+    font: 9.5px "Cascadia Mono", Consolas, monospace; letter-spacing: .08em; }
+  #supervisorGoal { margin-top: 3px; color: var(--text); font-size: 12px;
+    line-height: 1.4; }
+  #supervisorTaskMap { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .sup-task { min-width: 150px; flex: 1 1 190px; border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 8px; background: #211D27; }
+  .sup-task-head { display: flex; gap: 7px; align-items: center; color: var(--text);
+    font: 10.5px "Cascadia Mono", Consolas, monospace; }
+  .sup-task-state { margin-left: auto; color: var(--muted); text-transform: uppercase;
+    font-size: 8.5px; }
+  .sup-task[data-status=active] .sup-task-state { color: #8FD3A7; }
+  .sup-task[data-status=failed] .sup-task-state { color: #EC8F8F; }
+  .sup-task[data-status=done] .sup-task-state { color: #83B7E6; }
+  .sup-task-brief { margin-top: 4px; color: var(--muted); font-size: 10.5px;
+    line-height: 1.35; }
+  #supervisorTrace { max-height: 210px; overflow-y: auto; padding: 5px 10px; }
+  .sup-event { display: grid; grid-template-columns: 88px minmax(0,1fr);
+    gap: 8px; padding: 7px 2px; border-bottom: 1px solid var(--line); }
+  .sup-event:last-child { border-bottom: 0; }
+  .sup-phase { align-self: start; border: 1px solid #5B5368; border-radius: 999px;
+    padding: 2px 7px; color: #BEB4CE; text-align: center; text-transform: uppercase;
+    font: 9.5px "Cascadia Mono", Consolas, monospace; letter-spacing: .05em; }
+  .sup-event[data-phase=instruction] .sup-phase { color: #8FD3A7; border-color: #477558; }
+  .sup-event[data-phase=verification] .sup-phase { color: #83B7E6; border-color: #466988; }
+  .sup-event[data-phase=error] .sup-phase { color: #EC8F8F; border-color: #8D4B4B; }
+  /* the rolling manager: it reads the settled record, decides a new wave, and
+     eventually closes the job — three states worth telling apart at a glance */
+  .sup-event[data-phase=review] .sup-phase { color: var(--alloy); border-color: #8A6D2A; }
+  .sup-event[data-phase=wave] .sup-phase { color: #C9A6E8; border-color: #6B4E86; }
+  .sup-event[data-phase=accepted] .sup-phase { color: #8FD3A7; border-color: #477558; }
+  .sup-event[data-phase=accepted] .sup-title { color: #A9E4BE; }
+  .sup-title { color: var(--text); font-size: 12px; line-height: 1.35; }
+  .sup-detail { margin-top: 3px; white-space: pre-wrap; overflow-wrap: anywhere;
+    color: var(--muted); font: 10.8px/1.45 "Cascadia Mono", Consolas, monospace; }
+  .sup-change { margin-top: 5px; display: grid; grid-template-columns: 1fr 1fr;
+    gap: 5px; font: 10px/1.4 "Cascadia Mono", Consolas, monospace; }
+  .sup-before, .sup-after { padding: 5px 7px; border-radius: 6px;
+    white-space: pre-wrap; overflow-wrap: anywhere; }
+  .sup-before { color: #E49999; background: rgba(175,67,67,.12); }
+  .sup-after { color: #9ED6AE; background: rgba(67,155,93,.12); }
+  .chat-row .sub[data-sup=accepted] { color: #8FD3A7; }
+  .chat-row .sub[data-sup=unresolved] { color: var(--alloy); }
+  .chat-row .sub[data-sup=working] { color: #C9A6E8; }
+  .sup-wave { border-bottom: 1px solid var(--line); padding: 2px 0 4px; }
+  .sup-wave:last-child { border-bottom: 0; }
+  .sup-wave-head { display: flex; align-items: center; gap: 8px; width: 100%;
+    background: none; border: 0; cursor: pointer; padding: 6px 2px;
+    color: var(--alloy); font: 600 10px "Cascadia Mono", Consolas, monospace;
+    text-transform: uppercase; letter-spacing: .07em; }
+  .sup-wave-count { margin-left: auto; color: var(--muted);
+    font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .sup-wave.folded .sup-wave-rows { display: none; }
+  .sup-wave .sup-event:last-child { border-bottom: 0; }
+  .sup-event.live .sup-phase { animation: supPulse 1.1s ease-in-out infinite; }
+  @keyframes supPulse { 0%, 100% { opacity: 1; } 50% { opacity: .38; } }
+  .sup-verdict { margin: 6px 2px 2px; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid #477558; background: rgba(67,155,93,.10); }
+  .sup-verdict-tag { color: #8FD3A7; text-transform: uppercase;
+    font: 9.5px "Cascadia Mono", Consolas, monospace; letter-spacing: .06em; }
+  .sup-verdict-title { margin-top: 3px; color: #CBEBD5; font-size: 12px;
+    line-height: 1.35; }
+  .sup-unresolved { margin: 6px 2px 2px; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid #8A6D2A; background: rgba(244,185,66,.09); }
+  .sup-unresolved-tag { color: var(--alloy); text-transform: uppercase;
+    font: 9.5px "Cascadia Mono", Consolas, monospace; letter-spacing: .06em; }
+  .sup-unresolved .sup-verdict-title { color: #E8D3A6; }
+  .sup-event[data-phase=exhausted] .sup-phase { color: var(--alloy); border-color: #8A6D2A; }
+  #supervisorDisclosure { padding: 6px 12px 8px; color: var(--muted);
+    border-top: 1px solid var(--line); font-size: 10px; }
   /* Keep the jump control inside the transcript viewport. It used to be
      positioned against .stage, which put it underneath the composer when the
      message box was tall — exactly when it was needed to reach new replies. */
@@ -638,6 +791,11 @@
     text-transform: uppercase; color: var(--who);
   }
   .msg-head .meta { font: 11px "Cascadia Mono", Consolas, monospace; color: var(--muted); }
+  .msg-head .msg-usage {
+    font: 10.5px "Cascadia Mono", Consolas, monospace;
+    color: var(--muted); background: var(--surface2);
+    border-radius: 4px; padding: 1px 6px; margin-left: 2px;
+  }
   .msg-head .mtime {
     font: 11px "Cascadia Mono", Consolas, monospace; color: var(--muted);
     margin-left: auto; opacity: .7; cursor: default;
@@ -896,6 +1054,17 @@
     <h1>Alloy</h1>
   </div>
   <span id="roundBadge" class="mono"></span>
+  <div id="permissionHud" data-permission="auto" data-waiting="false">
+    <button id="permissionBadge" aria-expanded="false" title="Conversation permissions">
+      <span class="perm-dot"></span><span id="permissionBadgeText">Workspace</span>
+      <span class="perm-caret">⌄</span>
+    </button>
+    <div id="permissionPopover" role="status">
+      <strong id="permissionTitle">Workspace permissions</strong>
+      <p id="permissionDetail"></p>
+      <div id="permissionScope"></div>
+    </div>
+  </div>
   <button id="stopBtn" class="display" hidden>Stop</button>
 </header>
 
@@ -956,10 +1125,6 @@
       <label style="display:flex;align-items:center;gap:8px;margin:8px 0 0;font-size:12.5px;color:var(--muted)">
         <input type="checkbox" id="untilDone"> Until done — they decide when to stop
       </label>
-      <label style="display:flex;align-items:center;gap:8px;margin:8px 0 0;font-size:12.5px;color:var(--muted)"
-             title="Agents draft a read-only plan and wait for your approval before writes are enabled">
-        <input type="checkbox" id="planMode"> Plan before execution
-      </label>
     </div>
     <div class="ctl">
       <label>Helpers — one-shot AIs a seat can spawn</label>
@@ -989,10 +1154,14 @@
       </label>
     </div>
     <div class="ctl">
-      <label style="display:flex;align-items:center;gap:8px;margin:0">
-        <input type="checkbox" id="yolo"> Full autonomy (shell access)
-      </label>
-      <div class="yolo-note" id="yoloNote">They can run any command in the working folder. Only for topics you trust.</div>
+      <label>Permissions — what seats may change</label>
+      <select id="permissionMode" title="Locked once the conversation starts">
+        <option value="read_only">Read only — no changes</option>
+        <option value="ask">Ask first — supervised</option>
+        <option value="auto" selected>Workspace — autonomous, sandboxed</option>
+        <option value="full">Full access — no sandbox or approvals</option>
+      </select>
+      <div class="permission-note" id="permissionNote"></div>
     </div>
     <div class="ctl">
       <label style="display:flex;align-items:center;gap:8px;margin:0">
@@ -1010,6 +1179,19 @@
   </aside>
 
   <div class="stage">
+    <section id="supervisorPanel" hidden aria-label="Supervisor control log">
+      <button id="supervisorHead" aria-expanded="true">
+        <span class="sup-dot"></span><span>Supervisor control log</span>
+        <span id="supervisorCount"></span><span id="supervisorChevron">⌄</span>
+      </button>
+      <div id="supervisorOverview">
+        <div id="supervisorGoalLabel">Master goal</div>
+        <div id="supervisorGoal"></div>
+        <div id="supervisorTaskMap"></div>
+      </div>
+      <div id="supervisorTrace" aria-live="polite"></div>
+      <div id="supervisorDisclosure">Shows public instructions and routing decisions, not private model reasoning.</div>
+    </section>
     <div class="feed-wrap">
       <div id="feed" tabindex="0" aria-label="Conversation transcript">
         <div class="empty" id="emptyState">
@@ -1164,6 +1346,17 @@
       <button class="close" id="askHide" title="Answer later — the conversation keeps waiting">✕</button>
     </div>
     <div id="askQ"></div>
+    <div id="approvalReview" hidden>
+      <div class="approval-row">
+        <span id="approvalRisk" data-risk="medium">Medium risk</span>
+        <span id="approvalTool"></span>
+      </div>
+      <div class="approval-fact"><b>Why:</b> <span id="approvalWhy"></span></div>
+      <div class="approval-fact"><b>Blast radius:</b> <span id="approvalBlast"></span></div>
+      <div class="approval-fact"><b>Cwd:</b> <span id="approvalCwd"></span></div>
+      <div class="approval-fact"><b>Agent rationale:</b> <span id="approvalRationale"></span></div>
+      <pre id="approvalContext"></pre>
+    </div>
     <div class="chips" id="askOpts"></div>
     <textarea id="askOther" rows="3" spellcheck="false"
       placeholder="Other — type your own answer (Shift+Enter for a new line)"></textarea>
@@ -1201,9 +1394,19 @@ function runFor(id, seed) {
     status: canonicalRunState(seed?.status) || (seed?.running ? "running" : "idle"),
     thinkers: new Set(), question: seed?.question || null,
     unread: Number(seed?.unread || 0), completionUnread: false,
-    plan: seed?.plan || null
+    plan: seed?.plan || null, permission: seed?.permission || seed?.session?.permission || null,
+    supervisorTrace: [...(seed?.supervisor_trace || seed?.session?.supervisor_trace || [])],
+    supervisorGoal: seed?.goal || seed?.session?.goal || "",
+    supervisorTasks: [...(seed?.tasks || seed?.session?.tasks || [])]
   });
-  return chatRuns.get(id);
+  const run = chatRuns.get(id);
+  const seededPermission = seed?.permission || seed?.session?.permission;
+  if (seededPermission) run.permission = seededPermission;
+  if (seed?.goal || seed?.session?.goal)
+    run.supervisorGoal = seed.goal || seed.session.goal;
+  if (Array.isArray(seed?.tasks || seed?.session?.tasks))
+    run.supervisorTasks = [...(seed.tasks || seed.session.tasks)];
+  return run;
 }
 function setRunStatus(id, status, patch={}) {
   const run = runFor(id);
@@ -1219,7 +1422,216 @@ function syncActiveRun(seed) {
   $("stopBtn").hidden = !running;
   $("stopBtn").textContent = run?.status === "stopping" ? "Stopping…" : "Stop";
   $("say").placeholder = running ? RUN_PH : canContinue ? CONT_PH : IDLE_PH;
+  renderPermissionHud(run?.permission || $("permissionMode").value,
+    !!run?.question && run.question.kind === "permission");
 }
+
+function supervisorSeatName(owner) {
+  const seat = seats.find(s => String(s.id) === String(owner));
+  if (!seat) return `Seat ${owner}`;
+  return seat.el?.querySelector(".name")?.value.trim() || seatDisplayName(seat);
+}
+function renderSupervisorOverview(goal="", tasks=[], mode="") {
+  const panel = $("supervisorPanel");
+  panel.hidden = !(mode === "supervisor" || goal || tasks.length ||
+                   $("supervisorTrace").childElementCount);
+  $("supervisorGoal").textContent = goal || "Waiting for the Supervisor to decompose the goal…";
+  const map = $("supervisorTaskMap"); map.replaceChildren();
+  tasks.forEach(task => {
+    const card = document.createElement("div"); card.className = "sup-task";
+    card.dataset.status = task.status || "pending";
+    const head = document.createElement("div"); head.className = "sup-task-head";
+    const id = document.createElement("b"); id.textContent = `[${task.id}]`;
+    const owner = document.createElement("span"); owner.textContent = supervisorSeatName(task.owner);
+    const status = document.createElement("span"); status.className = "sup-task-state";
+    status.textContent = task.status || "pending";
+    const brief = document.createElement("div"); brief.className = "sup-task-brief";
+    const deps = task.deps?.length ? ` · after ${task.deps.join(", ")}` : "";
+    brief.textContent = `${task.brief || task.title || "Untitled task"}${deps}`;
+    head.append(id, owner, status); card.append(head, brief); map.appendChild(card);
+  });
+}
+function supervisorEventRow(entry, live) {
+  const row = document.createElement("div");
+  row.className = "sup-event"; row.dataset.phase = entry.phase || "activity";
+  if (live) row.classList.add("live");
+  const phase = document.createElement("span"); phase.className = "sup-phase";
+  phase.textContent = (entry.type || entry.phase || "activity").replaceAll("_", " ");
+  const body = document.createElement("div");
+  const title = document.createElement("div"); title.className = "sup-title";
+  title.textContent = entry.title || "Supervisor activity";
+  body.appendChild(title);
+  if (entry.detail) {
+    const detail = document.createElement("div"); detail.className = "sup-detail";
+    detail.textContent = entry.detail; body.appendChild(detail);
+  }
+  if (entry.before || entry.after) {
+    const change = document.createElement("div"); change.className = "sup-change";
+    const before = document.createElement("div"); before.className = "sup-before";
+    const after = document.createElement("div"); after.className = "sup-after";
+    const fmt = x => x ? `${x.brief || ""}${x.files?.length ? `\nfiles: ${x.files.join(", ")}` : ""}` : "";
+    before.textContent = "Before\n" + fmt(entry.before);
+    after.textContent = "After\n" + fmt(entry.after);
+    change.append(before, after); body.appendChild(change);
+  }
+  row.append(phase, body);
+  return row;
+}
+// A flat list cannot show a manager REACTING — plan, work, review, plan again
+// is a cycle, and Josh asked three times to see exactly that. Waves are cut on
+// plan_created (the engine emits one per dispatched wave), and the closing
+// verdict is lifted out of the stream entirely: "the manager decided this is
+// finished" must never read like "the round cap ran out".
+function supervisorWaves(entries) {
+  const waves = []; let current = null, seen = null;
+  entries.forEach(entry => {
+    // entry.wave is stamped by the engine. Cutting on plan_created is only the
+    // fallback for pre-wave-index history: the trace is capped, so once the
+    // first plan scrolls out of the window that inference renumbers every
+    // wave — and a run long enough to need numbers is exactly the one that
+    // truncates.
+    const n = entry.wave || null;
+    const cut = n !== null ? n !== seen
+                           : (!current || entry.type === "plan_created");
+    if (cut) {
+      current = {n, entries: [], verdict: null, unresolved: null};
+      waves.push(current); seen = n;
+    }
+    if (entry.type === "goal_accepted") current.verdict = entry;
+    else if (entry.type === "goal_unresolved") current.unresolved = entry;
+    else current.entries.push(entry);
+  });
+  return waves;
+}
+function renderSupervisorTrace(entries=[], mode="") {
+  const panel = $("supervisorPanel"), list = $("supervisorTrace");
+  const visible = mode === "supervisor" || entries.length > 0;
+  panel.hidden = !visible;
+  if (!visible) { list.replaceChildren(); return; }
+  list.replaceChildren();
+  const shown = entries.slice(-120);
+  const waves = supervisorWaves(shown);
+  const last = shown[shown.length - 1];
+  waves.forEach((wave, i) => {
+    const box = document.createElement("section"); box.className = "sup-wave";
+    if (waves.length > 1 || wave.verdict || wave.unresolved) {
+      const head = document.createElement("button");
+      head.className = "sup-wave-head"; head.type = "button";
+      const label = document.createElement("b");
+      label.textContent = `Wave ${wave.n || i + 1}`;
+      const n = wave.entries.length;
+      const count = document.createElement("span");
+      count.className = "sup-wave-count";
+      count.textContent = `${n} action${n === 1 ? "" : "s"}`;
+      head.append(label, count);
+      head.onclick = () => box.classList.toggle("folded");
+      box.appendChild(head);
+    }
+    const rows = document.createElement("div"); rows.className = "sup-wave-rows";
+    wave.entries.forEach(entry => {
+      // work_reviewed is logged when the side call STARTS, so an unfinished
+      // review is exactly "this is the newest entry" — pulse it rather than
+      // inventing a separate liveness signal that could lie.
+      const live = entry === last && entry.type === "work_reviewed";
+      rows.appendChild(supervisorEventRow(entry, live));
+    });
+    box.appendChild(rows);
+    if (wave.verdict) {
+      const card = document.createElement("div"); card.className = "sup-verdict";
+      const tag = document.createElement("div"); tag.className = "sup-verdict-tag";
+      tag.textContent = "Supervisor closed the job";
+      const title = document.createElement("div");
+      title.className = "sup-verdict-title";
+      title.textContent = wave.verdict.title || "Goal accepted as met";
+      card.append(tag, title);
+      if (wave.verdict.detail) {
+        const d = document.createElement("div"); d.className = "sup-detail";
+        d.textContent = wave.verdict.detail; card.appendChild(d);
+      }
+      box.appendChild(card);
+    }
+    if (wave.unresolved) {
+      // Deliberately NOT the verdict card and NOT an error row. "The manager
+      // never got there" is its own ending, and letting it look like either of
+      // the other two is what made supervision unreadable in the first place.
+      const card = document.createElement("div"); card.className = "sup-unresolved";
+      const tag = document.createElement("div"); tag.className = "sup-unresolved-tag";
+      tag.textContent = "No verdict — the manager did not close this";
+      const title = document.createElement("div");
+      title.className = "sup-verdict-title";
+      title.textContent = wave.unresolved.title || "Supervision stopped early";
+      card.append(tag, title);
+      if (wave.unresolved.detail) {
+        const d = document.createElement("div"); d.className = "sup-detail";
+        d.textContent = wave.unresolved.detail; card.appendChild(d);
+      }
+      box.appendChild(card);
+    }
+    list.appendChild(box);
+  });
+  const waveNote = waves.length > 1 ? `${waves.length} waves · ` : "";
+  $("supervisorCount").textContent =
+    `${waveNote}${entries.length} action${entries.length === 1 ? "" : "s"}`;
+  list.scrollTop = list.scrollHeight;
+}
+function appendSupervisorTrace(chatId, entry) {
+  const run = runFor(chatId);
+  if (!run || !entry) return;
+  if (!run.supervisorTrace.some(x => x.id && x.id === entry.id))
+    run.supervisorTrace.push(entry);
+  if (entry.goal) run.supervisorGoal = entry.goal;
+  if (Array.isArray(entry.tasks)) run.supervisorTasks = entry.tasks;
+  if (run.supervisorTrace.length > 120) run.supervisorTrace.splice(0, run.supervisorTrace.length - 120);
+  if (chatId === activeId) {
+    renderSupervisorOverview(run.supervisorGoal, run.supervisorTasks, "supervisor");
+    renderSupervisorTrace(run.supervisorTrace, "supervisor");
+  }
+}
+function mergeSupervisorTasks(chatId, tasks) {
+  const run = runFor(chatId);
+  if (!run || !Array.isArray(tasks)) return;
+  run.supervisorTasks = tasks;
+  if (chatId === activeId)
+    renderSupervisorOverview(run.supervisorGoal, run.supervisorTasks, "supervisor");
+}
+$("supervisorHead").onclick = () => {
+  const panel = $("supervisorPanel");
+  const collapsed = panel.classList.toggle("collapsed");
+  $("supervisorHead").setAttribute("aria-expanded", collapsed ? "false" : "true");
+};
+
+const PERMISSION_HUD = {
+  read_only: {label: "Read only", title: "Read-only permissions",
+    detail: "Seats may inspect, search, browse and reason. Workspace writes and shell execution are disabled."},
+  ask: {label: "Ask first", title: "Supervised permissions",
+    detail: "Claude asks per write or command. GPT and Gemini ask once before a potentially mutating turn."},
+  auto: {label: "Workspace", title: "Workspace permissions",
+    detail: "Seats work autonomously inside the selected folder while each provider's CLI sandbox stays enabled."},
+  full: {label: "Full access", title: "Full-access permissions",
+    detail: "CLI sandboxes and approval prompts are bypassed. Connected apps remain a separate opt-in."},
+};
+function renderPermissionHud(mode, waiting=false) {
+  mode = PERMISSION_HUD[mode] ? mode : "auto";
+  const meta = PERMISSION_HUD[mode], hud = $("permissionHud");
+  hud.dataset.permission = mode;
+  hud.dataset.waiting = waiting ? "true" : "false";
+  $("permissionBadgeText").textContent = waiting ? `${meta.label} · approval` : meta.label;
+  $("permissionTitle").textContent = meta.title;
+  $("permissionDetail").textContent = meta.detail;
+  $("permissionScope").textContent = activeId
+    ? "Locked for this conversation — start a new chat to change it."
+    : "New-chat setting — choose the profile in the Seats rail.";
+}
+$("permissionBadge").onclick = e => {
+  e.stopPropagation();
+  const open = $("permissionHud").classList.toggle("open");
+  $("permissionBadge").setAttribute("aria-expanded", open ? "true" : "false");
+};
+document.addEventListener("click", () => {
+  $("permissionHud").classList.remove("open");
+  $("permissionBadge").setAttribute("aria-expanded", "false");
+});
+$("permissionPopover").onclick = e => e.stopPropagation();
 
 /* ---------- markdown-lite ---------- */
 function esc(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
@@ -1437,7 +1849,23 @@ function bindFeedScroll() {
   b.addEventListener("click", () => stickBottom(true));
 }
 bindFeedScroll();
-function addMsg(kind, name, text, meta, role, ts, activity) {
+function formatUsage(usage) {
+  if (!usage || typeof usage !== "object") return "";
+  const parts = [];
+  if (typeof usage.cost_usd === "number") {
+    parts.push(`$${usage.cost_usd < 0.01 ? usage.cost_usd.toFixed(4) : usage.cost_usd.toFixed(3)}`);
+  }
+  const toks = usage.total_tokens || ((usage.input_tokens || 0) + (usage.output_tokens || 0));
+  if (toks > 0) {
+    parts.push(`${toks.toLocaleString()} toks`);
+  }
+  if (usage.duration_ms) {
+    parts.push(`${(usage.duration_ms / 1000).toFixed(1)}s`);
+  }
+  if (!parts.length) return "";
+  return `<span class="msg-usage" title="${esc(JSON.stringify(usage, null, 2))}">${esc(parts.join(" · "))}</span>`;
+}
+function addMsg(kind, name, text, meta, role, ts, activity, usage) {
   // kind: "josh" | "system" | a provider id ("claude"/"gpt"/"gemini")
   // `role` is the role the seat held WHEN IT SPOKE (stamped into the stored
   // row), never its current one — otherwise re-roling in round 6 would
@@ -1451,6 +1879,7 @@ function addMsg(kind, name, text, meta, role, ts, activity) {
   const clock = ts && ts.length >= 16
     ? `<span class="mtime" title="${esc(ts.replace("T", " "))}">${esc(ts.slice(11, 16))}</span>`
     : "";
+  const costPill = formatUsage(usage);
   // what the seat DID before this reply — the stored row's capped activity
   // list, rendered as a collapsed block ABOVE the body (escaped: command
   // lines and file names are arbitrary text from the CLIs)
@@ -1462,7 +1891,7 @@ function addMsg(kind, name, text, meta, role, ts, activity) {
         `${esc(String(a.text || ""))}</div>`).join("") + `</details>`
     : "";
   d.innerHTML = `<div class="msg-head"><span class="who">${esc(name)}</span>` +
-    (meta ? `<span class="meta">${esc(meta)}</span>` : "") + clock +
+    (meta ? `<span class="meta">${esc(meta)}</span>` : "") + costPill + clock +
     `</div>` + think + `<div class="msg-body">${md(text)}</div>`;
   const cp = document.createElement("button");
   cp.className = "copy-btn"; cp.title = "Copy message text"; cp.textContent = "⧉";
@@ -1548,11 +1977,43 @@ function hideTyping(speakerId) {
   const el = typingEls.get(speakerId);
   if (el) { el.remove(); typingEls.delete(speakerId); }
 }
-function hideAllTyping() { typingEls.forEach(el => el.remove()); typingEls.clear(); }
+const seatTelemetry = new Map();
+function setSeatTelemetry(key, label, cls="thinking", reset=false) {
+  key = String(key);
+  const previous = seatTelemetry.get(key);
+  if (previous?.timer) clearInterval(previous.timer);
+  const row = {label, cls, start: reset || !previous ? Date.now() : previous.start, timer: null};
+  const tick = () => {
+    const seconds = Math.max(0, Math.floor((Date.now() - row.start) / 1000));
+    seatState(key, row.cls, `${row.label} · ${seconds}s`);
+  };
+  tick();
+  row.timer = setInterval(tick, 1000);
+  seatTelemetry.set(key, row);
+}
+function clearSeatTelemetry(key) {
+  key = String(key);
+  const row = seatTelemetry.get(key);
+  if (row?.timer) clearInterval(row.timer);
+  seatTelemetry.delete(key);
+}
+function clearAllSeatTelemetry() {
+  [...seatTelemetry.keys()].forEach(clearSeatTelemetry);
+}
+function activityState(kind) {
+  return ({command: "running command", edit: "editing", search: "searching",
+           read: "reading", reasoning: "reasoning", tool: "using tool",
+           progress: "reasoning"})[kind] || "working";
+}
+function hideAllTyping() {
+  typingEls.forEach(el => el.remove()); typingEls.clear();
+  clearAllSeatTelemetry();
+}
 function seatState(key, cls, label) {
   const seat = $("seat-" + key);
   if (!seat) return;
   seat.classList.toggle("thinking", cls === "thinking");
+  seat.classList.toggle("waiting", cls === "waiting");
   seat.querySelector(".state").textContent = label;
 }
 // Seats whose CLI session died. finish()/applyAuthToSeats() otherwise repaint
@@ -1735,6 +2196,9 @@ window.uiEvent = packet => {
   // active transcript is updated only below, after the chat-id routing gate.
   if (chatId && event === "workstreams") {
     mergePlanTasks(chatId, payload.tasks || []);
+    mergeSupervisorTasks(chatId, payload.tasks || []);
+  } else if (chatId && event === "supervisor") {
+    appendSupervisorTrace(chatId, payload.entry);
   } else if (chatId && event === "plan") {
     const run = runFor(chatId); run.plan = payload;
     if (planPhase(payload.phase) === "awaiting") setRunStatus(chatId, "waiting");
@@ -1747,7 +2211,8 @@ window.uiEvent = packet => {
     const id = payload.session.id;
     activeId = id;                 // starts are initiated from the visible draft
     sessions = [payload.session, ...sessions.filter(s => s.id !== id)];
-    setRunStatus(id, "running");
+    runFor(id, payload.session);
+    setRunStatus(id, "running", {permission: payload.session.permission || payload.permission});
   } else if (chatId && event === "thinking") {
     const run = runFor(chatId); run.thinkers.add(String(payload.speaker));
     setRunStatus(chatId, run.question ? "waiting" : "thinking");
@@ -1757,7 +2222,10 @@ window.uiEvent = packet => {
   } else if (chatId && event === "question") {
     setRunStatus(chatId, "waiting", {question: payload});
   } else if (chatId && event === "question_done") {
-    const run = runFor(chatId); run.question = null;
+    const run = runFor(chatId);
+    if (payload.speaker === undefined && run.question?.speaker !== undefined)
+      payload.speaker = run.question.speaker;
+    run.question = null;
     setRunStatus(chatId, run.thinkers.size ? "thinking" : "running");
   } else if (chatId && event === "done") {
     setRunStatus(chatId, "done", {question: null});
@@ -1786,6 +2254,10 @@ window.uiEvent = packet => {
     convProviders = (payload.participants || []).map(p => p.provider);
     renderWorkstreams(payload.tasks || []);
     if (payload.mode) $("modeSel").value = payload.mode;
+    const supRun = runFor(activeId);
+    renderSupervisorOverview(supRun?.supervisorGoal || "", supRun?.supervisorTasks || [],
+                             payload.mode || "");
+    renderSupervisorTrace(supRun?.supervisorTrace || [], payload.mode || "");
     syncModCtl();
     setSeated(true);       // roles are now APPLIED (a turn each), not just typed
     imgCache.clear(); resetEditing();      // new chat = new workspace boundary
@@ -1805,29 +2277,38 @@ window.uiEvent = packet => {
       ? `turn ${payload.turn}/${payload.ceiling}`
       : `round ${payload.round}/${payload.turns}`;
     markFatal(payload.speaker, false);   // it's alive — that's the evidence
-    seatState(payload.speaker, "thinking", "thinking…");
+    setSeatTelemetry(payload.speaker, "reasoning", "thinking", true);
     showTyping(payload.speaker, payload.provider, payload.name);
   } else if (event === "thinking_done") {
+    clearSeatTelemetry(payload.speaker);
     seatState(payload.speaker, "", seatLabel(payload.speaker));
     hideTyping(payload.speaker);
   } else if (event === "activity") {
+    setSeatTelemetry(payload.speaker, activityState(payload.kind), "thinking", false);
     typingActivity(payload.speaker, payload);
     if (payload.kind === "edit" && payload.path)
       onEditActivity(payload.path, payload.provider);
   } else if (event === "message") {
     hideTyping(payload.speaker);         // backstop; thinking_done owns it
+    clearSeatTelemetry(payload.speaker); // same backstop for the timed rail state
+    if ($("seat-" + payload.speaker))
+      seatState(payload.speaker, "", seatLabel(payload.speaker));
     if (payload.speaker === "josh") dropQueuedEcho(payload.text);
     // rows carry their true caption (e.g. "helper for Claude"); fall back to
     // the round number for payloads that predate stored metas
     addMsg(payload.provider || payload.speaker, payload.name, payload.text,
            payload.meta || (payload.round ? "round " + payload.round : "opening"),
-           payload.role, payload.ts, payload.activity);
+           payload.role, payload.ts, payload.activity, payload.usage);
     scheduleFilesRefresh();              // the turn may have written files
   } else if (event === "question") {
     const run = runFor(activeId);
     const planAsk = run?.plan && planPhase(run.plan.phase) === "awaiting" &&
       (payload.kind === "plan_approval" ||
        (run.plan.qid && run.plan.qid === payload.qid));
+    if (payload.speaker !== undefined)
+      setSeatTelemetry(payload.speaker,
+        payload.kind === "permission" ? "awaiting approval" : "waiting for answer",
+        "waiting", false);
     if (planAsk) {
       run.plan.qid = payload.qid;       // approval lives in the plan card, not a modal
       renderPlan(run.plan);
@@ -1836,6 +2317,15 @@ window.uiEvent = packet => {
     // engine-side resolution (answered elsewhere, skipped, stop) — the wait
     // is over whether or not this window answered it
     if (!payload.qid || payload.qid === askQid) clearAsk();
+    if (payload.speaker !== undefined) {
+      const run = runFor(activeId);
+      if (run?.thinkers.has(String(payload.speaker)))
+        setSeatTelemetry(payload.speaker, "reasoning", "thinking", false);
+      else {
+        clearSeatTelemetry(payload.speaker);
+        seatState(payload.speaker, "", seatLabel(payload.speaker));
+      }
+    }
   } else if (event === "role_applied") {
     roleApplied(payload);
   } else if (event === "workstreams") {
@@ -1850,6 +2340,7 @@ window.uiEvent = packet => {
   } else if (event === "agent_error") {
     addMsg("system", "relay", payload.message, "");
     if (payload.fatal) markFatal(payload.speaker, true);
+    clearSeatTelemetry(payload.speaker);
     seatState(payload.speaker, "", payload.fatal ? "session lost" : "error");
   } else if (event === "error") {
     addMsg("system", "relay", payload.message, "");
@@ -2194,7 +2685,6 @@ function setSeated(on) {
   $("modModel").disabled = seated;
   $("modEffort").disabled = seated;
   $("untilDone").disabled = seated;
-  $("planMode").disabled = seated;
   $("spawnSel").disabled = seated;
   $("teamSel").disabled = seated;
   // the project context is injected in each seat's FIRST preamble, so it is
@@ -2202,7 +2692,7 @@ function setSeated(on) {
   $("projBrief").disabled = seated;
   // permissions are baked into every seat's argv when the chat starts, so
   // flipping them mid-conversation would be a lie until the next /clear
-  $("yolo").disabled = seated;
+  $("permissionMode").disabled = seated;
   $("connectors").disabled = seated;
 }
 
@@ -2237,27 +2727,53 @@ function roleApplied(p) {
 // keeps the conversation paused and leaves a pill above the composer to
 // reopen it. Only Answer, Skip, or engine-side resolution (question_done)
 // clears the question.
-let askQid = null, askAsker = "";
+let askQid = null, askAsker = "", askIsPermission = false;
 
 function showQuestion(p) {
   askQid = p.qid; askAsker = p.asker || "A seat";
-  $("askTitle").textContent = askAsker + " asks";
+  askIsPermission = p.kind === "permission";
+  $("askModal").classList.toggle("permission-request", askIsPermission);
+  $("askTitle").textContent = askIsPermission
+    ? "Review requested action" : askAsker + " asks";
   $("askModal").style.setProperty("--seat",
     p.provider ? `var(--${p.provider})` : "var(--muted)");
   $("askPill").style.setProperty("--seat",
     p.provider ? `var(--${p.provider})` : "var(--muted)");
   $("askQ").textContent = p.question || "";
+  $("approvalReview").hidden = !askIsPermission;
+  if (askIsPermission) {
+    const risk = ["low", "medium", "high"].includes(p.risk) ? p.risk : "medium";
+    $("approvalRisk").dataset.risk = risk;
+    $("approvalRisk").textContent = risk + " risk";
+    $("approvalTool").textContent = p.tool || "tool";
+    $("approvalWhy").textContent = p.risk_reason || "This action may change state.";
+    $("approvalBlast").textContent = p.blast_radius || "Working folder";
+    $("approvalCwd").textContent = p.cwd || "not supplied";
+    $("approvalRationale").textContent = p.rationale || "No rationale supplied.";
+    $("approvalContext").textContent = p.context || "No command or diff context supplied.";
+    $("approvalContext").dataset.kind = p.context_kind || "text";
+  }
   const opts = $("askOpts");
   opts.innerHTML = "";
   (p.options || []).forEach(o => {
     const b = document.createElement("button");
     b.textContent = o;
-    b.onclick = () => answerAsk(o);
+    b.onclick = () => handleAskOption(o);
     opts.appendChild(b);
   });
   $("askOther").value = "";
+  $("askOther").placeholder = askIsPermission
+    ? "Optional denial feedback — tell the agent how to re-plan"
+    : "Other — type your own answer (Shift+Enter for a new line)";
+  $("askSkip").hidden = askIsPermission;
+  $("askSend").textContent = askIsPermission ? "Deny with feedback" : "Answer";
+  $("askHint").textContent = askIsPermission
+    ? "Enter approves the focused action. Unrecognized answers fail closed."
+    : "The conversation is paused until you answer.";
   const pill = $("askPill");
-  pill.textContent = `⏳ ${askAsker} is waiting for your answer — click to open`;
+  pill.textContent = askIsPermission
+    ? `⏳ ${askAsker} needs approval — click to review`
+    : `⏳ ${askAsker} is waiting for your answer — click to open`;
   pill.hidden = false;
   openAsk();
 }
@@ -2270,8 +2786,19 @@ function openAsk() {
 function hideAsk() { $("askModal").classList.remove("show"); }  // keep waiting
 function clearAsk() {
   askQid = null;
+  askIsPermission = false;
+  $("askModal").classList.remove("permission-request");
   hideAsk();
   $("askPill").hidden = true;
+}
+function handleAskOption(option) {
+  if (askIsPermission && option === "Deny with feedback") {
+    const feedback = $("askOther").value.trim();
+    if (!feedback) { $("askOther").focus(); return; }
+    answerAsk("Deny: " + feedback);
+    return;
+  }
+  answerAsk(option);
 }
 async function answerAsk(text) {
   if (!askQid) return;
@@ -2628,7 +3155,8 @@ $("askModal").onclick = e => { if (e.target === $("askModal")) hideAsk(); };
 $("askSkip").onclick = () => answerAsk("");
 $("askSend").onclick = () => {
   const t = $("askOther").value.trim();
-  if (t) answerAsk(t); else $("askOther").focus();
+  if (t) answerAsk(askIsPermission ? "Deny: " + t : t);
+  else $("askOther").focus();
 };
 $("askOther").addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("askSend").click(); }
@@ -2944,15 +3472,18 @@ async function sendSay() {
   document.querySelectorAll(".msg").forEach(e => e.remove());
   $("afterRow").classList.remove("show");
   transcriptPath = null;
+  const permissionMode = $("permissionMode").value;
   const cfg = {
-    opener: t, turns: rounds, yolo: $("yolo").checked,
+    opener: t, turns: rounds, permission: permissionMode,
+    // Compatibility for older app.py versions and saved config readers.
+    yolo: permissionMode === "full",
     connectors: $("connectors").checked, workspace: customFolder,
     brief: $("projBrief").checked,
     mode: $("modeSel").value,
     moderator: $("modeSel").value === "moderator" ? moderatorCfg() : null,
     supervisor: $("modeSel").value === "supervisor" ? moderatorCfg() : null,
     until_done: untilDoneOn(), ceiling: ceiling,
-    plan: {enabled: $("planMode").checked},
+    plan: {enabled: false},
     spawn: {tier1: true, max_helpers: parseInt($("spawnSel").value, 10) || 0,
             max_teams: parseInt($("teamSel").value, 10) || 0},
     seats: seats.map(cfgFor), attachments: pendingAtt,
@@ -3327,7 +3858,20 @@ $("pickFolder").onclick = async () => {
   const f = await pywebview.api.pick_folder();
   if (f) setFolder(f);
 };
-$("yolo").onchange = () => { $("yoloNote").style.display = $("yolo").checked ? "block" : "none"; };
+const PERMISSION_NOTES = {
+  read_only: "Seats can inspect, search and reason, but their write and shell tools are disabled.",
+  ask: "Claude asks at each write or command. GPT and Gemini ask once before a potentially mutating turn.",
+  auto: "Seats can work without prompts inside the selected folder; the CLI sandbox remains on.",
+  full: "Seats bypass CLI sandboxes and approval prompts. Use only for work and folders you trust.",
+};
+function syncPermissionNote() {
+  const mode = $("permissionMode").value;
+  $("permissionNote").textContent = PERMISSION_NOTES[mode] || "";
+  $("permissionNote").classList.toggle("danger", mode === "full");
+  if (!activeId) renderPermissionHud(mode, false);
+}
+$("permissionMode").onchange = syncPermissionNote;
+syncPermissionNote();
 $("connectors").onchange = () => { $("connNote").style.display = $("connectors").checked ? "block" : "none"; };
 $("openTranscript").onclick = () => pywebview.api.open_path(transcriptPath);
 $("openWorkspace").onclick = () => pywebview.api.open_path(customFolder || workspacePath);
@@ -3413,8 +3957,15 @@ function chatRow(s) {
   const stateLabel = {thinking: "An agent is thinking", running: "Conversation is running",
     waiting: "Waiting for your answer", stopping: "Stopping", stopped: "Stopped",
     done: "Completed", failed: "Run failed", error: "Run failed"}[runState];
+  const supTip = s.supervisor_status
+    ? {accepted: "The Supervisor closed this job itself",
+       unresolved: "Stopped without a Supervisor verdict",
+       working: `Supervision in progress · ${s.supervisor_status.open} task(s) open`,
+       settled: "All tasks settled; awaiting the Supervisor's next move",
+       planning: "The Supervisor has not produced a plan yet"}[s.supervisor_status.state]
+    : "";
   d.title = [s.title, stateLabel, [relTime(s.updated), who].filter(Boolean).join(" · "),
-             spawnedBy, s.can_continue_reason].filter(Boolean).join("\n");
+             spawnedBy, supTip, s.can_continue_reason].filter(Boolean).join("\n");
   const dots = (s.participants || [])
     .map(p => `<i style="background:var(--${p.provider},#6C6677)"></i>`).join("");
   d.innerHTML =
@@ -3431,6 +3982,15 @@ function chatRow(s) {
   if (runState === "waiting") {
     const q = String(run.question?.question || "").replace(/\s+/g, " ").trim();
     sub.textContent = q ? `Waiting for input · ${q}` : "Waiting for input";
+    sub.hidden = false;
+  } else if (s.supervisor_status) {
+    // derived engine-side (relay.supervisor_status) on purpose: the one
+    // distinction that matters here — the manager CLOSED this vs it merely
+    // stopped — is exactly what a UI re-deriving from raw trace rows gets
+    // wrong, and it must read the same in the rail as in the control log.
+    const st = s.supervisor_status;
+    sub.textContent = `Supervisor · ${st.label}`;
+    sub.dataset.sup = st.state;
     sub.hidden = false;
   }
   const unread = d.querySelector(".unread");
@@ -3516,9 +4076,12 @@ async function openChat(id) {
   refreshFiles();
   $("modeSel").value = s.mode || "round_robin";   // truthful for old chats too
   restoreModerator(s.mode === "supervisor" ? s.supervisor : s.moderator);
+  renderSupervisorOverview(s.goal || "", s.tasks || [], s.mode || "");
+  renderSupervisorTrace(s.supervisor_trace || [], s.mode || "");
   syncModCtl();
   $("untilDone").checked = !!s.until_done;
-  $("planMode").checked = !!(s.plan?.enabled || (s.plan && Array.isArray(s.plan.tasks)));
+  $("permissionMode").value = s.permission || (s.yolo ? "full" : "auto");
+  syncPermissionNote();
   // truthful for chats that ran before this existed, and for ones that opted
   // out: no brief record means the seats were never given project context
   $("projBrief").checked = !!s.brief;
@@ -3530,12 +4093,13 @@ async function openChat(id) {
   clearFatal();
   restoreSeats(s.participants || []);
   renderWorkstreams(s.tasks || []);
+  renderSupervisorOverview(s.goal || "", s.tasks || [], s.mode || "");
   $("feed").innerHTML = "";
   stickBottom(true);   // a chat you just opened starts at its newest message
   msgs.forEach((m, i) => {
     if (missed && i === msgs.length - missed) addNewBoundary();
     addMsg(m.provider || m.speaker, m.name, m.text,
-           m.meta || "", m.role, m.ts, m.activity);
+           m.meta || "", m.role, m.ts, m.activity, m.usage);
   });
   run.unread = 0; run.completionUnread = false;
   if (run.plan && Array.isArray(run.plan.tasks)) renderPlan(run.plan);
@@ -3614,6 +4178,8 @@ function resetStage() {
   canContinue = false; transcriptPath = null; workspacePath = null;
   convProviders = []; clearFatal();
   renderWorkstreams([]);
+  renderSupervisorOverview("", [], "");
+  renderSupervisorTrace([], "");
   hideFeedback();
   $("afterRow").classList.remove("show");
   $("openTranscript").style.display = "";

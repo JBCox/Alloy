@@ -395,6 +395,17 @@ def test_plan_workstreams_dispatches(monkey=None):
     msgs = " ".join((p.get("text") or "") for e, p in io.events
                     if e == "message")
     ok("Supervisor's plan" in msgs, "the plan is shown, not hidden")
+    traces = [p["entry"] for e, p in io.events if e == "supervisor"]
+    eq([x["phase"] for x in traces],
+       ["planning", "plan", "instruction", "instruction"],
+       "the full public control loop streams in order")
+    eq([x["type"] for x in traces],
+       ["plan_started", "plan_created", "task_assigned", "task_assigned"],
+       "consumers get stable typed events instead of parsing prose")
+    ok("Your task [eng]" in traces[2]["detail"],
+       "the exact instruction sent to a worker is visible")
+    eq(state["supervisor_trace"], traces,
+       "the visible control log is also persisted for reopening")
 
 
 def test_plan_workstreams_degrades_safely():
@@ -444,6 +455,17 @@ def test_failed_task_gets_one_bounded_replan():
     ok(any("replanned [eng]" in (p.get("text") or "")
            for e, p in io.events if e == "message"),
        "the repair is announced rather than silently replacing history")
+    phases = [p["entry"]["phase"] for e, p in io.events
+              if e == "supervisor"]
+    ok("replanning" in phases and "replanned" in phases,
+       "the repair decision is visible in the Supervisor log")
+    correction = next(p["entry"] for e, p in io.events
+                      if e == "supervisor" and
+                      p["entry"].get("type") == "course_correction")
+    eq(correction["before"]["files"], ["wrong.py"],
+       "steering retains the before-side file claim")
+    eq(correction["after"]["files"], ["engine.py"],
+       "and exposes the corrected after-side claim")
 
 
 def test_replan_failure_is_final_and_visible():
@@ -537,6 +559,358 @@ def test_supervisor_mode_registered():
     ok("supervisor" not in ("moderator",), "never an alias of moderator")
 
 
+# ------------------------------------------- the Supervisor as a manager
+# A planner decomposes once. A manager keeps reading what actually came back
+# and keeps deciding. These cover the second half.
+
+def test_plan_drained():
+    ok(not relay.plan_drained({"workstreams": []}),
+       "no plan is not a drained plan — nothing to review")
+    ok(not relay.plan_drained({"workstreams": [T("a", 0, status="active")]}),
+       "an active task keeps the manager out of the way")
+    ok(not relay.plan_drained({"workstreams": [T("a", 0, status="done"),
+                                               T("b", 1, status="pending")]}),
+       "queued work is still work")
+    ok(not relay.plan_drained({"workstreams": [T("a", 0, status="blocked")]}),
+       "blocked is waiting, not finished")
+    ok(relay.plan_drained({"workstreams": [T("a", 0, status="done"),
+                                           T("b", 1, status="failed")]}),
+       "done + failed is settled — a failure is a result to react to")
+
+
+def test_wave_report_separates_verified_from_claimed():
+    import tempfile as _tf
+    state = _sup_state(_tf.mkdtemp(prefix="alloy-wave-"))
+    shipped = T("eng", 0, "write engine.py", files=["engine.py"],
+                status="done")
+    shipped["verified"] = {"ok": True, "delivered": ["engine.py"],
+                           "missing": [], "stale": [], "extra": ["notes.md"],
+                           "unverifiable": False}
+    shipped["report"] = "Engine written and unit-tested."
+    lied = T("doc", 1, "write doc.md", files=["doc.md"], status="failed")
+    lied["verified"] = {"ok": False, "delivered": [], "missing": ["doc.md"],
+                        "stale": [], "extra": [], "unverifiable": False}
+    lied["report"] = "All done, doc.md is complete."
+    state["workstreams"] = [shipped, lied]
+    report = relay.wave_report(state)
+    ok("on disk: engine.py" in report, "verified delivery is stated as fact")
+    ok("never created: doc.md" in report,
+       "and a missing deliverable is stated just as plainly")
+    ok("also wrote: notes.md" in report, "unclaimed output is surfaced too")
+    ok("worker reported: All done" in report,
+       "the worker's own words are present")
+    ok(report.index("verified:") < report.index("worker reported: All done"),
+       "but the filesystem verdict is read BEFORE the claim, never after")
+    ok("DONE" in report and "FAILED" in report, "status is explicit")
+
+
+def test_supervisor_verdict_parser():
+    body, tasks, done = relay.parse_supervisor_verdict(
+        "Everything shipped.\n[[DONE: goal met]]")
+    eq(done, "goal met", "a closing verdict is read")
+    eq(tasks, [], "and carries no work with it")
+    eq(body, "Everything shipped.", "the rationale survives as prose")
+    _b, tasks, done = relay.parse_supervisor_verdict(
+        "Round two.\n[[TASK: a | owner=0 | first]]\n"
+        "[[TASK: b | owner=1 | second]]", slot_ids=[0, 1])
+    eq(done, None, "no verdict means the job continues")
+    eq([t["id"] for t in tasks], ["a", "b"], "written order is preserved")
+    _b, tasks, done = relay.parse_supervisor_verdict(
+        "Nothing to add.", slot_ids=[0])
+    ok(done is None and tasks == [],
+       "prose alone is neither a verdict nor a plan")
+    ok("DONE" not in relay.KNOWN_DIRECTIVES,
+       "DONE stays opted-in: an ordinary seat playing it must look unknown, "
+       "not quietly acquire authority to close the conversation")
+
+
+def test_review_issues_the_next_wave():
+    import tempfile as _tf
+    state = _sup_state(_tf.mkdtemp(prefix="alloy-wave2-"))
+    state["supervisor_goal"] = "ship the tool"
+    done = T("eng", 0, "write engine.py", files=["engine.py"], status="done")
+    done["verified"] = {"ok": True, "delivered": ["engine.py"], "missing": [],
+                        "stale": [], "extra": [], "unverifiable": False}
+    state["workstreams"] = [done]
+    real = relay.build_supervisor
+    relay.build_supervisor = lambda st: _StubPlanner(
+        "The engine landed; it still has no tests or docs.\n"
+        "[[TASK: tests | owner=0 | files=test_engine.py | cover the engine]]\n"
+        "[[TASK: readme | owner=1 | research how rivals document this]]")
+    try:
+        io = RecordingIO()
+        eq(relay.supervise_next_wave(state, io), "assigned",
+           "a drained plan does not end the job — it triggers the next call")
+    finally:
+        relay.build_supervisor = real
+    eq([t["id"] for t in state["workstreams"]], ["eng", "tests", "readme"],
+       "the new wave is appended; delivered work is not re-litigated")
+    eq([t["status"] for t in state["workstreams"][1:]], ["active", "active"],
+       "and both new tasks start at once")
+    ok("Your task [tests]" in state["pending"][0][0],
+       "the worker gets its brief through the ordinary queue")
+    eq(state["supervisor_waves"], 1, "the wave is counted so it stays bounded")
+    types = [p["entry"]["type"] for e, p in io.events if e == "supervisor"]
+    ok("work_reviewed" in types,
+       "the review itself is a visible control action, not a hidden call")
+    ok(types.index("work_reviewed") < types.index("plan_created"),
+       "and it is logged BEFORE the decision it produced")
+    eq(types.count("task_assigned"), 2, "each assignment is its own event")
+    review = next(p["entry"] for e, p in io.events
+                  if e == "supervisor" and p["entry"]["type"] == "work_reviewed")
+    ok("engine.py" in review["detail"],
+       "the log shows what the manager was actually looking at")
+    wave = next(p["entry"] for e, p in io.events
+                if e == "supervisor" and p["entry"]["type"] == "plan_created")
+    ok("no tests or docs" in wave["detail"],
+       "and its stated reasoning for the new wave")
+    msgs = " ".join((p.get("text") or "") for e, p in io.events
+                    if e == "message")
+    ok("Supervisor's next wave" in msgs,
+       "the seats and Josh see the new plan in the transcript too")
+
+
+def test_review_can_call_the_job_done():
+    import tempfile as _tf
+    state = _sup_state(_tf.mkdtemp(prefix="alloy-wavedone-"))
+    state["supervisor_goal"] = "ship the tool"
+    state["workstreams"] = [T("eng", 0, status="done")]
+    real = relay.build_supervisor
+    relay.build_supervisor = lambda st: _StubPlanner(
+        "Engine, tests and docs are all on disk.\n[[DONE: shipped]]")
+    try:
+        io = RecordingIO()
+        eq(relay.supervise_next_wave(state, io), "done",
+           "the manager, not the round cap, ends a finished job")
+    finally:
+        relay.build_supervisor = real
+    eq(len(state["workstreams"]), 1, "closing invents no extra work")
+    entry = next(p["entry"] for e, p in io.events
+                 if e == "supervisor" and p["entry"]["type"] == "goal_accepted")
+    ok("all on disk" in entry["detail"], "the verdict's reasoning is kept")
+    ok(any("Supervisor closed the job: shipped" in (p.get("text") or "")
+           for e, p in io.events if e == "message"),
+       "and the closing verdict is a real transcript row")
+
+
+def test_review_will_not_reuse_a_task_id():
+    import tempfile as _tf
+    state = _sup_state(_tf.mkdtemp(prefix="alloy-waveclash-"))
+    state["supervisor_goal"] = "ship the tool"
+    old = T("eng", 0, "the original engine work", files=["engine.py"],
+            status="done")
+    state["workstreams"] = [old]
+    real = relay.build_supervisor
+    relay.build_supervisor = lambda st: _StubPlanner(
+        "More engine work.\n"
+        "[[TASK: eng | owner=0 | files=engine2.py | redo it]]\n"
+        "[[TASK: docs | owner=1 | write the docs]]")
+    try:
+        io = RecordingIO()
+        eq(relay.supervise_next_wave(state, io), "assigned",
+           "the usable half of the wave still runs")
+    finally:
+        relay.build_supervisor = real
+    eq([t["id"] for t in state["workstreams"]], ["eng", "docs"],
+       "the duplicate is dropped rather than shadowing settled history")
+    eq(state["workstreams"][0]["brief"], "the original engine work",
+       "the completed task is left exactly as it was recorded")
+    ok(any("reused task id" in (p.get("text") or "")
+           for e, p in io.events if e == "message"),
+       "and the drop is announced, never silent")
+
+
+def test_review_degrades_safely():
+    import tempfile as _tf
+    state = _sup_state(_tf.mkdtemp(prefix="alloy-wavebad-"))
+    state["supervisor_goal"] = "ship the tool"
+    state["workstreams"] = [T("eng", 0, status="done")]
+    real = relay.build_supervisor
+    try:
+        relay.build_supervisor = lambda st: _StubPlanner(boom=RuntimeError("no"))
+        io = RecordingIO()
+        eq(relay.supervise_next_wave(state, io), "idle",
+           "a dead side call never kills the conversation")
+        relay.build_supervisor = lambda st: _StubPlanner("I think we continue.")
+        eq(relay.supervise_next_wave(state, io), "idle",
+           "prose with no verdict and no tasks invents neither")
+    finally:
+        relay.build_supervisor = real
+    eq(len(state["workstreams"]), 1, "and the plan is untouched either way")
+    ok(all(p["entry"]["type"] == "supervisor_error"
+           for e, p in io.events if e == "supervisor"
+           and p["entry"]["phase"] == "error"),
+       "each failure is logged as a failure")
+
+
+def test_review_budget_is_bounded():
+    import tempfile as _tf
+    state = _sup_state(_tf.mkdtemp(prefix="alloy-wavecap-"))
+    state["supervisor_goal"] = "ship the tool"
+    state["workstreams"] = [T("eng", 0, status="done")]
+    state["supervisor_waves"] = relay.SUPERVISOR_MAX_WAVES
+    real = relay.build_supervisor
+    relay.build_supervisor = lambda st: _StubPlanner(
+        "[[TASK: more | owner=0 | keep going forever]]")
+    try:
+        io = RecordingIO()
+        eq(relay.supervise_next_wave(state, io), "idle",
+           "a manager that never says done cannot spend the account forever")
+        eq(relay.supervise_next_wave(state, io), "idle", "and stays stopped")
+    finally:
+        relay.build_supervisor = real
+    eq(len(state["workstreams"]), 1, "no work is issued past the budget")
+    notes = [p.get("text") or "" for e, p in io.events if e == "message"]
+    eq(len([n for n in notes if "review waves" in n]), 1,
+       "the budget is announced once, not every barrier")
+
+
+def test_review_only_runs_in_supervisor_mode():
+    import tempfile as _tf
+    state = _sup_state(_tf.mkdtemp(prefix="alloy-wavemode-"))
+    state["mode"] = "parallel"
+    state["supervisor_goal"] = "ship the tool"
+    state["workstreams"] = [T("eng", 0, status="done")]
+    real = relay.build_supervisor
+
+    def _boom(st):
+        raise AssertionError("no side call may happen outside supervisor mode")
+
+    relay.build_supervisor = _boom
+    try:
+        eq(relay.supervise_next_wave(state, RecordingIO()), "idle",
+           "an ordinary parallel chat is byte-for-byte unaffected")
+    finally:
+        relay.build_supervisor = real
+
+
+def test_worker_report_survives_settlement():
+    import tempfile as _tf
+    tmp = _tf.mkdtemp(prefix="alloy-wavereport-")
+    state = build_state(tmp, [["done"]], turns=1, labels=["Cee"])
+    state["providers"] = ["claude"]
+    state["mode"] = "supervisor"
+    state["workstreams"] = [T("look", 0, "research the API", status="active")]
+    relay.settle_workstream(state, 0, RecordingIO(),
+                            reply="x" * (relay.WORKSTREAM_REPORT_MAX + 500))
+    task = state["workstreams"][0]
+    eq(task["status"], "done",
+       "a task claiming no files settles as unverifiable-but-done")
+    eq(len(task["report"]), relay.WORKSTREAM_REPORT_MAX,
+       "the report is kept but bounded — the whole prompt is one argv element")
+
+
+def test_parallel_barrier_runs_the_manager():
+    """The whole point, driven through the real loop: work settles, the
+    manager reviews it, issues a second wave, and closes the job itself
+    instead of letting the round cap decide."""
+    import tempfile as _tf
+    tmp = _tf.mkdtemp(prefix="alloy-waveloop-")
+    state = build_state(tmp, [["engine reviewed", "tests reviewed"]], turns=6,
+                        labels=["Cee"])
+    state["providers"] = ["claude"]
+    state["mode"] = "supervisor"
+    state["supervisor_goal"] = "ship the tool"
+    state["workstreams"] = [T("eng", 0, "audit the engine")]
+    io = RecordingIO()
+    relay.assign_workstreams(state, io)
+    seen = []
+
+    class _Rolling:
+        """Two review waves, then a verdict. Any third call is a bug."""
+
+        def turn(self, message, on_activity=None):
+            seen.append(message)
+            if len(seen) == 1:
+                return ("The audit landed; nothing covers it yet." + chr(10)
+                        + "[[TASK: tests | owner=0 | write the coverage plan]]")
+            return "Both pieces are in." + chr(10) + "[[DONE: shipped]]"
+
+    real = relay.build_supervisor
+    relay.build_supervisor = lambda st: _Rolling()
+    try:
+        eq(relay.run_rounds(state, io), "wrapped",
+           "the run ends on the manager's verdict")
+    finally:
+        relay.build_supervisor = real
+    eq([t["id"] for t in state["workstreams"]], ["eng", "tests"],
+       "the manager kept the job moving after its first plan drained")
+    eq([t["status"] for t in state["workstreams"]], ["done", "done"],
+       "and every wave settled through the ordinary verification path")
+    eq(len(seen), 2, "one side call per barrier — never one per round")
+    ok("audit the engine" in seen[0] and "worker reported" in seen[0],
+       "the manager reviews the real record, not a summary of a summary")
+    ok("tests" in seen[1],
+       "and the second review sees the work its own first wave produced")
+    eq(state["supervisor_waves"], 2, "both waves are on the record")
+    ok(any(e == "status" and "Supervisor called the job done" in p.get("text", "")
+           for e, p in io.events),
+       "the run ends because the manager said so, not because rounds ran out")
+    ok(state["rnd"] < state["max"],
+       "which means it stopped early instead of padding to the cap")
+    types = [p["entry"]["type"] for e, p in io.events if e == "supervisor"]
+    eq(types.count("work_reviewed"), 2, "each review is a visible event")
+    eq(types[-1], "goal_accepted", "and the last thing it does is close out")
+
+
+def test_trace_entries_carry_their_wave():
+    import tempfile as _tf
+    state = _sup_state(_tf.mkdtemp(prefix="alloy-waveidx-"))
+    state["supervisor_goal"] = "ship the tool"
+    state["workstreams"] = [T("eng", 0, status="done")]
+    real = relay.build_supervisor
+    relay.build_supervisor = lambda st: _StubPlanner(
+        "Next.\n[[TASK: docs | owner=1 | write the docs]]")
+    try:
+        io = RecordingIO()
+        relay.supervise_next_wave(state, io)
+    finally:
+        relay.build_supervisor = real
+    entries = [p["entry"] for e, p in io.events if e == "supervisor"]
+    by_type = {x["type"]: x["wave"] for x in entries}
+    eq(by_type["work_reviewed"], 1,
+       "the review closes the wave it is reviewing, not the next one")
+    eq(by_type["plan_created"], 2, "the wave it dispatches is the next one")
+    eq(by_type["task_assigned"], 2, "and its assignments belong there too")
+    eq(state["supervisor_wave_index"], 2, "the index is persisted state")
+    ok(all(isinstance(x.get("wave"), int) for x in entries),
+       "every control action says which wave it belongs to — the UI must not "
+       "have to infer it from a trace that is capped and can truncate")
+
+
+def test_exhausted_waves_is_not_an_error():
+    import tempfile as _tf
+    state = _sup_state(_tf.mkdtemp(prefix="alloy-wavespent-"))
+    state["supervisor_goal"] = "ship the tool"
+    state["workstreams"] = [T("eng", 0, status="done")]
+    state["supervisor_waves"] = relay.SUPERVISOR_MAX_WAVES
+    io = RecordingIO()
+    relay.supervise_next_wave(state, io)
+    entry = next(p["entry"] for e, p in io.events if e == "supervisor")
+    eq(entry["type"], "goal_unresolved",
+       "running out of waves is a different ENDING, not a malfunction")
+
+
+def test_cap_without_a_verdict_says_so():
+    import tempfile as _tf
+    state = _sup_state(_tf.mkdtemp(prefix="alloy-wavecapend-"))
+    state["supervisor_trace"] = [{"id": "x", "type": "plan_created"}]
+    state["workstreams"] = [T("eng", 0, status="active")]
+    io = RecordingIO()
+    entry = relay.note_unfinished_supervision(state, io, "cap")
+    eq(entry["type"], "goal_unresolved",
+       "a supervised run that merely ran out of turns must not read as done")
+    ok("eng" in entry["detail"], "and names what was still open")
+    ok(relay.note_unfinished_supervision(state, io, "cap") is None,
+       "it is stated once, not on every continuation")
+    state2 = _sup_state(_tf.mkdtemp(prefix="alloy-wavecapend2-"))
+    state2["supervisor_trace"] = [{"id": "y", "type": "goal_accepted"}]
+    ok(relay.note_unfinished_supervision(state2, io, "cap") is None,
+       "a run the manager DID close is never relabelled unfinished")
+    ok(relay.note_unfinished_supervision(state, io, "wrapped") is None,
+       "and a wrap is not an unfinished ending either")
+
+
 def main():
     for fn in (test_fanout_default_is_broadcast, test_fanout_isolates_active_seats,
                test_serialize_conflicts, test_task_directive_parser,
@@ -554,7 +928,21 @@ def main():
                test_replan_failure_is_final_and_visible,
                test_parallel_barrier_triggers_replan,
                test_playbook_feeds_the_planner,
-               test_supervisor_mode_registered):
+               test_supervisor_mode_registered,
+               test_plan_drained,
+               test_wave_report_separates_verified_from_claimed,
+               test_supervisor_verdict_parser,
+               test_review_issues_the_next_wave,
+               test_review_can_call_the_job_done,
+               test_review_will_not_reuse_a_task_id,
+               test_review_degrades_safely,
+               test_review_budget_is_bounded,
+               test_review_only_runs_in_supervisor_mode,
+               test_worker_report_survives_settlement,
+               test_parallel_barrier_runs_the_manager,
+               test_trace_entries_carry_their_wave,
+               test_exhausted_waves_is_not_an_error,
+               test_cap_without_a_verdict_says_so):
         print("--", fn.__name__)
         fn()
     print("\n%d passed, %d failed" % (PASS, FAIL))
