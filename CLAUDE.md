@@ -253,7 +253,17 @@ modal: edits there are free before a chat starts; once seated, only the modal's
   `/help` exists in the CLI, the opener nudge is `rnd == 1`-guarded, and the
   failed-twice/empty-reply skip paths save state in the app too (they didn't).
   `run_rounds(state, LoopIO())` with scripted fake agents = token-free loop
-  tests — see `tests/` (191 tests, all suites runnable as plain scripts).
+  tests — see `tests/` (449 tests across 26 suites, all runnable as plain scripts).
+- **Cost and token telemetry (truth over estimation).** `ClaudeAgent` and `CodexAgent`
+  stream parsers extract `total_cost_usd`, input/output/cached tokens, and duration
+  per turn (`last_usage`), resetting at the start of `Agent.turn`. On failed CLI error
+  returns, usage is extracted from the result object before returning `""`, counting spend
+  while preserving the never-forge rule. A central accumulator `record_usage(state, usage, seat_key=None, kind=...)`
+  rolls spend into `state["usage"]` with additive totals, `by_seat`, and `by_kind` (`seat`,
+  `supervisor`, `moderator`, `helper`, `team`, `brief`, `retry`, `failed`), persisted atomically
+  in `meta.json` and aggregated into `outcome.py` `hard_facts["usage"]`. Seats that report
+  nothing (Gemini CLI) remain honestly blank — never inferred or estimated. The UI renders
+  `.msg-usage` pills per turn from the stored row across both live streaming and session replay.
 - **Each CLI reads only its OWN project doc, so context must ride the
   preamble.** Every seat runs with `cwd = workspace`, and there each CLI
   auto-loads a different file: claude → `CLAUDE.md`, codex → `AGENTS.md`
