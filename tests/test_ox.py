@@ -356,6 +356,79 @@ class CatalogAndUiTests(unittest.TestCase):
                          relay.OpenCodeAgent(self.tmp).build_cmd("hello"))
 
 
+class ShimResolutionTests(unittest.TestCase):
+    """A prompt must reach the CLI whole.
+
+    opencode installs a .cmd shim that launches a NATIVE binary, a shape
+    resolve_cmd did not recognise, so it fell back to `cmd /c` - which
+    truncates every argument at the first newline. It shipped that way: four Ox
+    seats held a conversation in which every relayed message arrived as
+    "Ox Alpha 4 said:" and nothing else, and they spent their turns politely
+    telling each other the messages were empty (2026-08-22).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="alloy-shim-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _shim(self, name, body, target=None):
+        shim = os.path.join(self.tmp, name)
+        with open(shim, "w", encoding="utf-8") as f:
+            f.write(body)
+        if target:
+            full = os.path.join(self.tmp, target)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w", encoding="utf-8") as f:
+                f.write("binary")
+        return shim
+
+    def test_a_native_binary_shim_resolves_to_the_binary(self):
+        shim = self._shim(
+            "tool.cmd",
+            '@ECHO off\r\n"%dp0%\\node_modules\\pkg\\bin\\tool.exe"   %*\r\n',
+            target=os.path.join("node_modules", "pkg", "bin", "tool.exe"))
+        with mock.patch.object(relay.shutil, "which", return_value=shim):
+            cmd = relay.resolve_cmd(["tool", "run", "line one\nline two"])
+        self.assertTrue(cmd[0].lower().endswith("tool.exe"), cmd[0])
+        # cmd.exe must NEVER see it: that is the whole point
+        self.assertNotEqual(cmd[0].lower(), "cmd")
+        self.assertNotIn("/c", cmd)
+        # and the multi-line argument survives as ONE argv element
+        self.assertIn("line one\nline two", cmd)
+
+    def test_a_node_script_shim_still_resolves_to_node(self):
+        shim = self._shim(
+            "js.cmd", '@ECHO off\r\n"%dp0%\\node_modules\\p\\cli.js"   %*\r\n',
+            target=os.path.join("node_modules", "p", "cli.js"))
+        with mock.patch.object(relay.shutil, "which",
+                               side_effect=lambda n: shim if n == "js" else "node"):
+            cmd = relay.resolve_cmd(["js", "go"])
+        self.assertTrue(cmd[0].endswith("node"), cmd[0])
+        self.assertTrue(cmd[1].endswith("cli.js"), cmd[1])
+
+    def test_an_unrecognised_shim_still_falls_back(self):
+        # single-line args only, but better than refusing to run at all
+        shim = self._shim("weird.cmd", "@ECHO off\r\nsomething else %*\r\n")
+        with mock.patch.object(relay.shutil, "which", return_value=shim):
+            cmd = relay.resolve_cmd(["weird", "go"])
+        self.assertEqual(cmd[:2], ["cmd", "/c"])
+
+    def test_a_shim_naming_a_missing_binary_does_not_pretend(self):
+        shim = self._shim("gone.cmd",
+                          '@ECHO off\r\n"%dp0%\\bin\\gone.exe"   %*\r\n')
+        with mock.patch.object(relay.shutil, "which", return_value=shim):
+            cmd = relay.resolve_cmd(["gone", "go"])
+        self.assertEqual(cmd[:2], ["cmd", "/c"])
+
+    def test_the_real_opencode_shim_never_routes_through_cmd(self):
+        if not relay.shutil.which("opencode"):
+            self.skipTest("opencode CLI not installed")
+        cmd = relay.resolve_cmd(["opencode", "run"])
+        self.assertNotEqual(cmd[0].lower(), "cmd", cmd)
+
+
 class SeatNamingTests(unittest.TestCase):
     """A gateway is not an identity: the seat is named for its model."""
 

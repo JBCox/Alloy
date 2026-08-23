@@ -371,10 +371,24 @@ def resolve_cmd(cmd):
     cmd[0] = exe
     if exe.lower().endswith((".cmd", ".bat")):
         with open(exe, "r", encoding="utf-8", errors="replace") as f:
-            m = re.search(r'"%dp0%\\([^"]+\.js)"', f.read())
+            shim = f.read()
+        m = re.search(r'"%dp0%\\([^"]+\.js)"', shim)
+        native = re.search(r'"%dp0%\\([^"]+\.exe)"', shim, re.I)
+        native_path = (os.path.join(os.path.dirname(exe), native.group(1))
+                       if native else "")
         if m:
             script = os.path.join(os.path.dirname(exe), m.group(1))
             cmd = [shutil.which("node") or "node", script] + cmd[1:]
+        elif native_path and os.path.exists(native_path):
+            # A shim that launches a NATIVE binary (opencode ships
+            # node_modules/opencode-ai/bin/opencode.exe). Same reason as the
+            # .js branch: routed through cmd.exe, every multi-line argument is
+            # silently truncated at the first newline. Not a theoretical risk
+            # — it shipped. Four Ox seats held a whole conversation receiving
+            # "Ox Alpha 4 said:" with the body cut off, politely telling each
+            # other their messages had arrived empty (2026-08-22). Run the
+            # binary directly so cmd.exe never sees the prompt.
+            cmd = [native_path] + cmd[1:]
         else:  # unknown shim shape; cmd /c works only for single-line args
             cmd = ["cmd", "/c"] + cmd
     return cmd
