@@ -463,6 +463,75 @@
     font-size: 12.5px; cursor: pointer; }
   #modToggleRow i { display: block; margin: 2px 0 0 22px; font-style: normal;
     font-size: 11px; color: var(--muted); }
+  /* ---------- open-tab strip ---------- */
+  #tabStrip {
+    display: flex; align-items: stretch; gap: 4px; padding: 6px 14px 0;
+    border-bottom: 1px solid var(--line); overflow-x: auto;
+    scrollbar-width: thin; flex: 0 0 auto; width: 100%;
+    background: #1C1922;   /* continues the header, ends at the content */
+  }
+  #tabStrip[hidden] { display: none; }
+  #tabList { display: flex; align-items: stretch; gap: 4px; }
+  .tab {
+    display: flex; align-items: center; gap: 7px; max-width: 220px;
+    padding: 7px 8px 7px 10px; border: 1px solid var(--line);
+    border-bottom: none; border-radius: 8px 8px 0 0;
+    background: var(--surface); color: var(--muted);
+    font-size: 12.5px; cursor: pointer; white-space: nowrap;
+    position: relative; top: 1px;
+  }
+  .tab:hover { background: var(--surface2); }
+  .tab.active {
+    background: var(--bg); color: var(--text);
+    border-color: var(--line); border-bottom: 1px solid var(--bg);
+  }
+  /* the colour IS the identity — a fat left edge reads at a glance in a row
+     of similar titles, which is the whole point of colouring a tab */
+  .tab::before {
+    content: ""; width: 3px; align-self: stretch; border-radius: 2px;
+    background: var(--tab, transparent); flex: 0 0 auto;
+  }
+  .tab .tab-title {
+    overflow: hidden; text-overflow: ellipsis; max-width: 150px;
+  }
+  .tab .tab-title[contenteditable="true"] {
+    outline: 1px solid var(--alloy); border-radius: 3px; padding: 0 2px;
+    cursor: text;
+  }
+  .tab .tab-dot {
+    width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
+    background: var(--alloy);
+  }
+  .tab .tab-dot[data-state="idle"] { display: none; }
+  .tab .tab-dot[data-state="live"] { animation: tabpulse 1.4s infinite; }
+  .tab .tab-dot[data-state="waiting"] { background: var(--danger); }
+  @keyframes tabpulse { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
+  .tab .tab-unread {
+    background: var(--alloy); color: #17151C; border-radius: 9px;
+    padding: 0 5px; font-size: 10.5px; font-weight: 700;
+  }
+  .tab .tab-x {
+    border: 0; background: transparent; color: var(--muted);
+    cursor: pointer; font-size: 12px; line-height: 1; padding: 2px 3px;
+    border-radius: 4px;
+  }
+  .tab .tab-x:hover { background: rgba(255,255,255,.12); color: var(--text); }
+  #tabNew {
+    border: 1px solid var(--line); border-bottom: none;
+    border-radius: 8px 8px 0 0; background: transparent; color: var(--muted);
+    cursor: pointer; padding: 0 11px; font-size: 15px; flex: 0 0 auto;
+  }
+  #tabNew:hover { background: var(--surface2); color: var(--text); }
+  #tabMenu {
+    position: fixed; z-index: 60; background: var(--surface2);
+    border: 1px solid var(--line); border-radius: 10px; padding: 8px;
+    display: none; gap: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.45);
+  }
+  #tabMenu.show { display: flex; }
+  #tabMenu button {
+    width: 20px; height: 20px; border-radius: 50%; cursor: pointer;
+    border: 1px solid rgba(255,255,255,.25); padding: 0;
+  }
   #addSeatRow { display: flex; gap: 6px; margin-bottom: 10px; }
   #addSeatRow select {
     flex: 1; background: var(--surface2); color: var(--text);
@@ -1175,6 +1244,12 @@
   <button id="stopBtn" class="display" hidden>Stop</button>
 </header>
 
+<div id="tabStrip" hidden role="tablist" aria-label="Open conversations">
+  <div id="tabList"></div>
+  <button id="tabNew" title="Start another conversation (Ctrl+T)">＋</button>
+</div>
+<div id="tabMenu" role="menu" aria-label="Tab colour"></div>
+
 <main>
   <nav id="chatRail">
     <div class="rail-reopen" title="Show chat history">»</div>
@@ -1669,9 +1744,9 @@ function supervisorEventRow(entry, live) {
     const change = document.createElement("div"); change.className = "sup-change";
     const before = document.createElement("div"); before.className = "sup-before";
     const after = document.createElement("div"); after.className = "sup-after";
-    const fmt = x => x ? `${x.brief || ""}${x.files?.length ? `\nfiles: ${x.files.join(", ")}` : ""}` : "";
-    before.textContent = "Before\n" + fmt(entry.before);
-    after.textContent = "After\n" + fmt(entry.after);
+    const fmt = x => x ? `${x.brief || ""}${x.files?.length ? `\r\nfiles: ${x.files.join(", ")}` : ""}` : "";
+    before.textContent = "Before\r\n" + fmt(entry.before);
+    after.textContent = "After\r\n" + fmt(entry.after);
     change.append(before, after); body.appendChild(change);
   }
   row.append(phase, body);
@@ -1872,14 +1947,14 @@ function md(s) {
   const blocks = esc(body).split(/```/);
   let out = "";
   blocks.forEach((b, i) => {
-    if (i % 2) { out += "<pre><code>" + b.replace(/^\w*\n/, "") + "</code></pre>"; return; }
-    b.split(/\n{2,}/).forEach(p => {
+    if (i % 2) { out += "<pre><code>" + b.replace(/^\w*\r\n/, "") + "</code></pre>"; return; }
+    b.split(/\r\n{2,}/).forEach(p => {
       if (!p.trim()) return;
       p = p.replace(/`([^`]+)`/g, "<code>$1</code>")
-           .replace(/==([^=\n]+)==/g, "<mark>$1</mark>")
+           .replace(/==([^=\r\n]+)==/g, "<mark>$1</mark>")
            .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
            .replace(/\*([^*]+)\*/g, "<i>$1</i>")
-           .replace(/\n/g, "<br>");
+           .replace(/\r\n/g, "<br>");
       out += "<p>" + p + "</p>";
     });
   });
@@ -1910,8 +1985,8 @@ function findImageRefs(text) {
     seen.add(p.toLowerCase()); seenBase.add(base);
     refs.push({path: p, strict: strict});
   };
-  for (const m of text.matchAll(/!\[[^\]]*\]\(([^)\n]+)\)/g)) push(m[1], true);
-  for (const m of text.matchAll(/\[Josh attached a file:\s*([^\]\n]+)\]/g))
+  for (const m of text.matchAll(/!\[[^\]]*\]\(([^)\r\n]+)\)/g)) push(m[1], true);
+  for (const m of text.matchAll(/\[Josh attached a file:\s*([^\]\r\n]+)\]/g))
     push(m[1], true);
   // A path with separators. The drive letter must consume its OWN slash:
   // "C:\Users\x.png" previously matched from "Users" (the optional [A-Za-z]:
@@ -2445,6 +2520,7 @@ window.uiEvent = packet => {
   } else if (event === "started" && payload.session?.id) {
     const id = payload.session.id;
     activeId = id;                 // starts are initiated from the visible draft
+    openTab(id);                   // a started conversation earns its tab
     sessions = [payload.session, ...sessions.filter(s => s.id !== id)];
     runFor(id, payload.session);
     setRunStatus(id, "running", {permission: payload.session.permission || payload.permission});
@@ -2681,6 +2757,14 @@ $("feedbackSave").onclick = () => saveFeedback("not_helpful");
 const PROVIDER_NAMES = { claude: "Claude", gpt: "GPT", gemini: "Gemini",
                          ox: "OpenCode" };
 let seats = [], nextSeatId = 0, uiCfg = null;
+// Open tabs: [{id, color}]. Declared up here with the rest of the top-level
+// state on purpose — anything the boot path reads must be initialised before
+// it runs, or the whole one-big-script UI dies on a TDZ ReferenceError.
+let tabs = [];
+const TAB_COLOR_HEX = {
+  slate: "#8D8798", amber: "#F4B942", rose: "#E0607E", violet: "#A78BFA",
+  teal: "#2DD4BF", green: "#4ADE80", blue: "#60A5FA", orange: "#FB923C",
+};
 
 const PRESET_RECIPES = Object.freeze({
   open_discussion: {mode: "round_robin", concurrency: "sequential", floor: "cyclic",
@@ -3804,7 +3888,7 @@ function addServerForm(p) {
     cmd.placeholder = stdio ? "command to run (e.g. npx)" : "https://…/mcp";
     args.hidden = !stdio; env.hidden = !stdio; warn.hidden = !stdio;
     preview.textContent = stdio && cmd.value
-      ? [cmd.value].concat(args.value.split("\n").filter(Boolean)).join(" ")
+      ? [cmd.value].concat(args.value.split("\r\n").filter(Boolean)).join(" ")
       : "";
     // reset the arm whenever what would run changes
     delete add.dataset.arm; add.textContent = "Add server";
@@ -3826,14 +3910,14 @@ function addServerForm(p) {
       return;
     }
     const envMap = {};
-    env.value.split("\n").forEach(l => {
+    env.value.split("\r\n").forEach(l => {
       const i = l.indexOf("=");
       if (i > 0) envMap[l.slice(0, i).trim()] = l.slice(i + 1).trim();
     });
     add.disabled = true;
     const r = await pywebview.api.add_mcp(
       p.id, name.value.trim(), stdio ? cmd.value.trim() : null,
-      args.value.split("\n").map(s => s.trim()).filter(Boolean),
+      args.value.split("\r\n").map(s => s.trim()).filter(Boolean),
       envMap, tr.value, stdio ? null : cmd.value.trim());
     add.disabled = false;
     delete add.dataset.arm; add.textContent = "Add server";
@@ -3870,6 +3954,17 @@ document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
     closeAccounts(); closeRole(); hideAsk(); closeLightbox(); closeSkills();
     if (micOn) micStop(true);          // a live mic is the one thing Escape must kill
+  }
+  if (e.key === "Tab" && e.ctrlKey) {
+    e.preventDefault(); cycleTab(e.shiftKey ? -1 : 1); return;
+  }
+  if (e.ctrlKey && !e.altKey && !e.shiftKey && /^[1-9]$/.test(e.key)) {
+    const t = tabs[Number(e.key) - 1];
+    if (t) { e.preventDefault(); if (t.id !== activeId) openChat(t.id); }
+    return;
+  }
+  if (e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === "t" || e.key === "T")) {
+    e.preventDefault(); newChat(); return;
   }
   // Hands-free dictation: a pure toggle, so it works while typing mid-sentence.
   if (e.code === "Space" && e.ctrlKey && e.shiftKey && !e.altKey) {
@@ -4551,7 +4646,7 @@ async function fetchCode(absFallback) {
   // highlight the first one just drew (the change would flash and vanish).
   if (r.text === codeText) return;
   codeText = r.text;
-  const lines = r.text.split("\n");
+  const lines = r.text.split("\r\n");
   // cheap change detection: common prefix + suffix vs the last snapshot;
   // the middle band is "what just changed"
   let lo = 0, hi = 0;
@@ -4729,6 +4824,7 @@ try { closedGroups = JSON.parse(localStorage.getItem("closedChatGroups") || "{}"
 catch (e) { closedGroups = {}; }
 
 function renderChats() {
+  renderTabs();   // titles, unread counts and live dots live in the same data
   const list = $("chatList");
   list.innerHTML = "";
   if (!sessions.length) {
@@ -4792,7 +4888,7 @@ function chatRow(s) {
        planning: "The Supervisor has not produced a plan yet"}[s.supervisor_status.state]
     : "";
   d.title = [s.title, stateLabel, [relTime(s.updated), who].filter(Boolean).join(" · "),
-             spawnedBy, supTip, s.can_continue_reason].filter(Boolean).join("\n");
+             spawnedBy, supTip, s.can_continue_reason].filter(Boolean).join("\r\n");
   const dots = (s.participants || [])
     .map(p => `<i style="background:var(--${p.provider},#6C6677)"></i>`).join("");
   d.innerHTML =
@@ -4882,6 +4978,162 @@ async function deleteChat(s) {
   await refreshChats();
 }
 
+/* ---------- open-tab strip ---------- */
+// The Chats rail is HISTORY — everything you have ever run, grouped by
+// project. Tabs are the working set: the handful you are flipping between
+// right now. Closing a tab closes nothing; the chat stays in the rail, and
+// (this is the part that makes tabs worth having) a conversation you tab away
+// from keeps running, because runs were already multiplexed by chat id.
+function tabFor(id) { return tabs.find(t => t.id === id) || null; }
+
+function openTab(id, {activate = true} = {}) {
+  if (!id) return;
+  if (!tabFor(id)) tabs.push({id, color: ""});
+  renderTabs();
+  if (activate) persistTabs();
+}
+
+function closeTab(id) {
+  const i = tabs.findIndex(t => t.id === id);
+  if (i < 0) return;
+  tabs.splice(i, 1);
+  renderTabs();
+  persistTabs();
+  // Closing the tab you are LOOKING at has to land somewhere: the neighbour,
+  // like every browser. With nothing left, fall back to a fresh draft rather
+  // than leaving the last conversation on screen with no tab to explain it.
+  if (id === activeId) {
+    const next = tabs[Math.min(i, tabs.length - 1)];
+    if (next) openChat(next.id); else newChat();
+  }
+}
+
+function persistTabs() {
+  try {
+    pywebview.api.save_tabs({open: tabs.map(t => ({id: t.id, color: t.color})),
+                             active: activeId});
+  } catch (_) { /* layout is a convenience; never break a conversation */ }
+}
+
+function tabTitle(id) {
+  const s = sessions.find(x => x.id === id);
+  return (s && s.title) || "Conversation";
+}
+
+function renderTabs() {
+  const strip = $("tabStrip"), list = $("tabList");
+  if (!strip || !list) return;
+  strip.hidden = !tabs.length;
+  list.innerHTML = "";
+  tabs.forEach(t => {
+    const run = runFor(t.id);
+    const el = document.createElement("div");
+    el.className = "tab" + (t.id === activeId ? " active" : "");
+    el.dataset.id = t.id;
+    el.setAttribute("role", "tab");
+    el.setAttribute("aria-selected", String(t.id === activeId));
+    if (t.color && TAB_COLOR_HEX[t.color])
+      el.style.setProperty("--tab", TAB_COLOR_HEX[t.color]);
+    const live = LIVE_RUN_STATES.has(run.status);
+    const state = run.status === "waiting" ? "waiting" : live ? "live" : "idle";
+    el.innerHTML =
+      `<span class="tab-dot" data-state="${state}"></span>` +
+      `<span class="tab-title"></span>` +
+      `<span class="tab-unread" hidden></span>` +
+      `<button class="tab-x" title="Close tab (the chat is kept)">✕</button>`;
+    const title = el.querySelector(".tab-title");
+    title.textContent = tabTitle(t.id);
+    el.title = tabTitle(t.id) + " — double-click to rename, right-click for a colour";
+    const unread = el.querySelector(".tab-unread");
+    if (t.id !== activeId && run.unread > 0) {
+      unread.textContent = run.unread > 99 ? "99+" : run.unread;
+      unread.hidden = false;
+    }
+    el.onclick = e => {
+      if (e.target.closest("button") || title.isContentEditable) return;
+      openChat(t.id);
+    };
+    el.oncontextmenu = e => { e.preventDefault(); showTabMenu(e, t.id); };
+    title.ondblclick = e => { e.stopPropagation(); renameTab(t.id, title); };
+    el.querySelector(".tab-x").onclick = e => {
+      e.stopPropagation(); closeTab(t.id);
+    };
+    list.appendChild(el);
+  });
+}
+
+function renameTab(id, node) {
+  const before = node.textContent;
+  node.contentEditable = "true";
+  node.focus();
+  document.execCommand && document.getSelection().selectAllChildren(node);
+  const finish = async (commit) => {
+    node.contentEditable = "false";
+    const name = node.textContent.trim();
+    if (!commit || !name || name === before) { node.textContent = before; return; }
+    const r = await pywebview.api.rename_session(id, name);
+    if (r?.error) {
+      // rename_session refuses while a chat is live — say so, do not pretend
+      node.textContent = before;
+      addMsg("system", "relay", r.error, "");
+      return;
+    }
+    await refreshChats();
+  };
+  node.onblur = () => finish(true);
+  node.onkeydown = e => {
+    if (e.key === "Enter") { e.preventDefault(); node.blur(); }
+    if (e.key === "Escape") { e.preventDefault(); node.onblur = null; finish(false); }
+  };
+}
+
+function showTabMenu(evt, id) {
+  const menu = $("tabMenu");
+  menu.innerHTML = "";
+  Object.entries(TAB_COLOR_HEX).forEach(([name, hex]) => {
+    const b = document.createElement("button");
+    b.style.background = hex;
+    b.title = name;
+    b.onclick = () => { setTabColor(id, name); hideTabMenu(); };
+    menu.appendChild(b);
+  });
+  const clear = document.createElement("button");
+  clear.style.background = "transparent";
+  clear.textContent = "∅";
+  clear.title = "No colour";
+  clear.onclick = () => { setTabColor(id, ""); hideTabMenu(); };
+  menu.appendChild(clear);
+  menu.style.left = Math.min(evt.clientX, window.innerWidth - 260) + "px";
+  menu.style.top = (evt.clientY + 6) + "px";
+  menu.classList.add("show");
+}
+function hideTabMenu() { $("tabMenu").classList.remove("show"); }
+document.addEventListener("click", e => {
+  if (!e.target.closest("#tabMenu")) hideTabMenu();
+});
+
+function setTabColor(id, color) {
+  const t = tabFor(id);
+  if (!t) return;
+  t.color = color;
+  renderTabs();
+  persistTabs();
+}
+
+function cycleTab(delta) {
+  if (tabs.length < 2) return;
+  const i = tabs.findIndex(t => t.id === activeId);
+  const next = tabs[((i < 0 ? 0 : i) + delta + tabs.length) % tabs.length];
+  if (next && next.id !== activeId) openChat(next.id);
+}
+
+async function restoreTabs() {
+  let saved = null;
+  try { saved = await pywebview.api.get_tabs(); } catch (_) { return; }
+  tabs = ((saved && saved.open) || []).map(t => ({id: t.id, color: t.color || ""}));
+  renderTabs();
+}
+
 async function openChat(id) {
   if (id === activeId) return;
   const r = await pywebview.api.open_session(id);
@@ -4890,6 +5142,7 @@ async function openChat(id) {
   hideFeedback();
   const s = r.session || {}, msgs = r.messages || [];
   activeId = s.id;
+  openTab(activeId);
   const runSeed = r.run || s.run || s;
   const run = runFor(activeId, runSeed);
   const missed = Math.min(Number(run.unread || 0), msgs.length);
@@ -5040,6 +5293,7 @@ async function newChat() {
   await refreshChats();
   $("say").focus();
 }
+$("tabNew").onclick = newChat;
 $("newBtn").onclick = newChat;
 $("newChatBtn").onclick = newChat;
 
@@ -5101,6 +5355,7 @@ window.addEventListener("pywebviewready", async () => {
   fillModerator("claude");
   await restoreFolder();
   await refreshChats();
+  await restoreTabs();   // after refreshChats: tabs read their titles from it
   refreshFiles();
   $("say").focus();
 });

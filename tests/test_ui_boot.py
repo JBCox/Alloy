@@ -110,7 +110,13 @@ function mkEl(tag) {
     tag, id: '', className: '', children: [], parent: null,
     _attrs: {}, _html: '', textContent: '', value: '', checked: false,
     hidden: false, disabled: false, selected: false, options: [],
-    dataset: {}, style: {setProperty() {}, removeProperty() {}, display: ''},
+    dataset: {},
+    // records custom properties instead of swallowing them: a UI that paints
+    // per-tab colour through setProperty('--tab', …) is otherwise untestable
+    style: {_props: {}, display: '',
+            setProperty(k, v) { this._props[k] = v; },
+            removeProperty(k) { delete this._props[k]; },
+            getPropertyValue(k) { return this._props[k] || ''; }},
     classList: {
       add() {}, remove() {}, toggle() {}, contains() { return false; },
     },
@@ -273,6 +279,7 @@ const api = new Proxy({}, {
   },
 });
 
+const savedTabs = [];
 function apiReply(name, args) {
   switch (name) {
     case 'get_config': return JSON.parse(process.env.STUB_CONFIG);
@@ -284,7 +291,15 @@ function apiReply(name, args) {
         {provider: 'ox', label: 'OpenCode', state: 'signed_in', seatable: true, color: '#C084FC', email: null, detail: '', install_hint: '', can_logout: true},
       ], ready: true,
     };
-    case 'list_sessions': return [];
+    case 'list_sessions': return [
+      {id: 'sess-one', title: 'Death Factory', project: '', participants: [], run: {}},
+      {id: 'sess-two', title: 'Second Chat', project: '', participants: [], run: {}},
+    ];
+    case 'get_tabs': return {
+      open: [{id: 'sess-one', color: 'rose'}, {id: 'sess-two', color: ''}],
+      active: 'sess-one',
+    };
+    case 'save_tabs': savedTabs.push(args && args[0]); return args && args[0];
     case 'list_workspace_files': return [];
     case 'list_runs': return {runs: []};
     case 'folder_exists': return false;
@@ -442,6 +457,28 @@ if (topLevelError) {
     byId['modOn'].checked = false;
     byId['modOn'].onchange();
   } catch (e) { more.pickerError = (e && e.stack) || String(e); }
+
+  // ---- the open-tab strip, driven the way a user drives it ---------------
+  try {
+    const strip = byId['tabStrip'];
+    const read = () => [...byId['tabList'].children].map(el => ({
+      title: el.querySelector('.tab-title').textContent,
+      color: (el.style && el.style._props && el.style._props['--tab']) ||
+             (el.style && el.style.getPropertyValue &&
+              el.style.getPropertyValue('--tab')) || '',
+      active: (el.className || '').includes('active'),
+    }));
+    more.tabsRestored = read();
+    more.tabStripHidden = !!strip.hidden;
+    // close the second tab exactly as its ✕ does
+    ctx.closeTab('sess-two');
+    more.tabsAfterClose = read();
+    more.tabSaves = savedTabs.length;
+    more.lastSavedIds = (savedTabs[savedTabs.length - 1] || {}).open;
+    // recolour the survivor
+    ctx.setTabColor('sess-one', 'teal');
+    more.tabsAfterColor = read();
+  } catch (e) { more.tabError = (e && e.stack) || String(e); }
   report({bootRan: fns.length > 0, bootError, more});
 })();
 """
@@ -547,6 +584,44 @@ class UiBootTests(unittest.TestCase):
         self.assertEqual(self.report.get("moderatorCfgName"), "Referee")
         # blank means "use the role's own word", not an empty name
         self.assertIsNone(self.report.get("unnamedCfgName"))
+
+    def test_open_tabs_are_restored_with_their_titles_and_colours(self):
+        """Tabs are the working set; the rail stays the full history."""
+        self.assertIsNone(self.report.get("tabError"))
+        tabs = self.report.get("tabsRestored") or []
+        self.assertEqual([t["title"] for t in tabs],
+                         ["Death Factory", "Second Chat"])
+        # the colour is what makes one identifiable at a glance
+        self.assertIn("E0607E", (tabs[0]["color"] or "").upper())
+        self.assertFalse(self.report.get("tabStripHidden"))
+
+    def test_closing_a_tab_removes_it_and_persists(self):
+        after = self.report.get("tabsAfterClose") or []
+        self.assertEqual([t["title"] for t in after], ["Death Factory"])
+        self.assertTrue((self.report.get("tabSaves") or 0) > 0,
+                        "closing a tab never reached save_tabs")
+        ids = [r["id"] for r in (self.report.get("lastSavedIds") or [])]
+        self.assertEqual(ids, ["sess-one"])
+
+    def test_recolouring_a_tab_takes_effect(self):
+        after = self.report.get("tabsAfterColor") or []
+        self.assertTrue(after, "no tabs left to recolour")
+        self.assertIn("2DD4BF", (after[0]["color"] or "").upper())
+
+    def test_the_tab_strip_spans_the_whole_window(self):
+        """A sibling of <main>, not a child of the conversation column.
+
+        Nested inside the column it stops at the rails and reads as part of
+        the transcript; across the top it reads as what it is — the app's
+        open conversations (Josh, 2026-08-22).
+        """
+        with open(UI, encoding="utf-8") as f:
+            src = f.read()
+        strip = src.index('id="tabStrip"')
+        self.assertLess(src.index("</header>"), strip)
+        self.assertLess(strip, src.index("<main>"))
+        # and nothing may re-nest it inside the feed column
+        self.assertLess(strip, src.index('<div class="feed-wrap">'))
 
     def test_permission_note_is_painted_at_startup(self):
         self.assertTrue((self.report["permissionNote"] or "").strip())

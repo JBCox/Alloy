@@ -25,6 +25,7 @@ import relay
 from relay import (AGENT_TYPES, PROVIDERS, SESSIONS_DIR, HELP_TEXT,
                    MODES, DEFAULT_MODE, IMPLEMENTED_MODES, DEFAULT_CEILING,
                    OX_FREE_MODELS, OX_DEFAULT_MODEL, helper_spec,
+                   read_tabs, write_tabs, TAB_COLORS,
                    ox_model_details, ox_default_level,
                    assign_labels, compact_agent, resolve_cmd, clean_env,
                    logout_gemini,
@@ -1285,6 +1286,22 @@ class Api:
         self._conv = state
         return {"ok": True, "session": summary, "messages": messages,
                 "live": False}
+
+    def get_tabs(self):
+        """The open-tab strip, filtered to chats that still exist."""
+        return read_tabs()
+
+    def save_tabs(self, tabs):
+        """Persist the strip. Called on every open/close/reorder/recolour, so
+        it is deliberately cheap and never fails loudly: losing the tab layout
+        must not interrupt a conversation."""
+        try:
+            return write_tabs(tabs or {})
+        except Exception as exc:                       # pragma: no cover
+            return {"error": error_excerpt(exc)}
+
+    def tab_colors(self):
+        return list(TAB_COLORS)
 
     def rename_session(self, session_id, title):
         path = session_path(session_id)

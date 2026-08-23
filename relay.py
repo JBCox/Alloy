@@ -3799,6 +3799,91 @@ def supervisor_status(meta):
             "waves_used": int(meta.get("supervisor_waves") or 0)}
 
 
+# ------------------------------------------------------------------ tabs ----
+# The open-tab strip: which conversations Josh is flipping between, in what
+# order, and what colour he gave each one.
+#
+# Deliberately NOT in each session's meta.json. The loop rewrites meta after
+# every fan-out, which is exactly why rename_session refuses to run while a
+# chat is live - a colour change would race the same way, and recolouring the
+# tab of a RUNNING conversation is the main thing you would want to do. A
+# separate file the engine never touches has no race at all, and it gives the
+# tab ORDER and the active tab somewhere to live too.
+TABS_FILE = os.path.join(SESSIONS_DIR, "tabs.json")
+TAB_COLORS = ("slate", "amber", "rose", "violet", "teal", "green",
+              "blue", "orange")
+TABS_MAX = 24
+
+
+def read_tabs(path=None):
+    """{"open": [{"id", "color"}], "active": id|None}, always well-formed.
+
+    Never raises: a corrupt or missing file means "no tabs open", which
+    degrades to exactly the behaviour that existed before tabs.
+    """
+    try:
+        with open(path or TABS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {"open": [], "active": None}
+    if not isinstance(data, dict):
+        return {"open": [], "active": None}
+    rows, seen = [], set()
+    for row in data.get("open") or ():
+        if not isinstance(row, dict):
+            continue
+        sid = str(row.get("id") or "").strip()
+        # A tab whose chat was deleted must not resurrect it as a dead entry
+        if not sid or sid in seen or not session_path(sid):
+            continue
+        seen.add(sid)
+        color = str(row.get("color") or "").strip().lower()
+        rows.append({"id": sid,
+                     "color": color if color in TAB_COLORS else ""})
+        if len(rows) >= TABS_MAX:
+            break
+    active = str(data.get("active") or "").strip() or None
+    if active not in seen:
+        active = rows[-1]["id"] if rows else None
+    return {"open": rows, "active": active}
+
+
+def write_tabs(payload, path=None):
+    """Atomically persist the strip. Returns the normalized value written."""
+    rows, seen = [], set()
+    for row in (payload or {}).get("open") or ():
+        if not isinstance(row, dict):
+            continue
+        sid = str(row.get("id") or "").strip()
+        if not sid or sid in seen or not session_path(sid):
+            continue
+        seen.add(sid)
+        color = str(row.get("color") or "").strip().lower()
+        rows.append({"id": sid,
+                     "color": color if color in TAB_COLORS else ""})
+        if len(rows) >= TABS_MAX:
+            break
+    active = str((payload or {}).get("active") or "").strip() or None
+    if active not in seen:
+        active = rows[-1]["id"] if rows else None
+    out = {"open": rows, "active": active}
+    target = path or TABS_FILE
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    tmp = f"{target}.tmp-{os.getpid()}-{threading.get_ident()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, target)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    return out
+
+
 def session_summary(session_dir, meta=None):
     """One sidebar row. Pure file reads (one meta.json + one stat)."""
     sid = os.path.basename(session_dir.rstrip("\\/"))

@@ -356,6 +356,70 @@ class CatalogAndUiTests(unittest.TestCase):
                          relay.OpenCodeAgent(self.tmp).build_cmd("hello"))
 
 
+class TabStoreTests(unittest.TestCase):
+    """The open-tab strip persists outside meta.json, on purpose.
+
+    The loop rewrites meta after every fan-out - which is why rename_session
+    refuses to run while a chat is live. Recolouring the tab of a RUNNING
+    conversation is the main thing you would want to do, so the strip lives in
+    its own file the engine never touches.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="alloy-tabs-")
+        self.path = os.path.join(self.tmp, "tabs.json")
+        self.real = [d for d in os.listdir(relay.SESSIONS_DIR)
+                     if os.path.isdir(os.path.join(relay.SESSIONS_DIR, d))][:2]
+        if len(self.real) < 2:
+            self.skipTest("needs two real sessions on disk")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_a_round_trip_keeps_order_and_colour(self):
+        relay.write_tabs({"open": [{"id": self.real[0], "color": "rose"},
+                                   {"id": self.real[1], "color": "teal"}],
+                          "active": self.real[1]}, self.path)
+        got = relay.read_tabs(self.path)
+        self.assertEqual([r["id"] for r in got["open"]], self.real)
+        self.assertEqual([r["color"] for r in got["open"]], ["rose", "teal"])
+        self.assertEqual(got["active"], self.real[1])
+
+    def test_a_deleted_chat_does_not_linger_as_a_dead_tab(self):
+        relay.write_tabs({"open": [{"id": self.real[0]},
+                                   {"id": "20990101-gone-forever"}]}, self.path)
+        self.assertEqual([r["id"] for r in relay.read_tabs(self.path)["open"]],
+                         [self.real[0]])
+
+    def test_an_unknown_colour_is_dropped_not_rendered(self):
+        relay.write_tabs({"open": [{"id": self.real[0],
+                                    "color": "javascript:alert(1)"}]}, self.path)
+        self.assertEqual(relay.read_tabs(self.path)["open"][0]["color"], "")
+
+    def test_active_is_repaired_when_it_names_a_closed_tab(self):
+        out = relay.write_tabs({"open": [{"id": self.real[0]}],
+                                "active": self.real[1]}, self.path)
+        self.assertEqual(out["active"], self.real[0])
+
+    def test_duplicates_collapse(self):
+        out = relay.write_tabs({"open": [{"id": self.real[0]},
+                                         {"id": self.real[0]}]}, self.path)
+        self.assertEqual(len(out["open"]), 1)
+
+    def test_a_missing_or_corrupt_file_means_no_tabs_not_a_crash(self):
+        self.assertEqual(relay.read_tabs(os.path.join(self.tmp, "nope.json")),
+                         {"open": [], "active": None})
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write("{not json at all")
+        self.assertEqual(relay.read_tabs(self.path), {"open": [], "active": None})
+
+    def test_the_strip_is_bounded(self):
+        rows = [{"id": self.real[0]}] * (relay.TABS_MAX + 10)
+        self.assertLessEqual(len(relay.write_tabs({"open": rows},
+                                                  self.path)["open"]),
+                             relay.TABS_MAX)
+
+
 class ShimResolutionTests(unittest.TestCase):
     """A prompt must reach the CLI whole.
 
