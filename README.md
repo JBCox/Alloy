@@ -5,8 +5,9 @@
 changed. See `BRANDING.md`.)
 
 Kick off a conversation between **Claude** (Claude Code CLI, your Max account),
-**GPT** (OpenAI Codex CLI, your ChatGPT Pro account), and **Gemini** (Google
-Antigravity CLI, free Google-account login). No API keys — each agent
+**GPT** (OpenAI Codex CLI, your ChatGPT Pro account), **Gemini** (Google
+Antigravity CLI, free Google-account login) and **OpenCode** (its Zen gateway's
+free models — Ox Alpha and friends, no account at all). No API keys — each agent
 authenticates through its official CLI's account login. You start it, they talk;
 you can jump in anytime.
 
@@ -65,7 +66,9 @@ you can jump in anytime.
    (checked at launch, ↻ to re-check): **Sign in** opens a terminal running
    that CLI's own browser login (Claude → Anthropic account, GPT → ChatGPT,
    Gemini → Google, Grok → SuperGrok/X Premium+ once its CLI is installed —
-   the install command is shown when a CLI is missing). **Log out** (two-click
+   the install command is shown when a CLI is missing). **Ox** is the
+   exception: its free Zen models need no sign-in, so it reports ready as soon
+   as the CLI is installed, and signing in only adds the paid Zen catalog. **Log out** (two-click
    confirm) signs that CLI out *machine-wide* — that's also how you switch
    accounts: log out, then sign back in with the other account. Seats whose
    provider isn't signed in are flagged "sign-in needed" and starting a
@@ -88,7 +91,7 @@ Options:
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--turns N` | 10 | Max rounds (each round = every agent speaks once) |
-| `--agents a,b` | all three | Who's in the room. Each token is `provider[:model[:effort]][=label]` with providers `claude`, `gpt`, `gemini` — repeat a provider for duplicate seats (e.g. `claude:opus:high,claude:haiku:low`, or `"claude=Optimist,claude=Skeptic"`; auto labels: "Claude", "Claude 2") |
+| `--agents a,b` | all three | Who's in the room. Each token is `provider[:model[:effort]][=label]` with providers `claude`, `gpt`, `gemini`, `ox` — repeat a provider for duplicate seats (e.g. `claude:opus:high,claude:haiku:low`, or `"claude=Optimist,claude=Skeptic"`; auto labels: "Claude", "Claude 2") |
 | `--start X` | first listed | Who speaks first: slot number (1-based), label (`"claude 2"`), or provider |
 | `--role "SEAT=NAME"` | none | Public role name for a seat, shown to every seat in the roster line; repeatable. `SEAT` is the same label-or-provider grammar as `/clear`; a typo is a hard error, not a silent no-op |
 | `--role-instructions "SEAT=TEXT"` | none | Private role instructions only that seat sees; repeatable, same `SEAT` grammar |
@@ -218,8 +221,9 @@ execution. **Ask first** routes Claude's individual write/command tools through
 an approval card; because Codex and Gemini's print-mode CLIs have no equivalent
 pre-tool hook, Alloy asks once before each potentially mutating turn and runs a
 denied turn read-only. **Workspace** is the default: Claude uses accepted edits,
-Codex uses its `workspace-write` sandbox with network on, and Gemini stays in its
-terminal sandbox. **Full access** removes those guardrails on all providers and
+Codex uses its `workspace-write` sandbox with network on, Gemini stays in its
+terminal sandbox, and Ox denies `external_directory` so writes land in the
+working folder and nowhere else. **Full access** removes those guardrails on all providers and
 is only for work where arbitrary commands are acceptable.
 
 Seats are also told they may use their own CLI's built-in subagents (Claude's
@@ -236,8 +240,29 @@ each one spends real account usage.
   `%LOCALAPPDATA%\agy\bin`) — the successor to the retired Gemini CLI. Free
   Google-account tier, no API key. Its piped *text* output is broken on Windows,
   so the adapter uses `--output-format json`, which works.
+- **OpenCode** is a gateway, not a single model: the provider rides the
+  **OpenCode CLI** (`npm install -g opencode-ai`) against OpenCode Zen and
+  ships with Zen's *free* models — Ox Alpha (a 1M-context stealth preview),
+  Big Pickle, Nemotron ×2, MiMo, Hy3 and Muse Spark — none of which need an
+  account, a key or a login. Each **seat is named for the model it runs**
+  ("Ox Alpha", "Nemotron 3 Ultra"), so a room can hold several at once and the
+  transcript says who spoke. **Thinking levels come from each model**: Ox
+  Alpha has low/high/max, Muse Spark five, Hy3 three, and Nemotron, MiMo and
+  Big Pickle none at all — where a model has none the Thinking box disappears
+  instead of offering settings it would silently ignore. Ox Alpha is a preview
+  and will eventually be withdrawn; when it goes, `opencode models` lists what
+  is still there and the dropdown offers whatever survives.
+- **Who moderates**: **Let an AI moderate** is a checkbox in the Conversation
+  section (not in Advanced) — tick it and the picker appears right below, with
+  a name box: leave it blank for "Moderator"/"Supervisor", or call it Referee
+  and every status line, the Supervisor control log and its transcript row say
+  Referee. It
+  offers every provider you can seat, so a room can be run entirely by one model — e.g. Ox in every seat
+  *and* as supervisor, which costs nothing. The relay's own side call (the
+  project brief) follows the same rule: it uses the moderator, or failing that
+  the first seat, rather than always reaching for Claude.
 - **Usage/cost**: each round spends one invocation per participant (Claude Max,
-  ChatGPT Pro, Google free tier). A 10-round chat ≈ a modest coding session on each.
+  ChatGPT Pro, Google free tier, Ox free). A 10-round chat ≈ a modest coding session on each.
   Moderator mode adds one cheap call per turn; each spawned helper is one more
   call, and a spawned team is a whole extra conversation — that's why helpers
   and teams are off by default and capped, and why `--until-done` always has a
@@ -245,4 +270,5 @@ each one spends real account usage.
 - **Auth upkeep**: the app's **Accounts** panel shows each provider's sign-in
   state and has Sign in / Log out buttons (log out + sign in = switch account;
   note logout is machine-wide for that CLI). From a terminal instead:
-  `claude auth login`, `codex login`, or run `agy` once interactively.
+  `claude auth login`, `codex login`, or run `agy` once interactively. Ox needs
+  none of this unless you want Zen's paid models (`opencode auth login`).

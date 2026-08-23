@@ -21,6 +21,7 @@ import contextlib
 import datetime
 import hashlib
 import json
+import mimetypes
 import os
 import queue
 import re
@@ -63,10 +64,232 @@ ACTIVITY_KEEP = 50
 # both front ends validate against, so an unbuilt mode is a clear error at
 # start time, never a silent fall-through to round-robin.
 MODES = ("round_robin", "speaker", "moderator", "parallel", "free",
-         "supervisor")
+         "supervisor", "panel")
 DEFAULT_MODE = "round_robin"
 IMPLEMENTED_MODES = ("round_robin", "speaker", "moderator", "parallel",
-                     "free", "supervisor")
+                     "free", "supervisor", "panel")
+
+# V2 policy normalization. Legacy mode strings remain the public compatibility
+# surface while sessions migrate; every one maps to an explicit recipe so the
+# loop no longer needs a mode string to answer unrelated questions.
+ORCHESTRATION_VALUES = {
+    "concurrency": {"sequential", "barrier", "reactive"},
+    "floor": {"cyclic", "nomination", "moderated", "all", "fair", "manager"},
+    "workflow": {"conversation", "panel", "supervisor"},
+    "routing": {"broadcast", "addressed", "isolated"},
+    "completion": {"participants", "moderator", "synthesizer", "supervisor"},
+    "budget_unit": {"laps", "turns", "phases", "waves", "ceiling"},
+}
+LEGACY_ORCHESTRATION = {
+    "round_robin": ("open_discussion", "sequential", "cyclic",
+                    "conversation", "broadcast", "laps", "participants"),
+    "speaker": ("open_discussion", "sequential", "nomination",
+                "conversation", "broadcast", "turns", "participants"),
+    "moderator": ("open_discussion", "sequential", "moderated",
+                  "conversation", "broadcast", "turns", "moderator"),
+    "parallel": ("legacy_parallel", "barrier", "all",
+                 "conversation", "broadcast", "laps", "participants"),
+    "free": ("live_room", "reactive", "fair",
+             "conversation", "broadcast", "turns", "participants"),
+    "supervisor": ("build_execute", "barrier", "manager",
+                   "supervisor", "isolated", "waves", "supervisor"),
+    "panel": ("panel_review", "barrier", "all",
+              "panel", "broadcast", "phases", "synthesizer"),
+}
+PRESET_MODES = {
+    "open-discussion": "round_robin",
+    "panel-review": "panel",
+    "build-execute": "supervisor",
+    "live-room": "free",
+}
+
+
+def normalize_orchestration(value=None, mode=DEFAULT_MODE, turns=10,
+                            until_done=False):
+    """Return one complete, JSON-safe policy recipe.
+
+    Missing/unknown additive fields fall back to the legacy mode mapping so a
+    hand-edited or older meta never changes execution topology accidentally.
+    Invalid cross-axis combinations are not exposed by the UI yet; the legacy
+    mode remains authoritative during this compatibility phase.
+    """
+    mode = mode if mode in LEGACY_ORCHESTRATION else DEFAULT_MODE
+    preset, concurrency, floor, workflow, routing, unit, completion = \
+        LEGACY_ORCHESTRATION[mode]
+    base = {
+        "legacy_mode": mode,
+        "preset": preset,
+        "concurrency": concurrency,
+        "floor": floor,
+        "workflow": workflow,
+        "routing": routing,
+        "budget": {"unit": unit, "limit": max(1, int(turns or 1)),
+                   "until_done": bool(until_done)},
+        "completion": completion,
+        "fairness": {"opening_circuit": True,
+                     "max_lead": FLOOR_MAX_LEAD},
+    }
+    if not isinstance(value, dict):
+        return base
+    out = dict(base)
+    if isinstance(value.get("preset"), str) and value["preset"].strip():
+        out["preset"] = value["preset"].strip()
+    for key in ("concurrency", "floor", "workflow", "routing", "completion"):
+        candidate = value.get(key)
+        if candidate in ORCHESTRATION_VALUES[key]:
+            out[key] = candidate
+    budget = value.get("budget")
+    if isinstance(budget, dict):
+        b = dict(out["budget"])
+        if budget.get("unit") in ORCHESTRATION_VALUES["budget_unit"]:
+            b["unit"] = budget["unit"]
+        try:
+            b["limit"] = max(1, int(budget.get("limit", b["limit"])))
+        except (TypeError, ValueError):
+            pass
+        out["budget"] = b
+    fairness = value.get("fairness")
+    if isinstance(fairness, dict):
+        f = dict(out["fairness"])
+        if isinstance(fairness.get("opening_circuit"), bool):
+            f["opening_circuit"] = fairness["opening_circuit"]
+        try:
+            f["max_lead"] = max(1, int(fairness.get("max_lead",
+                                                     f["max_lead"])))
+        except (TypeError, ValueError):
+            pass
+        out["fairness"] = f
+    # Cross-axis validation is fail-safe and deterministic. Workflows own the
+    # structural axes they require; unsupported mixtures normalize to their
+    # nearest valid recipe instead of being half-honored by different loops.
+    if out["workflow"] == "panel":
+        out.update(concurrency="barrier", floor="all", routing="broadcast",
+                   completion="synthesizer")
+        out["budget"]["unit"] = "phases"
+    elif out["workflow"] == "supervisor":
+        out.update(concurrency="barrier", floor="manager", routing="isolated",
+                   completion="supervisor")
+        out["budget"]["unit"] = "waves"
+    elif out["concurrency"] == "reactive":
+        out["floor"] = "fair"
+    elif out["concurrency"] == "barrier":
+        out["floor"] = "all"
+    elif out["floor"] not in ("cyclic", "nomination", "moderated"):
+        out["floor"] = "cyclic"
+    return out
+
+
+WORKFLOW_LABELS = {"conversation": "Discuss in Turns", "panel": "Compare & Decide",
+                   "supervisor": "Build Together"}
+# Human-readable field names, so a correction reads like the control it moved
+# rather than like the key it is stored under.
+ORCHESTRATION_FIELD_LABELS = {
+    "workflow": "What the room is doing",
+    "concurrency": "When they reply",
+    "floor": "Who speaks next",
+    "routing": "Who sees each message",
+    "completion": "Who decides it is finished",
+    "budget.unit": "How the length is counted",
+    "budget.limit": "Length limit",
+    "fairness.opening_circuit": "Opening circuit",
+    "fairness.max_lead": "Maximum lead",
+}
+
+
+def _orchestration_reason(field, requested, policy):
+    """Why the normalizer overrode an explicitly requested value."""
+    workflow = policy["workflow"]
+    if field != "workflow" and workflow in ("panel", "supervisor"):
+        return "%s runs this one way" % WORKFLOW_LABELS[workflow]
+    if field == "floor" and policy["concurrency"] == "reactive":
+        return "replying whenever ready has no speaking order to set"
+    if field == "floor" and policy["concurrency"] == "barrier":
+        return "everyone replying at once has no speaking order to set"
+    if field == "budget.limit":
+        return "the length must be at least 1"
+    if field == "fairness.max_lead":
+        return "the lead must be at least 1 turn"
+    return "%r is not a value this app can run" % (requested,)
+
+
+def normalize_orchestration_report(value=None, mode=DEFAULT_MODE, turns=10,
+                                   until_done=False):
+    """`normalize_orchestration` plus the corrections it made, never silently.
+
+    The policy half keeps the exact return contract of `normalize_orchestration`
+    -- this is a reporting wrapper, not a second normalizer, so the two can
+    never disagree. The changes half names every EXPLICITLY supplied field whose
+    applied value differs from what was asked for. Fields the caller never sent
+    are defaults, not corrections, and are never reported.
+    """
+    policy = normalize_orchestration(value, mode, turns, until_done)
+    if not isinstance(value, dict):
+        return policy, []
+    changes = []
+
+    def note(field, requested, applied):
+        if requested == applied:
+            return
+        changes.append({"field": field,
+                        "label": ORCHESTRATION_FIELD_LABELS.get(field, field),
+                        "requested": requested, "applied": applied,
+                        "reason": _orchestration_reason(field, requested, policy)})
+
+    for key in ("workflow", "concurrency", "floor", "routing", "completion"):
+        if key in value:
+            note(key, value.get(key), policy[key])
+    budget = value.get("budget")
+    if isinstance(budget, dict):
+        for key, applied in (("unit", policy["budget"]["unit"]),
+                             ("limit", policy["budget"]["limit"])):
+            if key in budget:
+                note("budget." + key, budget.get(key), applied)
+    fairness = value.get("fairness")
+    if isinstance(fairness, dict):
+        for key, applied in (("opening_circuit",
+                              policy["fairness"]["opening_circuit"]),
+                             ("max_lead", policy["fairness"]["max_lead"])):
+            if key in fairness:
+                note("fairness." + key, fairness.get(key), applied)
+    return policy, changes
+
+
+def orchestration(state):
+    """Normalized live recipe, initialized lazily for bare test states."""
+    raw = state.get("orchestration")
+    mode = state.get("mode", DEFAULT_MODE)
+    if isinstance(raw, dict) and raw.get("legacy_mode") not in (None, mode):
+        raw = None
+    value = normalize_orchestration(
+        raw, mode,
+        state.get("max", state.get("turns", 10)),
+        bool(state.get("until_done")))
+    value["budget"]["limit"] = max(
+        1, int((state.get("turn_ceiling") if state.get("until_done") else
+                state.get("max", state.get("turns", 10))) or 1))
+    value["budget"]["until_done"] = bool(state.get("until_done"))
+    state["orchestration"] = value
+    return value
+
+
+def estimate_calls(recipe, seats):
+    """Deterministic launch preview, never presented as measured telemetry."""
+    n = max(1, int(seats or 1))
+    policy = normalize_orchestration(recipe)
+    limit = max(1, int(policy["budget"].get("limit") or 1))
+    workflow = policy["workflow"]
+    if workflow == "panel":
+        seat_calls, side_calls = 2 * n + 1, 0
+    elif workflow == "supervisor":
+        seat_calls, side_calls = n * limit, 1 + limit
+    elif policy["concurrency"] == "reactive":
+        seat_calls, side_calls = n * limit, 0
+    else:
+        seat_calls = n * limit
+        side_calls = (max(0, seat_calls - n)
+                      if policy["floor"] == "moderated" else 0)
+    return {"seat_calls": seat_calls, "side_calls": side_calls,
+            "total_calls": seat_calls + side_calls, "estimated": True}
 
 # "Until done": no round cap — the conversation ends via [[WRAP]], a moderator
 # DONE, /stop, or this hard turn ceiling (the spend backstop; generous but
@@ -83,6 +306,12 @@ DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 # Free mode fairness: a seat may not START a turn while this many turns ahead
 # of the slowest live seat — a fast cheap seat must not flood the budget.
 FREE_MAX_LEAD = 2
+FREE_DEBOUNCE = 0.08
+# Sequential floor policies get the same hard protection. A model moderator
+# or a chain of [[NEXT:]] picks may choose freely until a seat is this far
+# ahead of the quietest active seat; then the scheduler, not the prompt,
+# forces the floor back to a least-heard seat.
+FLOOR_MAX_LEAD = 2
 # Free mode: after a failed (skipped) turn, wait for new queue content or this
 # many seconds before retrying — a permanently failing seat must not hot-loop.
 FREE_RETRY_BACKOFF = 5.0
@@ -418,7 +647,7 @@ class Agent:
 
     def __init__(self, workspace, yolo=False, model=None, effort=None, name=None,
                  role=None, role_instructions=None, connectors=False,
-                 permission=None, on_approval=None):
+                 permission=None, on_approval=None, lean=False):
         self.workspace = workspace
         # PERMISSION LEVEL. The single source of truth for what this seat may
         # do; `yolo` survives only as the legacy way of saying "full" and as a
@@ -678,6 +907,7 @@ class Agent:
                             + self._turn_denial_reason + "]")
         cmd = resolve_cmd(self.build_cmd(message))
         env = clean_env()
+        env.update(self.extra_env() or {})
         self.before_run()
         on_line = None
         if on_activity is not None:
@@ -859,6 +1089,26 @@ class Agent:
 
     def before_run(self):
         """Hook: reset per-turn scratch state before the CLI runs."""
+
+    @classmethod
+    def seat_name(cls, model=None):
+        """The auto name for a seat of this provider.
+
+        For a vendor CLI the provider name IS the identity ("Claude" runs a
+        Claude model, whichever one). A GATEWAY is different - see
+        OpenCodeAgent - so the name is asked for per model rather than read
+        off the class.
+        """
+        return cls.name
+
+    def extra_env(self):
+        """Hook: env vars to add on top of clean_env() for THIS turn.
+
+        Exists because not every CLI takes its sandbox as a flag: opencode's
+        permission gate is a config, and the only way to hand it one without
+        writing an opencode.json into the shared workspace (where the other
+        seats would see it, and inherit it) is an environment variable."""
+        return {}
 
     def build_cmd(self, message):
         raise NotImplementedError
@@ -1537,6 +1787,283 @@ class GeminiAgent(Agent):
         return (data.get("response") or "").strip()
 
 
+# The free half of OpenCode Zen's catalog. These need NO account, NO key and
+# NO login - verified 2026-08-22 on this machine with `opencode auth list`
+# reporting 0 credentials while Ox Alpha, Big Pickle and Nemotron Lightning
+# all answered. That is the only reason this provider belongs in an app whose
+# rule is that no API key appears anywhere. Ox Alpha leads because it is the
+# strongest of them; the rest matter because it is a STEALTH PREVIEW and will
+# eventually be withdrawn, and a seat whose only model vanished is a dead
+# seat. When that happens, `opencode models` lists what is actually there.
+OX_FREE_MODELS = [
+    {"id": "opencode/x-preview-f-free", "label": "Ox Alpha"},
+    {"id": "opencode/big-pickle", "label": "Big Pickle"},
+    {"id": "opencode/nemotron-3-ultra-free", "label": "Nemotron 3 Ultra"},
+    {"id": "opencode/nemotron-3.5-lightning-free",
+     "label": "Nemotron 3.5 Lightning"},
+    {"id": "opencode/mimo-v2.5-free", "label": "MiMo-V2.5"},
+    {"id": "opencode/hy3-free", "label": "Hy3"},
+    {"id": "opencode/muse-spark-1.2-contributor-free",
+     "label": "Muse Spark 1.2"},
+]
+OX_DEFAULT_MODEL = "opencode/x-preview-f-free"
+# Where opencode caches models.dev: per-model reasoning options, context
+# limits and modalities for EVERY model it can reach. Same role as
+# ~/.codex/models_cache.json for the GPT seat - the provider publishes what
+# each model supports, so the picker never has to guess or share one list.
+OX_MODELS_CACHE = os.path.join(HOME, ".cache", "opencode", "models.json")
+
+
+def ox_model_details(cache_path=None):
+    """{model id without the provider prefix: {levels, context}} from
+    models.dev, or {} if the cache is missing/unreadable.
+
+    Never raises: a missing cache means "offer no thinking levels", which is
+    the same honest degradation as an unknown auth probe - not a crash, and
+    not an invented list.
+    """
+    try:
+        with open(cache_path or OX_MODELS_CACHE, encoding="utf-8") as f:
+            catalog = json.load(f)
+        models = (catalog.get("opencode") or {}).get("models") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+    out = {}
+    for mid, meta in models.items():
+        if not isinstance(meta, dict):
+            continue
+        levels = []
+        for opt in meta.get("reasoning_options") or ():
+            # two shapes live here: {"type":"effort","values":[...]} and a
+            # bare {"type":"toggle"} (reasoning on/off, no levels). Only the
+            # effort values map onto --variant; a toggle-only model gets no
+            # picker rather than a picker that sends something meaningless.
+            if isinstance(opt, dict) and opt.get("type") == "effort":
+                levels = [str(v) for v in (opt.get("values") or [])]
+        out[mid] = {"levels": levels,
+                    "context": (meta.get("limit") or {}).get("context") or 0}
+    return out
+
+
+def ox_default_level(levels):
+    """The level a fresh seat starts on: `high` where the model has it (the
+    app's default everywhere else), otherwise the middle of the range rather
+    than an extreme."""
+    if not levels:
+        return ""
+    return "high" if "high" in levels else levels[len(levels) // 2]
+
+
+class OpenCodeAgent(Agent):
+    # Ox rides the OpenCode CLI (opencode-ai) against OpenCode Zen, its own
+    # model gateway. Everything below was verified live 2026-08-22 against
+    # opencode 1.18.21; the JSON vocabulary is `run --format json`, which is
+    # JSONL: one event per line, every line carrying sessionID.
+    # The PROVIDER is OpenCode - the CLI and its Zen gateway. "Ox" is one
+    # model on it. Naming the provider after a single model made every other
+    # model on the gateway look mislabelled: a seat running Nemotron 3 Ultra
+    # is not an "Ox" (Josh, 2026-08-22).
+    name = "OpenCode"
+    cli = "opencode"
+    project_docs = ("AGENTS.md",)
+
+    @classmethod
+    def seat_name(cls, model=None):
+        """Named for the MODEL, not the gateway: a room can hold Ox Alpha and
+        Nemotron 3 Ultra at once, and "OpenCode 2" would tell the roster - and
+        the transcript, and the other seats - nothing about who just spoke."""
+        for known in OX_FREE_MODELS:
+            if known["id"] == model:
+                return known["label"]
+        if model:
+            # a paid Zen model, or one newer than this catalog: its own id is
+            # still a better name than the gateway's
+            return model.split("/")[-1]
+        return cls.name
+
+    def build_cmd(self, message):
+        cmd = ["opencode", "run", "--format", "json"]
+        # ALWAYS pin the model. Left to itself opencode picks its configured
+        # default, which on a machine with no credentials can be a PAID Zen
+        # model - the seat would then fail on auth for a reason the Accounts
+        # panel says nothing about, because the free tier really is signed in.
+        cmd += ["-m", self.model or OX_DEFAULT_MODEL]
+        if self.effort:
+            # opencode calls reasoning effort a "variant". It is real, and it
+            # was nearly shipped disabled: a first probe passed `--variant
+            # bogus-level`, saw no complaint and 0 reasoning tokens, and
+            # concluded there was no control here. The prompt was the problem
+            # - it needed no thinking at all. Re-run on a river-crossing
+            # puzzle (2026-08-22): `low` -> 0 reasoning tokens, `max` -> 42.
+            # opencode does NOT validate this flag, so the value must come
+            # from the model's own reasoning_options in models.dev (app.py
+            # reads them per model) and never from a shared list.
+            cmd += ["--variant", self.effort]
+        if self.session_id:
+            # --session, never --continue: `--continue` resumes "the last
+            # session" (wrong the moment two seats share the CLI) and it is
+            # only accepted AFTER the subcommand, so `opencode --continue run`
+            # just prints help and exits 0 with no reply. --session names THIS
+            # seat's own thread; a resumed one recalled the file it had read a
+            # turn earlier.
+            cmd += ["--session", self.session_id]
+        level = self.effective_permission()
+        if level in ("read_only", "ask"):
+            # `plan` is opencode's OWN read-only agent, and it is load-bearing
+            # exactly like agy's --mode plan: asked to create deny_proof.txt it
+            # answered "exit plan mode first" and the file did not exist. The
+            # default `build` agent is the opposite - it wrote a file with no
+            # prompt and no stall in a pipe, so a seat set to Read-only that
+            # merely omitted --auto would still write. extra_env() denies the
+            # write tools underneath this as the second lock.
+            cmd += ["--agent", "plan"]
+        else:
+            # --auto pre-approves anything not EXPLICITLY denied, which is what
+            # keeps a piped turn from stalling on a permission prompt. The
+            # workspace boundary survives it - see extra_env().
+            cmd += ["--auto"]
+        cmd.append(message)   # `run` takes the prompt as a trailing positional
+        return cmd
+
+    def extra_env(self):
+        """The other half of the permission ladder.
+
+        opencode has no --sandbox flag; its gate is config, and
+        OPENCODE_CONFIG_CONTENT injects one per turn without leaving an
+        opencode.json in the shared workspace. `external_directory` is the
+        real boundary: it fires when a tool touches paths outside the project
+        working directory, and the relay already runs every CLI with
+        cwd=workspace. Verified 2026-08-22 WITH --auto in the command line
+        (the case that matters, since --auto auto-approves everything not
+        explicitly denied): the seat wrote its file inside the workspace and
+        was refused the one outside it.
+        """
+        level = self.effective_permission()
+        if level == "full":
+            perm = {"*": "allow"}
+        elif level in ("read_only", "ask"):
+            perm = {"edit": "deny", "bash": "deny",
+                    "external_directory": "deny"}
+        else:
+            perm = {"external_directory": "deny"}
+        return {"OPENCODE_CONFIG_CONTENT": json.dumps({"permission": perm})}
+
+    def capability_note(self):
+        # Only what build_cmd grants AND this adapter has watched work (glob,
+        # read, write and bash all exercised live 2026-08-22). Nothing is
+        # claimed about image generation or web search: unverified here, and
+        # peers route work by these sentences.
+        can = ["reading and searching files", "running shell commands"]
+        if PERMISSION_LEVELS[self.effective_permission()]["writes"]:
+            can.insert(1, "writing files in the shared folder")
+        return ", ".join(can)
+
+    @staticmethod
+    def _events(stdout):
+        """Every JSON object on its own line; junk skipped, never raises."""
+        for line in (stdout or "").splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                evt = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(evt, dict):
+                yield evt
+
+    def parse(self, stdout):
+        # Keyed by part id, keeping the LAST text for each: 1.18.21 emits one
+        # complete `text` event per block (a 1164-char reply arrived as a
+        # single event, not deltas), but keying this way means a future
+        # version that DOES stream growing deltas yields the final text
+        # instead of every prefix concatenated.
+        texts, order = {}, []
+        for evt in self._events(stdout):
+            sid = evt.get("sessionID")
+            if sid:
+                self.session_id = sid
+            if evt.get("type") != "text":
+                continue
+            part = evt.get("part") or {}
+            pid = part.get("id") or len(order)
+            if pid not in texts:
+                order.append(pid)
+            chunk = part.get("text")
+            if isinstance(chunk, str):
+                texts[pid] = chunk
+        return "\n\n".join(
+            t.strip() for t in (texts.get(k, "") for k in order) if t.strip()
+        ).strip()
+
+    def describe_failure(self, stdout, stderr):
+        # {"type":"error","error":{"name":"UnknownError","data":{"message":..,
+        # "ref":"err_680b99d8"}}} on STDOUT with rc=1 (verified by asking for
+        # a model id that does not exist). The ref is worth keeping: it is
+        # what OpenCode support asks for.
+        for evt in self._events(stdout):
+            if evt.get("type") != "error":
+                continue
+            err = evt.get("error") or {}
+            data = err.get("data") if isinstance(err.get("data"), dict) else {}
+            bits = [b for b in (err.get("name"), data.get("message"),
+                                data.get("ref")) if b]
+            if bits:
+                return " · ".join(str(b) for b in bits)[:300]
+        return super().describe_failure(stdout, stderr)
+
+    def activity(self, line):
+        line = line.strip()
+        if not line.startswith("{"):
+            return ()
+        try:
+            evt = json.loads(line)
+        except ValueError:
+            return ()
+        if not isinstance(evt, dict) or evt.get("type") != "tool_use":
+            return ()
+        part = evt.get("part") or {}
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        inp = state.get("input") if isinstance(state.get("input"), dict) else {}
+        return self._describe_tool(part.get("tool") or "", inp)
+
+    @staticmethod
+    def _describe_tool(tool, inp):
+        # opencode's tool names are lowercase and its file arg is `filePath`.
+        if tool == "bash":
+            c = _clip(inp.get("command"), 150)
+            return [{"kind": "command", "text": "$ " + c}] if c else []
+        if tool in ("write", "edit", "patch"):
+            path = inp.get("filePath") or inp.get("path")
+            if isinstance(path, str) and path:
+                # path_raw is untrusted; the sink confines it to the workspace
+                return [{"kind": "edit",
+                         "text": "editing " + os.path.basename(path),
+                         "path_raw": path}]
+            return []
+        if tool == "read":
+            path = inp.get("filePath") or inp.get("path")
+            if isinstance(path, str) and path:
+                return [{"kind": "read",
+                         "text": "reading " + os.path.basename(path)}]
+            return []
+        if tool in ("glob", "grep", "list"):
+            pat = _clip(inp.get("pattern") or inp.get("path"), 80)
+            return [{"kind": "search",
+                     "text": "searching: " + pat}] if pat else []
+        if tool == "websearch":
+            q = _clip(inp.get("query"), 100)
+            return [{"kind": "search", "text": "web: " + q}] if q else []
+        if tool == "webfetch":
+            u = _clip(inp.get("url"), 120)
+            return [{"kind": "search", "text": "fetching " + u}] if u else []
+        if tool == "task":
+            d = _clip(inp.get("description") or inp.get("prompt"), 100)
+            return [{"kind": "tool", "text": "subagent: " + d}] if d else []
+        return [{"kind": "tool",
+                 "text": "tool: " + _clip(tool, 60)}] if tool else []
+
+
 # ------------------------------------------------------ auth + registry ----
 
 def _run_probe(argv, timeout):
@@ -1636,6 +2163,29 @@ def probe_grok(timeout=15, home=None):
                    detail="installed — probe lands with the Grok adapter")
 
 
+def probe_opencode(timeout=15, home=None):
+    """opencode's free Zen models need no credentials, so "no credentials" is
+    NOT signed_out here - it is the normal, working state. `opencode auth
+    list` reported 0 credentials on this machine while Ox Alpha answered
+    (2026-08-22), and reporting that as signed_out would grey out a seat that
+    works perfectly. Only a missing CLI blocks an Ox seat."""
+    try:
+        r = _run_probe(["opencode", "auth", "list"], timeout)
+    except RuntimeError:
+        return _status("ox", "not_installed")
+    except Exception as e:
+        # CLI is on PATH but the probe itself failed: never guess signed_out,
+        # the free tier may well be fine.
+        return _status("ox", "unknown", detail=str(e)[:120])
+    out = ((r.stdout or "") + " " + (r.stderr or "")).strip()
+    m = re.search(r"(\d+)\s+credential", out, re.I)
+    if m and int(m.group(1)) > 0:
+        return _status("ox", "signed_in",
+                       detail=m.group(1) + " credential(s) - paid Zen too")
+    return _status("ox", "signed_in",
+                   detail="free Zen models - no sign-in needed")
+
+
 def logout_gemini(home=None):
     """agy has no logout command: move its Google creds into a timestamped
     backup dir (never deleted — restoring = moving the files back)."""
@@ -1705,6 +2255,18 @@ PROVIDERS = {
                  skills_dir=None,   # no CLI installed: nothing to manage
                  mcp=None,
                  install_hint="irm https://x.ai/cli/install.ps1 | iex"),
+    "ox": dict(label="OpenCode", cli="opencode", agent=OpenCodeAgent,
+               color="#C084FC", probe=probe_opencode,
+               # Sign-in only unlocks the PAID Zen catalog; the free models
+               # this seat ships with need no account at all.
+               login_argv=["opencode", "auth", "login"],
+               logout_argv=["opencode", "auth", "logout"],
+               login_strip_env=False,
+               skills_dir=os.path.join(HOME, ".config", "opencode", "skill"),
+               # `opencode mcp list` prints the same "<name>: <target>" line
+               # shape claude does.
+               mcp=dict(kind="cli", argv=["opencode", "mcp"], fmt="lines"),
+               install_hint="npm install -g opencode-ai"),
 }
 
 # Providers whose skills/MCP the app can manage: those with a real CLI on disk.
@@ -2198,7 +2760,8 @@ COMPACT_PROMPT = (
 CLEAR_NOTE = ("(Josh cleared your context: you are rejoining the conversation "
               "fresh. Catch up from the messages that follow.)")
 
-HELP_TEXT = ("Commands: /clear [seat] · /compact [seat] · /retro · /turns N · "
+HELP_TEXT = ("Commands: /clear [seat] · /compact [seat] · /next <seat> · "
+             "/retro · /turns N · "
              "/ceiling N (until-done chats) · /stop · /help — seat is a name "
              "('claude 2') or a provider (claude/gpt/gemini); no seat means "
              "every seat. Roles are edited on the seat cards — Apply role "
@@ -2265,19 +2828,24 @@ def parse_agent_token(tok):
 
 
 def assign_labels(slots):
-    """Unique display names for seats. `slots` is [(provider, label_or_None)].
+    """Unique display names for seats. `slots` is
+    [(provider, label_or_None[, model])].
 
-    Auto-named seats get the provider's bare name ("Claude") for the first
-    seat and ordinals ("Claude 2") after that; explicit labels win as-is.
+    Auto-named seats get the seat's bare name ("Claude", or the MODEL for a
+    gateway provider - see Agent.seat_name) for the first seat and ordinals
+    ("Claude 2") after that; explicit labels win as-is. The model is optional
+    so the older two-tuple callers keep working unchanged.
     Raises ValueError on duplicate final labels.
     """
     labels = []
     auto_counts = {}
-    for provider, explicit in slots:
+    for slot in slots:
+        provider, explicit = slot[0], slot[1]
+        model = slot[2] if len(slot) > 2 else None
         if explicit:
             labels.append(explicit)
             continue
-        base = AGENT_TYPES[provider].name
+        base = AGENT_TYPES[provider].seat_name(model)
         auto_counts[base] = auto_counts.get(base, 0) + 1
         n = auto_counts[base]
         labels.append(base if n == 1 else f"{base} {n}")
@@ -2375,17 +2943,37 @@ class SessionStore:
                     f"max {turns} rounds*\n")
 
     def record(self, name, text, *, speaker=None, provider=None,
-               round=0, meta="", role=None, activity=None, usage=None):
+               round=0, meta="", role=None, activity=None, usage=None,
+               envelope=None):
         """Append one message. Returns the row (== the UI `message` payload).
 
         `role` is stamped into the row AT RECORD TIME on purpose: captions and
         replay read the row, never live seat config, so editing a role in round
         6 cannot retroactively relabel rounds 1-5 (ROLES_DESIGN.md)."""
         ts = datetime.datetime.now().isoformat(timespec="seconds")
-        row = {"speaker": name.lower() if speaker is None else speaker,
+        author = name.lower() if speaker is None else speaker
+        env = dict(envelope or {})
+        if author == "josh":
+            default_origin = "human"
+        elif author == "system":
+            default_origin = "relay"
+        else:
+            default_origin = "seat"
+        audience = env.get("audience", [])
+        if audience != "*":
+            audience = list(audience or [])
+        delivered = list(env.get("delivered_to") or [])
+        row = {"message_id": str(env.get("message_id") or uuid.uuid4().hex),
+               "origin": env.get("origin") or default_origin,
+               "audience": audience, "delivered_to": delivered,
+               "speaker": author,
                "provider": provider, "name": name, "text": text,
                "round": round, "meta": meta, "role": role or None,
                "ts": ts}
+        for key in ("thread_id", "intent", "artifacts", "digest_of"):
+            value = env.get(key)
+            if value not in (None, "", []):
+                row[key] = list(value) if key in ("artifacts", "digest_of") else value
         if activity:
             # what the seat DID before this reply (capped) — replayed chats
             # show the same collapsed activity block Josh watched live
@@ -2405,12 +2993,12 @@ class SessionStore:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         return row
 
-    def system(self, text, round=0):
+    def system(self, text, round=0, envelope=None, usage=None):
         """/clear, /compact, round-cap and agent-error notices. These MUST be
         persisted: without them a reopened chat stops explaining its own
         discontinuities ("Claude's memory was cleared" silently vanishes)."""
         return self.record("relay", text, speaker="system", provider=None,
-                           round=round)
+                           round=round, envelope=envelope, usage=usage)
 
     def save(self, state, ended=None):
         """Snapshot resumable state to meta.json. Call after every turn."""
@@ -2440,9 +3028,16 @@ class SessionStore:
             # scheduler state (meta v2) — all by seat SLOT ID, never index, so
             # a future seat-list edit can't silently reassign any of it
             "mode": state.get("mode", DEFAULT_MODE),
+            "orchestration": orchestration(state),
             "turn": state.get("turn", 0),
             "cursor": state.get("cursor"),
             "next_speaker": state.get("next_speaker"),
+            # v2 floor safety is additive metadata. Stringified slot ids keep
+            # JSON round-trips stable even when ids are integers in memory.
+            "floor_opened": dict(state.get("floor_opened") or {}),
+            "floor_turns": dict(state.get("floor_turns") or {}),
+            "forced_next": state.get("forced_next"),
+            "deferred_wrap": state.get("deferred_wrap"),
             "closing": state.get("closing"),
             "moderator": state.get("moderator"),
             "supervisor": state.get("supervisor"),
@@ -2467,6 +3062,14 @@ class SessionStore:
             # Additive like the rest: a v2 meta without it rehydrates to None,
             # which plan_phase() reads as "no plan", i.e. ordinary execution.
             "plan": state.get("plan"),
+            # Panel is a resumable phase machine. Source row ids and per-seat
+            # completion live here so a restart never replays a successful
+            # draft, critique, or synthesis call.
+            "panel": state.get("panel"),
+            "hidden": {str(k): list(v) for k, v in
+                       (state.get("hidden") or {}).items()},
+            "digest": state.get("digest"),
+            "completion": state.get("completion"),
             "parent": state.get("parent"),
             "children": state.get("children"),
             # additive like brief/ask: old code ignoring this loses task
@@ -2499,10 +3102,16 @@ def make_log(state, store, echo=None):
     id — so the mapping lives here once instead of in each front end. Anything
     that isn't Josh or a seated agent is a relay note, not a speaker.
     """
-    def log(name, text, meta="", activity=None, usage=None):
+    def log(name, text, meta="", activity=None, usage=None, envelope=None):
         if name.startswith("Josh"):
+            if envelope is None:
+                envelope = ({"audience": [], "delivered_to": []}
+                            if meta == "command" else
+                            {"audience": "*",
+                             "delivered_to": list(state["slot_ids"])})
             row = store.record("Josh", text, speaker="josh", provider=None,
-                               round=state["rnd"], meta=meta)
+                               round=state["rnd"], meta=meta,
+                               envelope=envelope)
         else:
             for i, a in enumerate(state["agents"]):
                 if a.name == name:
@@ -2514,10 +3123,11 @@ def make_log(state, store, echo=None):
                                        provider=state["providers"][i],
                                        round=state["rnd"], meta=meta,
                                        role=a.role, activity=activity,
-                                       usage=u)
+                                       usage=u, envelope=envelope)
                     break
             else:
-                row = store.system(text, round=state["rnd"])
+                row = store.system(text, round=state["rnd"],
+                                   envelope=envelope, usage=usage)
         if echo:
             echo(row)
         return row
@@ -2553,6 +3163,27 @@ def read_messages(session_dir):
     except OSError:
         pass
     return rows
+
+
+def seat_history(rows, slot_id):
+    """Canonical rows in the order one seat experienced them.
+
+    Legacy rows predate delivery metadata and came from the old full-broadcast
+    bus, so they remain visible. A seat also sees its own authored row even
+    though the relay correctly does not enqueue that row back to its prompt.
+    """
+    wanted = str(slot_id)
+    history = []
+    for row in rows or ():
+        if not isinstance(row, dict):
+            continue
+        if "delivered_to" not in row:
+            history.append(row)
+            continue
+        delivered = {str(v) for v in row.get("delivered_to") or ()}
+        if str(row.get("speaker")) == wanted or wanted in delivered:
+            history.append(row)
+    return history
 
 
 def continue_block(meta):
@@ -2883,6 +3514,33 @@ def synthesize_brief(workspace, docs, spec=None):
         agent.session_id = None         # stateless by design
 
 
+def helper_spec(seat_providers, moderator_spec=None, supervisor_spec=None):
+    """Which model does the relay's OWN side work (currently the brief).
+
+    Not a seat, but a real CLI call against a real account. Defaulting it to
+    claude means a room with no Claude seat silently spends a Claude call -
+    and hard-fails outright for someone who only installed one CLI, which is
+    now a real setup because Ox needs no account at all. Order: the moderator
+    (already the room's designated helper, and what build_digest_agent falls
+    back to), then the first seat, then the historical default.
+
+    Model is deliberately left unset on the seat fallback so each provider's
+    own cheap default applies (claude -> claude-haiku-4-5, exactly as before);
+    inheriting a seat's Opus for a throwaway summarization would be a quiet
+    cost regression.
+    """
+    # moderator and supervisor are the same job wearing two labels, and they
+    # never coexist (a moderated room has no supervisor and vice versa), so
+    # either one is "the model Josh chose to run this room".
+    for spec in (moderator_spec, supervisor_spec):
+        if spec and spec.get("provider") in AGENT_TYPES:
+            return dict(spec)
+    for provider in seat_providers or ():
+        if provider in AGENT_TYPES:
+            return {"provider": provider}
+    return {}
+
+
 def project_brief(workspace, session_dir, spec=None, enabled=True,
                   on_status=None):
     """Make <workspace>/AI-CHAT.md current and return what preamble() needs:
@@ -3161,6 +3819,11 @@ def session_summary(session_dir, meta=None):
         "rounds": meta.get("rnd", 0),
         "max": meta.get("max", 0),
         "mode": meta.get("mode", DEFAULT_MODE),
+        "orchestration": normalize_orchestration(
+            meta.get("orchestration"), meta.get("mode", DEFAULT_MODE),
+            (meta.get("turn_ceiling") if meta.get("until_done") else
+             meta.get("max", meta.get("turns", 10))),
+            bool(meta.get("until_done"))),
         "permission": normalize_permission(
             meta.get("permission"),
             "full" if meta.get("yolo") else DEFAULT_PERMISSION),
@@ -3179,6 +3842,9 @@ def session_summary(session_dir, meta=None):
         # so a reopened chat truthfully shows whether it was planned and
         # whether Josh ever approved it, rather than guessing from the rail
         "plan": meta.get("plan") or None,
+        "panel": meta.get("panel") or None,
+        "digest": meta.get("digest") or None,
+        "completion": meta.get("completion") or None,
         "until_done": bool(meta.get("until_done")),
         "spawn": meta.get("spawn") or {},
         "parent": meta.get("parent"),
@@ -3257,9 +3923,18 @@ def rehydrate(meta, workspace=None):
         # behavior exactly: restart the round at seat 0, queues intact.
         # `turn` is only budget arithmetic, so the v1 approximation is fine.
         "mode": meta.get("mode", DEFAULT_MODE),
+        "orchestration": normalize_orchestration(
+            meta.get("orchestration"), meta.get("mode", DEFAULT_MODE),
+            (meta.get("turn_ceiling") if meta.get("until_done") else
+             meta.get("max", meta.get("turns", 10))),
+            bool(meta.get("until_done"))),
         "turn": meta.get("turn", meta.get("rnd", 0) * max(1, len(seats))),
         "cursor": meta.get("cursor"),          # None -> loop starts at seat 0
         "next_speaker": meta.get("next_speaker"),
+        "floor_opened": dict(meta.get("floor_opened") or {}),
+        "floor_turns": dict(meta.get("floor_turns") or {}),
+        "forced_next": meta.get("forced_next"),
+        "deferred_wrap": meta.get("deferred_wrap"),
         "closing": meta.get("closing"),
         "moderator": meta.get("moderator"),
         "supervisor": meta.get("supervisor"),
@@ -3273,6 +3948,10 @@ def rehydrate(meta, workspace=None):
         "ask": bool(meta.get("ask")),      # pre-feature metas -> False
         "ask_pending": meta.get("ask_pending"),
         "plan": meta.get("plan"),
+        "panel": meta.get("panel"),
+        "hidden": dict(meta.get("hidden") or {}),
+        "digest": meta.get("digest"),
+        "completion": meta.get("completion"),
         "parent": meta.get("parent"),
         "children": meta.get("children"),   # hints — a child may be deleted
         "workstreams": meta.get("workstreams"),
@@ -3317,7 +3996,7 @@ def drain_human_input(q, say_file):
 # One grammar for every end-of-reply directive: [[WRAP]], [[NEXT: seat]], and
 # the coming [[SPAWN:]]/[[TEAM:]]/[[PASS]]. wrap_called is reimplemented over
 # peel_directives so the wrap rule and any new directive can never drift apart.
-KNOWN_DIRECTIVES = ("WRAP", "NEXT", "PASS", "SPAWN", "TEAM", "ASK")
+KNOWN_DIRECTIVES = ("WRAP", "NEXT", "TO", "PASS", "SPAWN", "TEAM", "ASK")
 # matched against body[rfind("[["):] — anchoring each peel at the LAST "[["
 # keeps a stacked tail ("… [[NEXT: A]] [[WRAP]]") from collapsing into one
 # directive with a garbage argument (the leftmost-match + lazy-dot trap)
@@ -3745,7 +4424,7 @@ def fatal_seat_error(agent, exc):
 
 def preamble(agent, others, topic, turns, workspace, roster=None,
              mode=DEFAULT_MODE, until_done=False, ceiling=None, spawn=None,
-             brief=None, ask=False, plan=None):
+             brief=None, ask=False, plan=None, routing=None):
     """`roster` is the full seat list IN TURN ORDER. Without it the roster line
     would read agent-first and so come out in a different order for every
     recipient — for a role team the order is information ("researcher speaks,
@@ -3891,6 +4570,13 @@ def preamble(agent, others, topic, turns, workspace, roster=None,
             f"thing you write. Mentioning it anywhere earlier, or in quotes/"
             f"backticks, does not trigger it. Do not pad: wrap as soon as "
             f"the goal is met.\n")
+    elif mode == "panel":
+        cap_line = (
+            f"- This is a Panel Review with exactly three stages: every "
+            f"participant drafts independently, every participant critiques "
+            f"the collected drafts, then one designated synthesizer writes "
+            f"the final response. Do not use {WRAP_TOKEN} during draft or "
+            f"critique; the synthesis completes the run.\n")
     elif mode in ("speaker", "moderator"):
         cap_line = (
             f"- The conversation has a budget of about {turns} rounds "
@@ -3923,12 +4609,27 @@ def preamble(agent, others, topic, turns, workspace, roster=None,
             f"- Turn order: a moderator chooses who speaks after each reply, "
             f"so you may speak twice in a row or wait several turns. Do not "
             f"hand off explicitly -- just end your reply.\n")
+    elif mode == "panel":
+        order_line = (
+            f"- Panel stages are barrier-synchronized. Follow the stage "
+            f"instruction in your current prompt; drafts happen without "
+            f"seeing peers, critiques see every available draft, and only "
+            f"the designated synthesizer produces the final answer.\n")
     elif mode == "parallel":
         order_line = (
             f"- Turns run in simultaneous rounds: every participant answers "
             f"the same backlog at once, and all replies are shared as the "
             f"round completes -- replies to what you say now reach you next "
             f"round.\n")
+    elif mode == "free" and routing == "addressed":
+        names = " / ".join(a.name for a in others)
+        order_line = (
+            f"- This is a reactive live room: reply when messages reach you. "
+            f"If a reply is for specific peer(s), END it with "
+            f"[[TO: <name>, <name>]] using {names}; omit TO only when every "
+            f"participant should receive it. The relay periodically gives "
+            f"other seats a labelled digest so addressed context is never "
+            f"silently lost.\n")
     # The working folder. A DEFAULT in-session workspace really is scratch and
     # keeps the wording it always had. A CUSTOM folder is Josh's real project,
     # and calling that "a scratch workspace ... write files if useful" invites
@@ -4126,6 +4827,21 @@ def dispatch_command(state, text, io):
         state["store"].save(state)
     elif cmd in ("clear", "compact"):
         seat_command(state, cmd, arg, io)
+    elif cmd == "next":
+        idxs = match_seats(state["agents"], arg) if arg else []
+        if len(idxs) != 1:
+            note = ("Usage: /next <seat> — name exactly one participant."
+                    if not idxs else
+                    f"{arg!r} matches more than one seat; use its full label.")
+        elif state.get("closing") is not None:
+            note = "The floor cannot be redirected during closing remarks."
+        else:
+            i = idxs[0]
+            state["forced_next"] = state["slot_ids"][i]
+            note = f"{state['agents'][i].name} will take the next eligible turn."
+        io.emit("status", {"text": note})
+        state["store"].system(note, round=state["rnd"])
+        state["store"].save(state)
     elif cmd == "retro":
         try:
             _playbook, note, path = retro.run_retro(SESSIONS_DIR)
@@ -4199,7 +4915,104 @@ def slot_index(state, sid):
         return None
 
 
-def compose_prompt(state, i):
+def _floor_key(sid):
+    """Stable JSON-safe key for persisted slot-indexed floor state."""
+    return str(sid)
+
+
+def ensure_floor_state(state):
+    """Initialize additive v2 floor state for fresh and legacy sessions.
+
+    `introduced` means a seat currently owns a CLI conversation; /clear and
+    /compact deliberately reset it. `floor_opened` is separate because losing
+    model context must not make a participant owe another opening statement.
+    Legacy sessions approximate historical counts as one turn per introduced
+    seat — enough to preserve continuity while still finding a never-heard
+    seat such as the live Gemini starvation case.
+    """
+    opened = state.setdefault("floor_opened", {})
+    turns = state.setdefault("floor_turns", {})
+    for i, sid in enumerate(state["slot_ids"]):
+        key = _floor_key(sid)
+        if key not in opened:
+            opened[key] = bool(state["introduced"][i])
+        if key not in turns:
+            turns[key] = 1 if opened[key] else 0
+        else:
+            turns[key] = max(0, int(turns[key] or 0))
+    return opened, turns
+
+
+def floor_available(state, i):
+    return state["slot_ids"][i] not in state.get("_floor_unavailable", set())
+
+
+def mark_floor_unavailable(state, i):
+    """Park a failed sequential seat for this run without losing its queue."""
+    state.setdefault("_floor_unavailable", set()).add(state["slot_ids"][i])
+
+
+def opening_complete(state):
+    opened, _turns = ensure_floor_state(state)
+    return all(opened[_floor_key(sid)] or not floor_available(state, i)
+               for i, sid in enumerate(state["slot_ids"]))
+
+
+def opening_complete_after(state, i):
+    opened, _turns = ensure_floor_state(state)
+    current = _floor_key(state["slot_ids"][i])
+    return all(opened[_floor_key(sid)] or _floor_key(sid) == current
+               or not floor_available(state, k)
+               for k, sid in enumerate(state["slot_ids"]))
+
+
+def _ordered_indices_from_cursor(state):
+    n = len(state["slot_ids"])
+    start = slot_index(state, state.get("cursor"))
+    start = 0 if start is None else start
+    return [(start + offset) % n for offset in range(n)]
+
+
+def opening_pick(state):
+    """Next unopened seat in deterministic cursor order, or None."""
+    opened, _turns = ensure_floor_state(state)
+    for i in _ordered_indices_from_cursor(state):
+        if (floor_available(state, i)
+                and not opened[_floor_key(state["slot_ids"][i])]):
+            return i
+    return None
+
+
+def fairness_pick(state, proposed):
+    """Apply the hard sequential starvation ceiling to a proposed seat."""
+    if proposed is None or not opening_complete(state):
+        return proposed
+    _opened, turns = ensure_floor_state(state)
+    active = [i for i in range(len(state["slot_ids"]))
+              if floor_available(state, i)]
+    if not active:
+        return proposed
+    floor = min(turns[_floor_key(state["slot_ids"][i])] for i in active)
+    proposed_count = turns[_floor_key(state["slot_ids"][proposed])]
+    if floor_available(state, proposed) and \
+            proposed_count < floor + FLOOR_MAX_LEAD:
+        return proposed
+    for i in _ordered_indices_from_cursor(state):
+        if (floor_available(state, i)
+                and turns[_floor_key(state["slot_ids"][i])] == floor):
+            return i
+    return proposed
+
+
+def record_floor_commit(state, i):
+    opened, turns = ensure_floor_state(state)
+    key = _floor_key(state["slot_ids"][i])
+    opened[key] = True
+    turns[key] += 1
+    state.get("_floor_unavailable", set()).discard(state["slot_ids"][i])
+
+
+def compose_prompt(state, i, backlog_override=None):
     """Build seat i's next prompt WITHOUT touching its queue.
 
     Commit-consume: the backlog is snapshotted here and deleted only by
@@ -4208,7 +5021,8 @@ def compose_prompt(state, i):
     """
     agents = state["agents"]
     agent = agents[i]
-    backlog = list(state["pending"][i])
+    backlog = (list(state["pending"][i]) if backlog_override is None
+               else list(backlog_override))
     parts = []
     first_turn = not state["introduced"][i]
     if first_turn:
@@ -4221,11 +5035,12 @@ def compose_prompt(state, i):
                               spawn=state.get("spawn"),
                               plan=state.get("plan"),
                               brief=state.get("brief"),
-                              ask=bool(state.get("ask"))))
+                              ask=bool(state.get("ask")),
+                              routing=orchestration(state)["routing"]))
         # parallel/free round 1 with no opener: EVERY seat opens
         # simultaneously — the honest semantics of those modes (CLI-only;
         # the app always seeds an opener)
-        if (i == 0 or state.get("mode") in ("parallel", "free")) \
+        if (i == 0 or state.get("mode") in ("parallel", "free", "panel")) \
                 and state["rnd"] == 1 and not backlog:
             parts.append("You open the conversation. Go.")
     if backlog:
@@ -4282,24 +5097,247 @@ def record_usage(state, usage, seat_key=None, kind="seat"):
         s_u["turns"] += 1
 
 
-def commit_reply(state, i, reply, consumed, io, activity=None):
+def _addressed_recipients(state, i, reply, io):
+    """Return (intended audience, actual recipient indices) for one reply.
+
+    A valid trailing ``[[TO: seat, seat]]`` narrows delivery in any workflow.
+    Bad targets never make text disappear: they produce a visible notice and
+    fall back to the workflow's ordinary broadcast/isolation fan-out.
+    """
+    agents = state["agents"]
+    _, hits, _unknown = peel_directives(reply)
+    args = [arg for name, arg in hits if name == "TO"]
+    explicit = args[0] if len(args) == 1 else None
+    intended = "*"
+    picks = None
+    if args and not explicit:
+        note = (f"{agents[i].name}'s TO directive was empty or repeated — "
+                "broadcasting normally instead.")
+        io.emit("status", {"text": note})
+        state["store"].system(note, round=state.get("rnd", 0))
+    elif explicit:
+        resolved = []
+        invalid = []
+        for target in (p.strip() for p in explicit.split(",")):
+            if not target:
+                invalid.append(target)
+                continue
+            matches = match_seats(agents, target)
+            if len(matches) != 1:
+                invalid.append(target)
+            elif matches[0] != i and matches[0] not in resolved:
+                resolved.append(matches[0])
+        if invalid or not resolved:
+            detail = ", ".join(repr(x) for x in invalid if x) or "only itself"
+            note = (f"{agents[i].name}'s TO target ({detail}) was not a "
+                    "unique peer — broadcasting normally instead.")
+            io.emit("status", {"text": note})
+            state["store"].system(note, round=state.get("rnd", 0))
+        else:
+            picks = resolved
+            intended = [state["slot_ids"][j] for j in resolved]
+    candidates = (picks if picks is not None else
+                  [j for j in range(len(agents)) if j != i])
+    actual = [j for j in candidates if j != i and workstream_hears(state, i, j)]
+    return intended, actual
+
+
+def artifact_descriptors(workspace, activity, producer, message_id):
+    """Turn confined edit activity into truthful, verified file references."""
+    found = []
+    seen = set()
+    for act in activity or ():
+        if not isinstance(act, dict) or not act.get("path"):
+            continue
+        raw = act["path"]
+        real = confine_to_workspace(workspace, raw)
+        if real is None or not os.path.isfile(real):
+            continue
+        relative = os.path.relpath(real, os.path.realpath(workspace))
+        key = os.path.normcase(relative)
+        if key in seen:
+            continue
+        seen.add(key)
+        mime = mimetypes.guess_type(relative)[0] or "application/octet-stream"
+        stable = hashlib.sha256(
+            f"{producer}\0{relative}\0{message_id}".encode("utf-8")
+        ).hexdigest()[:16]
+        try:
+            size = os.path.getsize(real)
+        except OSError:
+            continue
+        found.append({"artifact_id": stable, "path": relative,
+                      "kind": mime, "operation": "created_or_modified",
+                      "producer": producer, "source_message_id": message_id,
+                      "size": size})
+    return found
+
+
+DIGEST_SOURCE_IDS = 8
+DIGEST_SOURCE_CHARS = 12000
+DIGEST_PROMPT = (
+    "You are a relay summarizer. Consolidate the hidden messages below for "
+    "one participant who was not directly addressed. Preserve decisions, "
+    "disagreements, questions, and artifact paths. Do not add facts or speak "
+    "as any participant. Return only a compact factual digest.\n\n{source}")
+
+
+def build_digest_agent(state):
+    """Fresh stateless low-cost adapter for one relay-authored digest."""
+    # supervisor counts too: it is the same role under another name (the UI
+    # is literally one picker relabelled), and a Build Together room sets
+    # ONLY state["supervisor"] - so without this, picking Ox to run the room
+    # still handed every digest to claude.
+    spec = (state.get("digest") or state.get("moderator")
+            or state.get("supervisor") or {})
+    provider = spec.get("provider") or "claude"
+    if provider not in AGENT_TYPES:
+        provider = "claude"
+    model = spec.get("model") or ("claude-haiku-4-5"
+                                  if provider == "claude" else None)
+    effort = spec.get("effort") or ("low" if provider == "claude" else None)
+    return AGENT_TYPES[provider](state["workspace"], yolo=False,
+                                 model=model, effort=effort,
+                                 name="Relay digest")
+
+
+def _digest_source(rows):
+    chunks, remaining = [], DIGEST_SOURCE_CHARS
+    for row in rows:
+        head = f"[{row.get('message_id')}] {row.get('name', 'Participant')}:\n"
+        allowance = max(100, min(2400, remaining - len(head)))
+        body = str(row.get("text") or "")
+        if len(body) > allowance:
+            body = body[:allowance].rstrip() + "\n[truncated]"
+        chunk = head + body
+        chunks.append(chunk)
+        remaining -= len(chunk)
+        if remaining <= 100:
+            break
+    return "\n\n".join(chunks)
+
+
+def deliver_hidden_digest(state, i, io, summarizer=None, lock=None):
+    """Synchronize one seat's hidden addressed rows, or fall back losslessly.
+
+    The source prefix is snapshotted while holding the state lock; the side
+    call runs without it; commit then removes exactly that prefix. Empty/error
+    summaries deliver a relay-labelled verbatim packet instead, so selective
+    routing can never turn a summarizer outage into lost context.
+    """
+    key = _floor_key(state["slot_ids"][i])
+
+    def guarded():
+        return lock if lock is not None else contextlib.nullcontext()
+
+    with guarded():
+        hidden = state.setdefault("hidden", {})
+        source_ids = list(hidden.get(key) or [])[:DIGEST_SOURCE_IDS]
+    if not source_ids:
+        return None
+    wanted = set(source_ids)
+    rows = [r for r in read_messages(state["store"].dir)
+            if r.get("message_id") in wanted]
+    by_id = {r.get("message_id"): r for r in rows}
+    rows = [by_id[mid] for mid in source_ids if mid in by_id]
+    if len(rows) != len(source_ids):
+        return None                 # truncated/corrupt log: retry, never drop
+    source = _digest_source(rows)
+    summary = None
+    digest_agent = (summarizer if summarizer is not None else
+                    state.get("_digest_summarizer"))
+    try:
+        if digest_agent is None:
+            digest_agent = build_digest_agent(state)
+        summary = (digest_agent.turn(DIGEST_PROMPT.format(source=source)) or "").strip()
+    except Exception as exc:
+        io.emit("status", {"text": "Relay digest failed "
+                                   f"({error_excerpt(exc)}) — delivering the "
+                                   "hidden messages verbatim."})
+    finally:
+        if digest_agent is not None:
+            digest_agent.session_id = None
+    usage = getattr(digest_agent, "last_usage", None) if digest_agent else None
+    if summary:
+        text = "Relay digest of messages not addressed to this seat:\n\n" + summary[:5000]
+    else:
+        text = ("Relay synchronization fallback — original hidden messages, "
+                "verbatim:\n\n" + source)
+    with guarded():
+        current = state.setdefault("hidden", {}).setdefault(key, [])
+        if current[:len(source_ids)] == source_ids:
+            del current[:len(source_ids)]
+        else:
+            # Only appends are expected, but remove the exact snapshotted ids
+            # defensively if a restored/hand-edited state changed their order.
+            remaining = list(source_ids)
+            kept = []
+            for mid in current:
+                if mid in remaining:
+                    remaining.remove(mid)
+                else:
+                    kept.append(mid)
+            current[:] = kept
+        sid = state["slot_ids"][i]
+        row = state["log"]("relay", text, usage=usage, envelope={
+            "audience": [sid], "delivered_to": [sid],
+            "intent": "status", "digest_of": source_ids,
+        })
+        io.emit("message", row)
+        state["pending"][i].append(text)
+        record_usage(state, usage, kind="digest")
+        state["store"].save(state)
+    return row
+
+
+def commit_reply(state, i, reply, consumed, io, activity=None,
+                 envelope_extra=None, force_broadcast=False):
     """Deliver a successful turn: consume exactly the composed backlog, flip
     introduced, log + emit the row, fan out to every other seat, count the
     turn, save. The one implementation of the queue invariant — the saved
     queues always match what each seat is still owed."""
     agents = state["agents"]
     agent = agents[i]
+    # Initialize before flipping `introduced`: on a fresh seat the legacy
+    # fallback must start at zero, then this successful commit becomes turn 1.
+    ensure_floor_state(state)
     if not state["introduced"][i]:
         state["introduced"][i] = True
+    record_floor_commit(state, i)
     del state["pending"][i][:consumed]
+    if force_broadcast:
+        audience = "*"
+        recipient_indices = [j for j in range(len(agents))
+                             if j != i and workstream_hears(state, i, j)]
+    else:
+        audience, recipient_indices = _addressed_recipients(
+            state, i, reply, io)
+    message_id = uuid.uuid4().hex
+    envelope = {
+        "message_id": message_id,
+        "audience": audience,
+        "delivered_to": [state["slot_ids"][j] for j in recipient_indices],
+        "artifacts": artifact_descriptors(
+            state.get("workspace"), activity, state["slot_ids"][i], message_id),
+    }
+    if isinstance(envelope_extra, dict):
+        for key in ("thread_id", "intent", "digest_of"):
+            if envelope_extra.get(key) not in (None, "", []):
+                envelope[key] = envelope_extra[key]
     # captions read the persisted row (role stamped at record time), never
     # live seat config — a later role edit can't relabel this message
     row = state["log"](agent.name, reply, meta=f"round {state['rnd']}",
-                       activity=activity)
+                       activity=activity, envelope=envelope)
     io.emit("message", row)
-    for j, other in enumerate(agents):
-        if other is not agent and workstream_hears(state, i, j):
-            state["pending"][j].append(f"{agent.name} said:\n{reply}")
+    if audience != "*":
+        hidden = state.setdefault("hidden", {})
+        actual = set(recipient_indices)
+        for j in range(len(agents)):
+            if j != i and j not in actual:
+                key = _floor_key(state["slot_ids"][j])
+                hidden.setdefault(key, []).append(message_id)
+    for j in recipient_indices:
+        state["pending"][j].append(f"{agent.name} said:\n{reply}")
     settle_workstream(state, i, io, reply=reply)
     state["turn"] = state.get("turn", 0) + 1
     record_usage(state, getattr(agent, "last_usage", None),
@@ -4367,11 +5405,15 @@ def settle_workstream(state, i, io, reply=None):
                          note, task_id=t["id"], owner=t.get("owner"),
                          files=list(t.get("files") or []),
                          status=t.get("status"))
-        row = state["log"]("relay", note)
+        recipients = [j for j in range(len(state["agents"])) if j != i]
+        row = state["log"]("relay", note, envelope={
+            "audience": "*",
+            "delivered_to": [state["slot_ids"][j] for j in recipients],
+            "intent": "status",
+        })
         io.emit("message", row)
-        for j in range(len(state["agents"])):
-            if j != i:
-                state["pending"][j].append(note)
+        for j in recipients:
+            state["pending"][j].append(note)
     assign_workstreams(state, io)
     io.emit("workstreams", {"tasks": tasks})
 
@@ -4380,7 +5422,9 @@ def settle_workstream(state, i, io, reply=None):
 # absent on purpose: agy generates images but IGNORES the process cwd for file
 # writes (the RELAY copies them in), so it is not a file-writing seat — the
 # same measured capability list the preamble's notes are built from.
-FILE_WRITER_PROVIDERS = {"claude", "gpt"}
+# ox is in: opencode's build agent created files in the process cwd
+# (verified 2026-08-22, both with and without --auto), unlike agy.
+FILE_WRITER_PROVIDERS = {"claude", "gpt", "ox"}
 
 
 def workstream_writers(state):
@@ -4431,7 +5475,8 @@ def supervisor_trace(state, io, phase, title, detail="", **facts):
         "type": public_type,
         "wave": max(1, int(state.get("supervisor_wave_index") or 1)),
         "phase": str(phase or "activity"),
-        "title": str(title or "Supervisor activity")[:240],
+        "title": str(title
+                     or room_helper_name(state, "supervisor") + " activity")[:240],
         "detail": str(detail or "")[:8000],
     }
     for key in ("task_id", "owner", "files", "deps", "status", "goal",
@@ -4557,6 +5602,19 @@ def supervisor_roster_block(state):
     return "\n".join(lines)
 
 
+def room_helper_name(state, role):
+    """What Josh called this room's moderator/supervisor, or the role's own
+    word when he did not name it.
+
+    The name is not decoration. The Supervisor is the most VISIBLE non-seat in
+    the app - a control-log panel, status lines and a transcript row all say
+    its name - so a room that renamed it and then read "Supervisor produced no
+    tasks" would be told about someone who is not in it.
+    """
+    spec = state.get(role) or {}
+    return (str(spec.get("name") or "").strip() or role.capitalize())[:24]
+
+
 def build_supervisor(state):
     """Stateless planner adapter - same contract as build_moderator: not a
     seat, no roster entry, no queue, invisible to the seats, and its session
@@ -4567,7 +5625,8 @@ def build_supervisor(state):
                                   else None)
     effort = spec.get("effort") or ("low" if provider == "claude" else None)
     return AGENT_TYPES[provider](state["workspace"], yolo=False, model=model,
-                                 effort=effort, name="Supervisor")
+                                 effort=effort,
+                                 name=room_helper_name(state, "supervisor"))
 
 
 def plan_workstreams(state, io, goal=None):
@@ -4593,7 +5652,7 @@ def plan_workstreams(state, io, goal=None):
         record_usage(state, getattr(sup, "last_usage", None), kind="supervisor")
         supervisor_trace(state, io, "error", "Planning call failed",
                          str(e)[:500], status="failed")
-        io.emit("status", {"text": f"Supervisor could not plan "
+        io.emit("status", {"text": f"{room_helper_name(state, "supervisor")} could not plan "
                                    f"({str(e)[:120]}) - running as a normal "
                                    f"parallel conversation"})
         return []
@@ -4604,14 +5663,14 @@ def plan_workstreams(state, io, goal=None):
     except Exception as e:
         supervisor_trace(state, io, "error", "Plan could not be parsed",
                          str(e)[:500], status="failed")
-        io.emit("status", {"text": f"Supervisor's plan did not parse "
+        io.emit("status", {"text": f"{room_helper_name(state, "supervisor")}'s plan did not parse "
                                    f"({str(e)[:120]}) - running as a normal "
                                    f"parallel conversation"})
         return []
     if not tasks:
         supervisor_trace(state, io, "error", "No executable tasks returned",
                          (reply or "")[:1000], status="failed")
-        io.emit("status", {"text": "Supervisor produced no tasks - running "
+        io.emit("status", {"text": f"{room_helper_name(state, "supervisor")} produced no tasks - running "
                                    "as a normal parallel conversation"})
         return []
     state["workstreams"] = tasks
@@ -4627,7 +5686,8 @@ def plan_workstreams(state, io, goal=None):
                      + (f"  (files: {', '.join(t['files'])})"
                         if t.get("files") else "")
                      for t in tasks)
-    io.emit("message", state["log"]("relay", "Supervisor's plan:\n" + plan))
+    io.emit("message", state["log"]("relay",
+                                f"{room_helper_name(state, "supervisor")}'s plan:\n" + plan))
     assign_workstreams(state, io)
     return tasks
 
@@ -4686,7 +5746,7 @@ def replan_failed_workstreams(state, io):
         record_usage(state, getattr(sup, "last_usage", None), kind="supervisor")
         supervisor_trace(state, io, "error", "Repair call failed",
                          str(e)[:500], status="failed")
-        io.emit("status", {"text": "Supervisor could not repair failed "
+        io.emit("status", {"text": f"{room_helper_name(state, "supervisor")} could not repair failed "
                                    f"work ({str(e)[:120]}) — failures remain "
                                    "visible; no retry was invented"})
         state["store"].save(state)
@@ -4703,7 +5763,7 @@ def replan_failed_workstreams(state, io):
         supervisor_trace(state, io, "error",
                          "No valid replacement tasks returned",
                          (reply or "")[:1000], status="failed")
-        io.emit("status", {"text": "Supervisor returned no valid replacement "
+        io.emit("status", {"text": f"{room_helper_name(state, "supervisor")} returned no valid replacement "
                                    "for the failed tasks; failures remain "
                                    "visible"})
         state["store"].save(state)
@@ -5126,12 +6186,13 @@ def make_activity_sink(io, key, provider, name, workspace):
 def choose_next_seat(state):
     """Peek at (index, source) of the seat that takes the next turn.
 
-    Authority order (ORCHESTRATION_DESIGN.md): the closing list — a wrap in
-    progress — beats everything; then mode-specific picks (speaker's
-    [[NEXT:]], the moderator — landing in their phases); then the round-robin
-    cursor. Pure peek apart from dropping closing ids that no longer resolve:
-    consumption happens in the loop AFTER the lap/cap check, so a cap-stop
-    can't eat a seat's closing turn.
+    Authority order (ORCHESTRATION_DESIGN_V2.md): the closing list — a wrap in
+    progress — beats everything; then the deterministic opening circuit and a
+    human forced floor; then mode-specific picks (speaker's [[NEXT:]], with the
+    moderator landing in the loop phase); then the round-robin cursor. Pure
+    peek apart from dropping closing ids that no longer resolve: consumption
+    happens in the loop AFTER the lap/cap check, so a cap-stop can't eat a
+    seat's closing turn.
 
     Returns (None, 'wrapped') when a closing sequence has run out of seats.
     """
@@ -5142,10 +6203,20 @@ def choose_next_seat(state):
         if not closing:
             return None, "wrapped"
         return slot_index(state, closing[0]), "closing"
-    if state.get("mode") == "speaker":
-        idx = slot_index(state, state.get("next_speaker"))
-        if idx is not None:
-            return idx, "next"
+
+    # Bootstrap is an engine invariant, not advice to a moderator. A human
+    # force-pick may choose WHICH unopened seat goes next; a request for an
+    # already-opened seat waits until the opening circuit is complete.
+    opener = opening_pick(state)
+    forced = slot_index(state, state.get("forced_next"))
+    if opener is not None:
+        opened, _turns = ensure_floor_state(state)
+        if forced is not None and not opened[_floor_key(
+                state["slot_ids"][forced])]:
+            return forced, "forced"
+        return opener, "opening"
+    if forced is not None:
+        return forced, "forced"
     idx = slot_index(state, state.get("cursor"))
     return (0 if idx is None else idx), "cursor"
 
@@ -5155,7 +6226,11 @@ def start_closing(state, i):
     order starting after the wrapper — the same order the old closing_left
     countdown produced, but persisted, so a wrap survives pause/resume."""
     ids = state["slot_ids"]
-    state["closing"] = list(ids[i + 1:]) + list(ids[:i])
+    order = list(range(i + 1, len(ids))) + list(range(0, i))
+    opened, _turns = ensure_floor_state(state)
+    state["closing"] = [ids[k] for k in order
+                        if floor_available(state, k)
+                        and opened[_floor_key(ids[k])]]
 
 
 # ------------------------------------------------- tier-2 spawned helpers ---
@@ -5388,7 +6463,7 @@ class SpawnManager:
         if cfg.get("pending_teams"):
             return "a team is already running — one at a time"
         try:
-            labels = assign_labels([(p, lb) for p, _, _, lb in slots])
+            labels = assign_labels([(p, lb, m) for p, m, _, lb in slots])
         except ValueError as e:
             return str(e)
         rounds = min(int(opts.get("rounds") or CHILD_ROUNDS), CHILD_ROUNDS)
@@ -5437,7 +6512,9 @@ class SpawnManager:
             # hand the team different context than its parent got, unrecorded.
             "brief": state.get("brief"),
             "pending": {i: [] for i in range(len(agents))},
-            "introduced": [False] * len(agents), "store": store,
+            "introduced": [False] * len(agents),
+            "floor_opened": {}, "floor_turns": {},
+            "forced_next": None, "deferred_wrap": None, "store": store,
         }
         child["log"] = make_log(child, store)
         write_project_context(child_dir, child["brief"])
@@ -5799,7 +6876,8 @@ def build_moderator(state):
                                   else None)
     effort = spec.get("effort") or ("low" if provider == "claude" else None)
     return AGENT_TYPES[provider](state["workspace"], yolo=False,
-                                 model=model, effort=effort, name="Moderator")
+                                 model=model, effort=effort,
+                                 name=room_helper_name(state, "moderator"))
 
 
 def moderator_pick(state, io, moderator):
@@ -5831,7 +6909,7 @@ def moderator_pick(state, io, moderator):
         reply = moderator.turn(prompt)
     except Exception as e:
         record_usage(state, getattr(moderator, "last_usage", None), kind="moderator")
-        io.emit("status", {"text": f"Moderator error ({str(e)[:120]}) — "
+        io.emit("status", {"text": f"{room_helper_name(state, "moderator")} error ({str(e)[:120]}) — "
                                    f"continuing in order"})
         return None, False
     finally:
@@ -5856,6 +6934,56 @@ def moderator_pick(state, io, moderator):
                                f"({(reply or '')[:80]!r}) — continuing "
                                f"in order"})
     return None, False
+
+
+def apply_sequential_floor_policy(state, i, source, io, moderator=None):
+    """Apply the configured floor policy to the structural scheduler pick.
+
+    `choose_next_seat` owns only closing/opening/human-force/cursor structure.
+    This is the ONE boundary for cyclic, nomination and moderated floors.
+    It returns ``(index, source, done, moderator)``; `done` is a completion
+    proposal whose closing transition remains owned by the loop.
+    """
+    if i is None or state.get("closing") is not None:
+        return i, source, False, moderator
+
+    floor = orchestration(state)["floor"]
+    if source == "cursor" and floor == "nomination":
+        idx = slot_index(state, state.get("next_speaker"))
+        if idx is not None:
+            i, source = idx, "next"
+    elif (source == "cursor" and floor == "moderated"
+          and state.get("turn", 0) > 0
+          and not state.get("_mod_disabled")):
+        if moderator is None:
+            moderator = build_moderator(state)
+        m_idx, done = moderator_pick(state, io, moderator)
+        if done:
+            return None, "moderator", True, moderator
+        if m_idx is not None:
+            i, source = m_idx, "moderator"
+            state["_mod_failures"] = 0
+        else:
+            fails = state.get("_mod_failures", 0) + 1
+            state["_mod_failures"] = fails
+            if fails >= 3:
+                state["_mod_disabled"] = True
+                state["store"].system(
+                    "Moderator is failing — continuing in round-robin order.",
+                    round=state["rnd"])
+
+    fair_i = i if source == "opening" else fairness_pick(state, i)
+    if fair_i != i:
+        rejected = state["agents"][i].name
+        if source == "next":
+            state["next_speaker"] = None
+        elif source == "forced":
+            state["forced_next"] = None
+        i, source = fair_i, "fairness"
+        io.emit("status", {"text": f"Fairness override: "
+                                     f"{state['agents'][i].name} speaks before "
+                                     f"{rejected} gets farther ahead."})
+    return i, source, False, moderator
 
 
 def run_rounds(state, io):
@@ -5927,10 +7055,31 @@ def run_rounds(state, io):
         agent.on_approval = ask_permission
 
     ended = None
+    completion = state.get("completion")
+    if not isinstance(completion, dict):
+        completion = {}
+        state["completion"] = completion
+    completion["lifecycle"] = "active"
+    completion.pop("termination_reason", None)
+    state.pop("termination_reason", None)
     try:
         ended = _run_rounds(state, io)
         return ended
     finally:
+        if ended is not None:
+            reason = state.get("termination_reason") or {
+                "wrapped": "wrap", "stopped": "stop", "cap": "cap",
+                "fatal": "fatal"}.get(ended, "unknown")
+            completion["termination_reason"] = reason
+            completion["lifecycle"] = "paused"
+            completion.setdefault("goal_verdict", "unknown")
+            if completion.get("goal_verdict") == "unknown":
+                completion.pop("verdict_source", None)
+            try:
+                if isinstance(state.get("store"), SessionStore):
+                    state["store"].save(state)
+            except Exception:
+                pass
         try:
             write_outcome(state["store"].dir,
                           workspace=state.get("workspace"), ended=ended)
@@ -5958,13 +7107,20 @@ def _run_rounds(state, io):
     # sticky for the duration of a turn, so without this a seat stopped last
     # run would refuse to speak forever.
     rearm_seats(state)
-    if state.get("mode") == "supervisor":
+    # Double-failed sequential seats are unavailable only for that run. Their
+    # queues remain owed, and an explicit continuation gives them a clean
+    # chance to recover just like free mode's parked seats.
+    state["_floor_unavailable"] = set()
+    policy = orchestration(state)
+    if policy["workflow"] == "panel":
+        return run_panel(state, io)
+    if policy["workflow"] == "supervisor":
         if not state.get("workstreams"):
             plan_workstreams(state, io)
         return run_parallel(state, io)
-    if state.get("mode") == "parallel":
+    if policy["concurrency"] == "barrier":
         return run_parallel(state, io)
-    if state.get("mode") == "free":
+    if policy["concurrency"] == "reactive":
         return run_free(state, io)
     agents, log, store = state["agents"], state["log"], state["store"]
     slot_ids, providers = state["slot_ids"], state["providers"]
@@ -5972,7 +7128,10 @@ def _run_rounds(state, io):
     state.setdefault("mode", DEFAULT_MODE)
     state.setdefault("turn", 0)
     state.setdefault("next_speaker", None)
+    state.setdefault("forced_next", None)
+    state.setdefault("deferred_wrap", None)
     state.setdefault("closing", None)
+    ensure_floor_state(state)
     moderator = None                 # built lazily on the first pick
     mgr = SpawnManager(state, io)
     mgr.announce_lost_helpers()
@@ -6002,12 +7161,32 @@ def _run_rounds(state, io):
         # switching identity halfway through a turn.
         io.on_turn_boundary(state)
 
+        # A pre-opening [[WRAP]] survives a crash as a deferred slot id. Once
+        # the last seat has opened, activate the normal persisted closing list
+        # before any policy gets another ordinary pick.
+        if (state["closing"] is None and state.get("deferred_wrap") is not None
+                and opening_complete(state)):
+            wrapper = slot_index(state, state["deferred_wrap"])
+            state["deferred_wrap"] = None
+            if wrapper is not None:
+                # Everyone after the requester already saw the wrap and spoke
+                # during the opening circuit. Those responses ARE their last
+                # words; charging a second closing lap would be pure padding.
+                state["closing"] = []
+                note = (f"All participants have now responded — honoring "
+                        f"{agents[wrapper].name}'s earlier wrap request.")
+                io.emit("status", {"text": note})
+                store.system(note, round=state["rnd"])
+                store.save(state)
+
         # Until-done: no round cap; the hard turn ceiling is the spend
         # backstop. Closing turns are exempt (a wrap in flight finishes;
         # bounded by seat count anyway).
-        if state.get("until_done") and state["closing"] is None:
+        if (state.get("until_done") and state["closing"] is None
+                and state.get("deferred_wrap") is None):
             ceiling = state.get("turn_ceiling") or DEFAULT_CEILING
             if state["turn"] >= ceiling:
+                state["termination_reason"] = "ceiling"
                 note = (f"Safety ceiling reached ({ceiling} turns) without a "
                         f"wrap — pausing. Continue the chat to extend the "
                         f"ceiling, or /stop for good.")
@@ -6021,48 +7200,40 @@ def _run_rounds(state, io):
             io.emit("status", {"text": "Conversation wrapped."})
             outcome = "wrapped"
             break
-        dynamic = state["mode"] in ("speaker", "moderator")
+        dynamic = policy["budget"]["unit"] == "turns"
         if dynamic:
             # per-turn budget: the rounds knob means ≈ conversation length,
             # enforced as turns × seats. Closing turns are exempt — once a
             # wrap is in flight, the last words get to finish (bounded by
             # seat count anyway). rnd becomes the lap counter for captions.
-            if state["closing"] is None and not state.get("until_done") and \
-                    state["turn"] >= state["max"] * len(agents):
+            if (state["closing"] is None and state.get("deferred_wrap") is None
+                    and not state.get("until_done") and
+                    state["turn"] >= state["max"] * len(agents)):
                 break                       # outcome stays "cap"
             state["rnd"] = 1 + state["turn"] // len(agents)
-            if (source == "cursor" and state["mode"] == "moderator"
-                    and state["closing"] is None and state["turn"] > 0
-                    and not state.get("_mod_disabled")):
-                if moderator is None:
-                    moderator = build_moderator(state)
-                m_idx, done = moderator_pick(state, io, moderator)
-                if done:
-                    state["closing"] = [slot_ids[k] for k in range(len(agents))
-                                        if state["introduced"][k]]
-                    note = ("The moderator called the conversation done — "
-                            "closing remarks…")
-                    io.emit("status", {"text": note})
-                    store.system(note, round=state["rnd"])
-                    store.save(state)
-                    continue
-                if m_idx is not None:
-                    i, source = m_idx, "moderator"
-                    state["_mod_failures"] = 0
-                else:
-                    fails = state.get("_mod_failures", 0) + 1
-                    state["_mod_failures"] = fails
-                    if fails >= 3:
-                        state["_mod_disabled"] = True
-                        store.system("Moderator is failing — continuing in "
-                                     "round-robin order.", round=state["rnd"])
         else:
             if i == 0:
                 # lap boundary: seats[0] (--start seat) beginning a new pass
-                if not state.get("until_done") and \
-                        state["rnd"] >= state["max"]:
+                if (not state.get("until_done")
+                        and state.get("deferred_wrap") is None and
+                        state["rnd"] >= state["max"]):
                     break                   # outcome stays "cap"
                 state["rnd"] += 1
+
+        i, source, floor_done, moderator = apply_sequential_floor_policy(
+            state, i, source, io, moderator)
+        if floor_done:
+            state["termination_reason"] = "moderator_done"
+            opened, _turns = ensure_floor_state(state)
+            state["closing"] = [slot_ids[k] for k in range(len(agents))
+                                if floor_available(state, k)
+                                and opened[_floor_key(slot_ids[k])]]
+            note = ("The moderator called the conversation done — "
+                    "closing remarks…")
+            io.emit("status", {"text": note})
+            store.system(note, round=state["rnd"])
+            store.save(state)
+            continue
         if source == "closing":
             # consumed AFTER the cap check — popped before the attempt, so a
             # closing seat that fails its turn loses its slot (deliberately:
@@ -6070,9 +7241,12 @@ def _run_rounds(state, io):
             state["closing"].pop(0)
         elif source == "next":
             state["next_speaker"] = None    # consumed by this attempt
+        elif source == "forced":
+            state["forced_next"] = None     # one human-directed attempt
         rnd = state["rnd"]
         agent = agents[i]
 
+        deliver_hidden_digest(state, i, io)
         message, consumed, first_turn = compose_prompt(state, i)
         key = slot_ids[i]
         io.emit("thinking", {"speaker": key, "provider": providers[i],
@@ -6097,6 +7271,7 @@ def _run_rounds(state, io):
             if no_retry(e1):
                 record_usage(state, getattr(agent, "last_usage", None),
                              seat_key=key, kind="failed")
+                mark_floor_unavailable(state, i)
                 if source != "closing":
                     state["cursor"] = slot_ids[(i + 1) % len(agents)]
                 commit_skip(state, i, error_excerpt(e1), io,
@@ -6111,6 +7286,7 @@ def _run_rounds(state, io):
             try:
                 reply = agent.turn(message, on_activity=on_act)
             except Exception as e2:
+                mark_floor_unavailable(state, i)
                 if source != "closing":
                     state["cursor"] = slot_ids[(i + 1) % len(agents)]
                 if no_retry(e2):
@@ -6128,6 +7304,7 @@ def _run_rounds(state, io):
         # seats as if the agent had said it, which hid a hard failure for a
         # whole conversation. Adapters raise on empty; this is the backstop.
         if not (reply or "").strip():
+            mark_floor_unavailable(state, i)
             if source != "closing":
                 state["cursor"] = slot_ids[(i + 1) % len(agents)]
             commit_skip(state, i,
@@ -6155,15 +7332,31 @@ def _run_rounds(state, io):
         plan_ready = wrapped_now and drafting
         if plan_ready:
             wrapped_now = False          # wrap means "plan done", not "chat done"
+        deferred_this_turn = False
+        if wrapped_now and not opening_complete_after(state, i):
+            # Record the request in the successful commit below, but keep the
+            # opening circuit alive. The first request wins; later seats may
+            # agree, but cannot silently replace the persisted requester.
+            if state.get("deferred_wrap") is None:
+                state["deferred_wrap"] = slot_ids[i]
+            wrapped_now = False
+            deferred_this_turn = True
         if wrapped_now:
             start_closing(state, i)
-        elif state["mode"] == "speaker" and state["closing"] is None:
+        elif (policy["floor"] == "nomination"
+              and state["closing"] is None):
             set_next_speaker(state, i, reply, io)
         if source != "closing":
             # the cursor is the fallback order in every mode: after seat i,
             # listed order resumes from i+1 whenever nothing overrides it
             state["cursor"] = slot_ids[(i + 1) % len(agents)]
         commit_reply(state, i, reply, consumed, io, activity=acts)
+        if deferred_this_turn:
+            note = (f"{agent.name} requested wrap before every participant "
+                    f"had opened — the request is deferred.")
+            io.emit("status", {"text": note})
+            store.system(note, round=state["rnd"])
+            store.save(state)
         handle_spawn_directives(state, i, reply, io, mgr)
         # after the commit: the question rides the recorded reply, and the
         # wait (possibly minutes) happens with every queue already saved
@@ -6179,6 +7372,331 @@ def _run_rounds(state, io):
     if outcome == "cap" and io.should_stop():
         outcome = "stopped"
     return outcome
+
+
+PANEL_PHASES = ("draft", "critique", "synthesis", "done", "failed")
+PANEL_SOURCE_MAX = 18000
+PANEL_DRAFT_PROMPT = (
+    "PANEL REVIEW — DRAFT PHASE. Produce an independent answer to the goal. "
+    "Do not anticipate or imitate the other participants: their drafts are "
+    "being collected behind a barrier and are not visible yet. State your "
+    "reasoning, recommendation, and important risks. Do not use [[WRAP]].")
+PANEL_CRITIQUE_PROMPT = (
+    "PANEL REVIEW — CRITIQUE PHASE. Review every available draft below. "
+    "Identify unsupported assumptions, disagreements, missed risks, and the "
+    "strongest material the final answer should retain. Critique arguments, "
+    "not authors; do not merely restate your own draft. Do not use [[WRAP]].")
+PANEL_SYNTHESIS_PROMPT = (
+    "PANEL REVIEW — SYNTHESIS PHASE. Write the single final answer for Josh "
+    "using the drafts and critiques below. Resolve disagreements explicitly, "
+    "keep only supported conclusions, and make the result self-contained. "
+    "You are the designated author: do not defer or request another pass.")
+
+
+def ensure_panel_state(state):
+    """Return a normalized, recovery-aware persisted Panel state."""
+    slot_ids = list(state["slot_ids"])
+    panel = state.get("panel")
+    if not isinstance(panel, dict):
+        panel = {}
+        state["panel"] = panel
+    phase = panel.get("phase")
+    if phase not in PANEL_PHASES:
+        phase = "draft"
+    panel["phase"] = phase
+    panel["cycle"] = max(1, int(panel.get("cycle") or 1))
+    if panel.get("synthesizer") not in slot_ids:
+        panel["synthesizer"] = slot_ids[0]
+    thread_id = panel.get("thread_id") or f"panel:{panel['cycle']}"
+    panel["thread_id"] = thread_id
+    source = panel.setdefault("source_pending", {})
+    for i, sid in enumerate(slot_ids):
+        source.setdefault(_floor_key(sid), list(state["pending"][i]))
+    completed = panel.setdefault("completed", {})
+    failed = panel.setdefault("failed", {})
+    row_ids = panel.setdefault("source_rows", {})
+    for name in ("draft", "critique", "synthesis"):
+        completed.setdefault(name, [])
+        failed.setdefault(name, [])
+        row_ids.setdefault(name, [])
+
+    # A JSONL row is durable before meta.json is saved. Recover that narrow
+    # crash window so a successful model call is never replayed on resume.
+    intent_phase = {"answer": "draft", "critique": "critique",
+                    "synthesis": "synthesis"}
+    for row in read_messages(state["store"].dir):
+        if row.get("thread_id") != thread_id:
+            continue
+        row_phase = intent_phase.get(row.get("intent"))
+        sid = row.get("speaker")
+        mid = row.get("message_id")
+        if row_phase and sid in slot_ids:
+            if sid not in completed[row_phase]:
+                completed[row_phase].append(sid)
+            if mid and mid not in row_ids[row_phase]:
+                row_ids[row_phase].append(mid)
+    return panel
+
+
+def _panel_rows(state, phases):
+    panel = ensure_panel_state(state)
+    wanted = []
+    for phase in phases:
+        wanted.extend(panel["source_rows"].get(phase) or [])
+    by_id = {r.get("message_id"): r
+             for r in read_messages(state["store"].dir)}
+    return [by_id[mid] for mid in wanted if mid in by_id]
+
+
+def _panel_source_text(state, phases):
+    """Bounded canonical source packet; every successful row is represented."""
+    rows = _panel_rows(state, phases)
+    if not rows:
+        return "(No successful source rows were available in this stage.)"
+    remaining = PANEL_SOURCE_MAX
+    chunks = []
+    for row in rows:
+        heading = f"[{row.get('message_id')}] {row.get('name', 'Participant')}:\n"
+        allowance = max(120, min(3500, remaining - len(heading)))
+        text = str(row.get("text") or "")
+        if len(text) > allowance:
+            text = text[:allowance].rstrip() + "\n[truncated by relay budget]"
+        chunk = heading + text
+        chunks.append(chunk)
+        remaining -= len(chunk)
+        if remaining <= 120:
+            # Keep a visible placeholder for every remaining source row.
+            for rest in rows[len(chunks):]:
+                chunks.append(f"[{rest.get('message_id')}] "
+                              f"{rest.get('name', 'Participant')}: "
+                              "[content omitted by relay budget]")
+            break
+    return "\n\n".join(chunks)
+
+
+def _panel_prompt(state, i, phase):
+    panel = ensure_panel_state(state)
+    if phase == "draft":
+        backlog = panel["source_pending"].get(
+            _floor_key(state["slot_ids"][i]), [])
+        message, consumed, first = compose_prompt(
+            state, i, backlog_override=backlog)
+        instruction = PANEL_DRAFT_PROMPT
+    elif phase == "critique":
+        message, consumed, first = compose_prompt(state, i)
+        instruction = (PANEL_CRITIQUE_PROMPT + "\n\nCOLLECTED DRAFTS:\n" +
+                       _panel_source_text(state, ("draft",)))
+    else:
+        message, consumed, first = compose_prompt(state, i)
+        instruction = (PANEL_SYNTHESIS_PROMPT + "\n\nCOLLECTED DRAFTS AND "
+                       "CRITIQUES:\n" +
+                       _panel_source_text(state, ("draft", "critique")))
+    return "\n\n".join(p for p in (message, instruction) if p), consumed, first
+
+
+def _panel_roster(state, phase):
+    panel = ensure_panel_state(state)
+    if phase == "synthesis":
+        return [state["slot_ids"].index(panel["synthesizer"])]
+    return list(range(len(state["agents"])))
+
+
+def _panel_phase_settled(state, phase):
+    panel = ensure_panel_state(state)
+    expected = {state["slot_ids"][i] for i in _panel_roster(state, phase)}
+    settled = (set(panel["completed"].get(phase) or []) |
+               set(panel["failed"].get(phase) or []))
+    return expected <= settled
+
+
+def _advance_panel(state):
+    panel = ensure_panel_state(state)
+    panel["phase"] = {"draft": "critique", "critique": "synthesis",
+                      "synthesis": "done"}.get(panel["phase"], panel["phase"])
+    state["store"].save(state)
+    return panel["phase"]
+
+
+def run_panel(state, io):
+    """Run the persisted draft → critique → synthesis Panel state machine.
+
+    Each stage is one barrier. Prompts are composed before threads start;
+    successful and failed slot ids settle independently, and stored row ids
+    recover a commit/meta crash window. A missing draft or critique stays
+    visibly absent. Synthesis failure is fatal and never changes authors.
+    """
+    agents, store = state["agents"], state["store"]
+    slot_ids, providers = state["slot_ids"], state["providers"]
+    lock = state.setdefault("lock", threading.RLock())
+    state.setdefault("turn", 0)
+    state.setdefault("closing", None)
+    mgr = SpawnManager(state, io)
+    mgr.announce_lost_helpers()
+    announce_lost_ask(state, io)
+    ensure_panel_state(state)
+
+    def drain_boundary():
+        stopped = False
+        for h in io.drain_human():
+            if h.startswith("/"):
+                with lock:
+                    if dispatch_command(state, h, io):
+                        stopped = True
+                continue
+            with lock:
+                row = state["log"]("Josh (human)", h)
+                io.emit("message", row)
+                for j in range(len(agents)):
+                    state["pending"][j].append(
+                        f"Josh (human) interjects: {h}")
+                store.save(state)
+        return stopped
+
+    while True:
+        panel = ensure_panel_state(state)
+        phase = panel["phase"]
+        if phase == "done":
+            io.emit("status", {"text": "Panel Review completed after synthesis."})
+            mgr.finish()
+            return "wrapped"
+        if phase == "failed":
+            mgr.finish()
+            return "fatal"
+        if io.should_stop() or drain_boundary():
+            mgr.finish()
+            return "stopped"
+        io.on_turn_boundary(state)
+
+        if _panel_phase_settled(state, phase):
+            _advance_panel(state)
+            continue
+        state["rnd"] = max(state.get("rnd", 0),
+                           {"draft": 1, "critique": 2,
+                            "synthesis": 3}[phase])
+        completed = set(panel["completed"].get(phase) or [])
+        failed = set(panel["failed"].get(phase) or [])
+        roster = [i for i in _panel_roster(state, phase)
+                  if slot_ids[i] not in completed | failed]
+        prompts = {i: _panel_prompt(state, i, phase) for i in roster}
+        for i in roster:
+            io.emit("thinking", {"speaker": slot_ids[i],
+                                 "provider": providers[i],
+                                 "name": agents[i].name,
+                                 "round": state["rnd"], "turns": 3,
+                                 "turn": state["turn"] + 1,
+                                 "panel_phase": phase})
+        results = {}
+
+        def mark_failed(i, note, **kw):
+            sid = slot_ids[i]
+            panel = ensure_panel_state(state)
+            if phase == "synthesis":
+                panel["phase"] = "failed"
+            elif sid not in panel["failed"][phase]:
+                panel["failed"][phase].append(sid)
+            commit_skip(state, i, note, io, **kw)
+
+        def seat_task(i):
+            agent = agents[i]
+            key = slot_ids[i]
+            message, consumed, _first = prompts[i]
+            on_act, acts = make_activity_sink(
+                io, key, providers[i], agent.name, state["workspace"])
+            try:
+                try:
+                    reply = agent.turn(message, on_activity=on_act)
+                except Exception as e1:
+                    fatal = fatal_seat_error(agent, e1)
+                    if fatal:
+                        with lock:
+                            ensure_panel_state(state)["phase"] = "failed"
+                            mark_failed(i, fatal, fatal=True)
+                        results[i] = "fatal"
+                        return
+                    if no_retry(e1):
+                        with lock:
+                            record_usage(state, getattr(agent, "last_usage", None),
+                                         seat_key=key, kind="failed")
+                            mark_failed(i, error_excerpt(e1), kind="timeout",
+                                        retried=False)
+                        results[i] = "fatal" if phase == "synthesis" else "skip"
+                        return
+                    with lock:
+                        record_usage(state, getattr(agent, "last_usage", None),
+                                     seat_key=key, kind="retry")
+                    note_retry(state, io, agent, e1)
+                    on_act, acts = make_activity_sink(
+                        io, key, providers[i], agent.name, state["workspace"])
+                    try:
+                        reply = agent.turn(message, on_activity=on_act)
+                    except Exception as e2:
+                        with lock:
+                            mark_failed(
+                                i, f"{agent.name} failed twice in Panel "
+                                f"{phase}; its contribution is absent. "
+                                f"({error_excerpt(e2)})")
+                        results[i] = "fatal" if phase == "synthesis" else "skip"
+                        return
+                if not (reply or "").strip():
+                    with lock:
+                        mark_failed(i, f"{agent.name} returned an empty Panel "
+                                    f"{phase}; its contribution is absent.")
+                    results[i] = "fatal" if phase == "synthesis" else "skip"
+                    return
+                with lock:
+                    panel = ensure_panel_state(state)
+                    if key not in panel["completed"][phase]:
+                        panel["completed"][phase].append(key)
+                    intent = {"draft": "answer", "critique": "critique",
+                              "synthesis": "synthesis"}[phase]
+                    try:
+                        row = commit_reply(
+                            state, i, reply, consumed, io, activity=acts,
+                            force_broadcast=True,
+                            envelope_extra={"thread_id": panel["thread_id"],
+                                            "intent": intent})
+                    except Exception:
+                        panel["completed"][phase].remove(key)
+                        raise
+                    if row["message_id"] not in panel["source_rows"][phase]:
+                        panel["source_rows"][phase].append(row["message_id"])
+                    store.save(state)
+                    handle_spawn_directives(state, i, reply, io, mgr)
+                handle_ask_directive(state, i, reply, io, lock=lock)
+                results[i] = "ok"
+            except BaseException as exc:
+                with lock:
+                    ensure_panel_state(state)["phase"] = "failed"
+                    note = (f"{agent.name}: Panel {phase} could not be "
+                            f"committed ({error_excerpt(exc)}) — stopping.")
+                    commit_skip(state, i, note, io, fatal=True)
+                results[i] = "fatal"
+            finally:
+                io.emit("thinking_done", {"speaker": key})
+
+        threads = [threading.Thread(target=seat_task, args=(i,), daemon=True)
+                   for i in roster]
+        for thread in threads:
+            thread.start()
+        stopping = False
+        while any(thread.is_alive() for thread in threads):
+            if io.should_stop() and not stopping:
+                stopping = True
+                cancel_all(state)
+            for thread in threads:
+                thread.join(timeout=0.25)
+        mgr.drain_into_pending()
+        if stopping or io.should_stop():
+            mgr.finish()
+            return "stopped"
+        if any(result == "fatal" for result in results.values()):
+            mgr.finish()
+            return "fatal"
+        if _panel_phase_settled(state, phase):
+            next_phase = _advance_panel(state)
+            io.emit("status", {"text": f"Panel {phase} complete" +
+                                       (f" — starting {next_phase}."
+                                        if next_phase != "done" else ".")})
 
 
 def run_parallel(state, io):
@@ -6267,6 +7785,7 @@ def run_parallel(state, io):
             if state.get("until_done"):
                 ceiling = state.get("turn_ceiling") or DEFAULT_CEILING
                 if state["turn"] >= ceiling:
+                    state["termination_reason"] = "ceiling"
                     note = (f"Safety ceiling reached ({ceiling} turns) "
                             f"without a wrap — pausing. Continue the chat to "
                             f"extend the ceiling, or /stop for good.")
@@ -6286,6 +7805,11 @@ def run_parallel(state, io):
         else:
             roster = list(range(len(agents)))
 
+        # Addressed rows from the prior barrier synchronize before any prompt
+        # in this barrier is composed, so every seat's delivery lens matches
+        # the context it actually receives.
+        for i in roster:
+            deliver_hidden_digest(state, i, io)
         # compose everything BEFORE any thread runs
         prompts = {i: compose_prompt(state, i) for i in roster}
         for i in roster:
@@ -6410,6 +7934,9 @@ def run_parallel(state, io):
             # wave is decided on the final state of the plan.
             supervised_done = supervise_next_wave(state, io) == "done"
         if supervised_done:
+            state["termination_reason"] = "supervisor_done"
+            state.setdefault("completion", {}).update({
+                "goal_verdict": "resolved", "verdict_source": "supervisor"})
             io.emit("status", {"text": "Supervisor called the job done."})
             outcome = "wrapped"
             break
@@ -6477,6 +8004,7 @@ def run_free(state, io):
     if state["turn"] == 0 and state["rnd"] == 0:
         state["rnd"] = 1         # lap 1 from the first beat (opener nudges)
     taken = [0] * n              # per-seat commits (this process; fairness)
+    seen_backlog = [-1] * n      # one stable debounce window before a turn
     busy = [False] * n           # seat currently composing/turning
     parked = [False] * n
     inbox = {i: [] for i in range(n)}    # deferred /clear//compact jobs
@@ -6523,15 +8051,24 @@ def run_free(state, io):
                     closing = state["closing"]
                     if closing is not None:
                         if key in closing:
-                            closing.remove(key)   # consume BEFORE the attempt
-                            job = "turn"
+                            if state.get("hidden", {}).get(_floor_key(key)):
+                                job = "digest"
+                            else:
+                                closing.remove(key) # consume BEFORE attempt
+                                job = "turn"
                             break
                         return                    # said my piece — done
                     # an un-introduced seat with an empty queue is the
                     # no-opener opening beat: every seat opens at once
-                    if (pending[i] or not state["introduced"][i]) \
+                    has_digest = bool(state.get("hidden", {}).get(
+                        _floor_key(key)))
+                    if (pending[i] or not state["introduced"][i] or has_digest) \
                             and budget_left() and not throttled(i):
-                        job = "turn"
+                        if pending[i] and seen_backlog[i] != len(pending[i]):
+                            seen_backlog[i] = len(pending[i])
+                            cond.wait(timeout=FREE_DEBOUNCE)
+                            continue
+                        job = "digest" if has_digest else "turn"
                         break
                     cond.wait(timeout=0.5)
                 busy[i] = True
@@ -6540,6 +8077,11 @@ def run_free(state, io):
                     turn_no = state["turn"] + 1
                     lap = 1 + state["turn"] // n
 
+            if job == "digest":
+                deliver_hidden_digest(state, i, io, lock=lock)
+                with cond:
+                    cond.notify_all()
+                continue
             if job == "clear":
                 with cond:
                     agent.session_id = None
@@ -6766,6 +8308,7 @@ def run_free(state, io):
                     and not any(inbox[k] for k in range(n))):
                 if state.get("until_done"):
                     ceiling = (state.get("turn_ceiling") or DEFAULT_CEILING)
+                    state["termination_reason"] = "ceiling"
                     note = (f"Safety ceiling reached ({ceiling} turns) "
                             f"without a wrap — pausing. Continue the chat "
                             f"to extend the ceiling, or /stop for good.")
@@ -6817,6 +8360,12 @@ def main():
                     choices=[m.replace("_", "-") for m in MODES],
                     help="turn-taking mode (default round-robin); other "
                          "modes land feature by feature")
+    ap.add_argument("--preset", choices=tuple(PRESET_MODES), default=None,
+                    help="goal-first recipe: open-discussion, panel-review, "
+                         "build-execute, or live-room; overrides --mode")
+    ap.add_argument("--synthesizer", default=None,
+                    help="Panel Review final author: slot number, label, or "
+                         "provider (default: the start seat)")
     ap.add_argument("--moderator", default=None,
                     metavar="provider[:model[:effort]]",
                     help="who moderates in --mode moderator (default "
@@ -6876,10 +8425,13 @@ def main():
     permission = normalize_permission(
         args.permission, "full" if args.yolo else DEFAULT_PERMISSION)
 
-    mode = args.mode.replace("-", "_")
+    mode = (PRESET_MODES[args.preset] if args.preset else
+            args.mode.replace("-", "_"))
     if mode not in IMPLEMENTED_MODES:
         ok = ", ".join(m.replace("_", "-") for m in IMPLEMENTED_MODES)
         sys.exit(f"--mode {args.mode} isn't available yet (implemented: {ok})")
+    if args.synthesizer and mode != "panel":
+        print(f"{DIM}note: --synthesizer is ignored outside Panel Review{RESET}")
     moderator_spec = None
     if args.moderator:
         mp, mm, me, mlabel = parse_agent_token(args.moderator)
@@ -6914,7 +8466,7 @@ def main():
         "gemini": (args.gemini_model, args.gemini_effort),
     }
     try:
-        labels = assign_labels([(p, lb) for p, _, _, lb in slots])
+        labels = assign_labels([(p, lb, m) for p, m, _, lb in slots])
     except ValueError as e:
         sys.exit(str(e))
     seats = [(p, m or tuning[p][0], e or tuning[p][1], lb)
@@ -6937,6 +8489,22 @@ def main():
             sys.exit(f"--start must be a slot number, label, or provider "
                      f"(valid: {', '.join(valid)})")
         seats = seats[idx:] + seats[:idx]
+
+    synthesizer = 0
+    if mode == "panel" and args.synthesizer:
+        raw = args.synthesizer.strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(seats):
+            synthesizer = int(raw) - 1
+        else:
+            low = raw.lower()
+            matches = [i for i, seat in enumerate(seats)
+                       if seat[3].lower() == low]
+            if not matches:
+                matches = [i for i, seat in enumerate(seats)
+                           if seat[0] == low]
+            if len(matches) != 1:
+                sys.exit("--synthesizer must name exactly one Panel seat")
+            synthesizer = matches[0]
 
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     slug = re.sub(r"[^a-z0-9]+", "-", args.topic.lower())[:40].strip("-") or "chat"
@@ -6983,6 +8551,10 @@ def main():
         print(f"rounds       : up to {args.turns}")
     if mode != DEFAULT_MODE:
         print(f"turn order   : {mode.replace('_', ' ')}")
+    preview = estimate_calls(normalize_orchestration(
+        mode=mode, turns=args.turns, until_done=args.until_done), len(agents))
+    print(f"call preview : about {preview['seat_calls']} seat + "
+          f"{preview['side_calls']} side calls (estimate)")
     print(f"permissions  : {PERMISSION_LEVELS[permission]['label']}")
     print(f"transcript   : {transcript}")
     print(f"interject    : type + Enter anytime · /stop ends · /turns N recaps "
@@ -6996,6 +8568,8 @@ def main():
         store.system(text, round=0)
 
     brief = project_brief(workspace, session_dir,
+                          spec=helper_spec([p for p, _, _, _ in seats],
+                                           moderator_spec),
                           enabled=not args.no_brief,
                           on_status=brief_status_row)
     write_project_context(session_dir, brief)
@@ -7003,6 +8577,10 @@ def main():
     human_q = queue.Queue()
     start_stdin_reader(human_q)
 
+    recipe = normalize_orchestration(
+        mode=mode, turns=args.turns, until_done=args.until_done)
+    if args.preset == "live-room":
+        recipe["routing"] = "addressed"
     state = {"agents": agents, "slot_ids": list(range(len(agents))),
              "brief": brief,
              "providers": [p for p, _, _, _ in seats],
@@ -7013,10 +8591,13 @@ def main():
              "connectors": bool(args.connectors),
              "turns": args.turns,
              "rnd": 0, "max": args.turns, "ended": False, "mode": mode,
+             "orchestration": recipe,
              "moderator": moderator_spec,
              "supervisor": None, "supervisor_trace": [],
              "supervisor_goal": None, "supervisor_waves": 0,
              "supervisor_wave_index": 1,
+             "panel": ({"synthesizer": synthesizer} if mode == "panel"
+                       else None),
              "until_done": bool(args.until_done),
              "turn_ceiling": max(1, args.ceiling) if args.until_done else None,
              "spawn": {"tier1": not args.no_native_subagents,
@@ -7026,7 +8607,9 @@ def main():
                        "teams_used": 0},
              "ask": not args.no_ask,
              "pending": {i: [] for i in range(len(agents))},
-             "introduced": [False] * len(agents), "store": store}
+             "introduced": [False] * len(agents),
+             "floor_opened": {}, "floor_turns": {},
+             "forced_next": None, "deferred_wrap": None, "store": store}
     if brief and brief.get("usage"):
         record_usage(state, brief["usage"], kind="brief")
 
@@ -7050,6 +8633,7 @@ def main():
     except KeyboardInterrupt:
         print(f"\n{DIM}interrupted — transcript saved.{RESET}")
 
+    state.setdefault("completion", {})["lifecycle"] = "closed"
     store.save(state, ended=True)
     with open(transcript, "a", encoding="utf-8") as f:
         f.write("\n---\n*conversation ended*\n")

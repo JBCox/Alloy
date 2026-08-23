@@ -78,6 +78,8 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(meta["cursor"], 0)
         self.assertIsNone(meta["next_speaker"])
         self.assertIsNone(meta["closing"])
+        self.assertEqual(meta["floor_opened"], {"0": True, "1": True})
+        self.assertEqual(meta["floor_turns"], {"0": 1, "1": 1})
 
     def test_v1_meta_still_continuable(self):
         # run a chat, then strip the meta back to the v1 shape by hand
@@ -102,6 +104,18 @@ class SchedulerTests(unittest.TestCase):
         self.assertIn("different version", continue_block(meta))
 
     # ----------------------------------------------------------- resume --
+    def test_human_forced_floor_survives_resume_and_wins_opening(self):
+        state = build_state(self.tmp, [["old-a"], ["old-b"], ["old-c"]],
+                            turns=1, labels=["A", "B", "C"])
+        state["mode"] = "speaker"
+        relay.dispatch_command(state, "/next C", RecordingIO())
+        self.assertEqual(saved_meta(state)["forced_next"], 2)
+
+        st = self.resume(state, [["a-open"], ["b-open"], ["c-forced"]])
+        run_rounds(st, RecordingIO())
+        self.assertEqual(agent_rows(st), ["c-forced", "a-open", "b-open"])
+        self.assertIsNone(saved_meta(st)["forced_next"])
+
     def test_resume_continues_at_the_right_seat(self):
         # seat B dies fatally in round 1 -> the cursor stays ON B; a resume
         # (fresh process) retries B first instead of restarting at A
@@ -123,7 +137,8 @@ class SchedulerTests(unittest.TestCase):
         # its closing word — resume delivers exactly that one turn.
         state = build_state(
             self.tmp,
-            [["over. [[WRAP]]"], ["b-closing"], [KeyboardInterrupt()]],
+            [["a-open", "over. [[WRAP]]"],
+             ["b-open", "b-closing"], ["c-open", KeyboardInterrupt()]],
             turns=5, labels=["A", "B", "C"])
         with self.assertRaises(KeyboardInterrupt):
             run_rounds(state, RecordingIO())
@@ -132,7 +147,8 @@ class SchedulerTests(unittest.TestCase):
         outcome = run_rounds(st, RecordingIO())
         self.assertEqual(outcome, "wrapped")
         self.assertEqual(agent_rows(st),
-                         ["over. [[WRAP]]", "b-closing", "c-final"])
+                         ["a-open", "b-open", "c-open", "over. [[WRAP]]",
+                          "b-closing", "c-final"])
 
     def test_fatal_closing_seat_loses_its_slot(self):
         # pop-before-attempt: a closing seat that FAILS its turn (clean fatal,
@@ -140,24 +156,28 @@ class SchedulerTests(unittest.TestCase):
         dead = RuntimeError("No conversation found with session ID: bogus")
         state = build_state(
             self.tmp,
-            [["over. [[WRAP]]"], ["b-closing"], [dead]],
+            [["a-open", "over. [[WRAP]]"],
+             ["b-open", "b-closing"], ["c-open", dead]],
             turns=5, labels=["A", "B", "C"])
         outcome = run_rounds(state, RecordingIO())
         self.assertEqual(outcome, "fatal")
         self.assertEqual(saved_meta(state)["closing"], [])
 
     def test_closing_truncated_by_cap_is_persisted(self):
-        # wrapper at index 1 -> closing = [C, A]; A's closing turn sits at the
+        # B wraps after a complete opening lap -> closing = [C, A]. A's
+        # closing turn sits at the
         # lap boundary and the cap cuts it (matches the old countdown), but
         # the debt is now persisted truthfully instead of evaporating
         state = build_state(
             self.tmp,
-            [["a1"], ["b-wrap. [[WRAP]]"], ["c-close"]],
-            turns=1, labels=["A", "B", "C"])
+            [["a-open", "a2"], ["b-open", "b-wrap. [[WRAP]]"],
+             ["c-open", "c-close"]],
+            turns=2, labels=["A", "B", "C"])
         outcome = run_rounds(state, RecordingIO())
         self.assertEqual(outcome, "cap")
         self.assertEqual(agent_rows(state),
-                         ["a1", "b-wrap. [[WRAP]]", "c-close"])
+                         ["a-open", "b-open", "c-open", "a2",
+                          "b-wrap. [[WRAP]]", "c-close"])
         self.assertEqual(saved_meta(state)["closing"], [0])
 
     # -------------------------------------------------------- scheduling --

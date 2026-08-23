@@ -89,15 +89,17 @@ class SpeakerModeTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_next_directive_reorders(self):
+    def test_opening_circuit_precedes_next_directive(self):
         state = speaker_state(
             self.tmp,
             [["A here. [[NEXT: C]]", "a2"], ["b1"], ["c here. [[NEXT: A]]"]],
             turns=1, labels=["A", "B", "C"])
         run_rounds(state, RecordingIO())
-        # A -> C (skipping B) -> A -> budget (3 turns = 1 round x 3 seats)
+        # NEXT is retained, but it cannot silence B before everybody opens.
+        # The one-round budget is exactly the three-seat opening circuit.
         self.assertEqual(agent_rows(state),
-                         ["A here. [[NEXT: C]]", "c here. [[NEXT: A]]", "a2"])
+                         ["A here. [[NEXT: C]]", "b1",
+                          "c here. [[NEXT: A]]"])
 
     def test_missing_directive_falls_back_in_order(self):
         state = speaker_state(
@@ -128,15 +130,16 @@ class SpeakerModeTests(unittest.TestCase):
         self.assertTrue(any("no such seat" in t for t in notes), notes)
 
     def test_budget_is_turns_times_seats(self):
-        # everyone always hands back to A: budget must still cap the run
+        # A/B always hand back to one another: budget still caps the run, but
+        # the opening circuit guarantees C one turn first.
         state = speaker_state(
             self.tmp,
             [["a. [[NEXT: B]]"] * 9, ["b. [[NEXT: A]]"] * 9, ["c-never"]],
             turns=2, labels=["A", "B", "C"])
         run_rounds(state, RecordingIO())
         rows = agent_rows(state)
-        self.assertEqual(len(rows), 2 * 3)      # 6 turns, C never spoke
-        self.assertNotIn("c-never", rows)
+        self.assertEqual(len(rows), 2 * 3)
+        self.assertIn("c-never", rows)
 
     def test_wrap_beats_next(self):
         state = speaker_state(
@@ -165,8 +168,8 @@ class SpeakerModeTests(unittest.TestCase):
             for a, s in zip(st["agents"], [["a2"], ["b2"], ["c-back"]]):
                 a.script = list(s)
             run_rounds(st, RecordingIO())
-            self.assertEqual(agent_rows(st)[:2],
-                             ["go C. [[NEXT: C]]", "c-back"])
+            self.assertEqual(agent_rows(st)[:3],
+                             ["go C. [[NEXT: C]]", "b-no", "c-back"])
         finally:
             relay.AGENT_TYPES["claude"] = relay.ClaudeAgent
 
@@ -212,21 +215,51 @@ class ModeratorModeTests(unittest.TestCase):
         # pass finds nothing and the pick falls back to listed order
         FakeModerator.picks = ["C", "hmm not sure", "DONE"]
         state = self.mod_state(
-            [["a1", "a2", "a-close"], [], ["c1", "c-close"]],
+            [["a1", "a2", "a-close"], ["b1", "b-close"],
+             ["c1", "c2", "c-close"]],
             labels=["A", "B", "C"])
         io = RecordingIO()
         outcome = run_rounds(state, io)
         self.assertEqual(outcome, "wrapped")
-        # A opens (no moderator on turn 1); "C" -> C; unusable -> fallback in
-        # order after C = A; DONE -> only seats that SPOKE close (B never did)
+        # A/B/C open deterministically before the moderator is called. Then
+        # C is picked, an unusable answer falls back to A, and DONE closes all.
         self.assertEqual(agent_rows(state),
-                         ["a1", "c1", "a2", "a-close", "c-close"])
+                         ["a1", "b1", "c1", "c2", "a2",
+                          "a-close", "b-close", "c-close"])
         picks = [p["text"] for e, p in io.events if e == "status"]
         self.assertTrue(any("C speaks next" in t for t in picks), picks)
 
+    def test_moderator_done_waits_until_every_seat_opens(self):
+        FakeModerator.picks = ["DONE"]
+        state = self.mod_state(
+            [["a-open", "a-close"], ["b-open", "b-close"],
+             ["c-open", "c-close"]], labels=["A", "B", "C"])
+        outcome = run_rounds(state, RecordingIO())
+        self.assertEqual(outcome, "wrapped")
+        self.assertEqual(agent_rows(state),
+                         ["a-open", "b-open", "c-open",
+                          "a-close", "b-close", "c-close"])
+        self.assertEqual(len(FakeModerator.prompts), 1)
+
+    def test_moderator_cannot_starve_a_quiet_seat(self):
+        FakeModerator.picks = ["A", "A", "A", "DONE"]
+        state = self.mod_state(
+            [["a1", "a2", "a3", "a-close"],
+             ["b1", "b2", "b-close"], ["c1", "c-close"]],
+            turns=5, labels=["A", "B", "C"])
+        io = RecordingIO()
+        run_rounds(state, io)
+        # The third consecutive A proposal would create a lead of three, so
+        # the cursor's least-heard seat B is forced onto the floor.
+        self.assertEqual(agent_rows(state)[:6],
+                         ["a1", "b1", "c1", "a2", "a3", "b2"])
+        notes = [p["text"] for e, p in io.events if e == "status"]
+        self.assertTrue(any("Fairness override" in t for t in notes), notes)
+
     def test_no_moderator_rows_in_transcript(self):
         FakeModerator.picks = ["B", "DONE"]
-        state = self.mod_state([["a1", "a-close"], ["b1", "b-close"]],
+        state = self.mod_state([["a1", "a-close"],
+                                ["b1", "b2", "b-close"]],
                                labels=["A", "B"])
         run_rounds(state, RecordingIO())
         speakers = {r.get("name") for r in jsonl_rows(state)}
@@ -249,6 +282,66 @@ class ModeratorModeTests(unittest.TestCase):
         self.assertTrue(any("Moderator is failing" in t for t in sys_rows))
         # exactly 3 calls, then never again
         self.assertEqual(len(FakeModerator.prompts), 3)
+
+
+
+class RoomHelperNameTests(unittest.TestCase):
+    """Josh can name the moderator/supervisor, and the name is what shows."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="alloy-helper-name-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_a_typed_name_reaches_the_agent(self):
+        mod = relay.build_moderator(
+            {"workspace": self.tmp,
+             "moderator": {"provider": "claude", "name": "Referee"}})
+        self.assertEqual(mod.name, "Referee")
+        sup = relay.build_supervisor(
+            {"workspace": self.tmp,
+             "supervisor": {"provider": "claude", "name": "Foreman"}})
+        self.assertEqual(sup.name, "Foreman")
+
+    def test_unnamed_keeps_the_role_word(self):
+        self.assertEqual(
+            relay.build_moderator({"workspace": self.tmp,
+                                   "moderator": {"provider": "claude"}}).name,
+            "Moderator")
+        self.assertEqual(
+            relay.build_supervisor({"workspace": self.tmp,
+                                    "supervisor": {}}).name,
+            "Supervisor")
+
+    def test_blank_and_whitespace_are_not_names(self):
+        for value in ("", "   ", None):
+            self.assertEqual(
+                relay.room_helper_name({"moderator": {"name": value}},
+                                       "moderator"), "Moderator")
+
+    def test_a_name_is_bounded_like_a_seat_label(self):
+        self.assertEqual(
+            len(relay.room_helper_name({"moderator": {"name": "x" * 80}},
+                                       "moderator")), 24)
+
+    def test_the_visible_sentences_use_the_name_not_the_role(self):
+        # The Supervisor is the most visible non-seat in the app: a control
+        # log, status lines and a transcript row all name it. A room that
+        # renamed it and still read "Supervisor produced no tasks" would be
+        # told about someone who is not in it.
+        with open(os.path.join(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))), "relay.py"), encoding="utf-8") as f:
+            src = f.read()
+        for gone in ('"Supervisor produced no tasks',
+                     '"Supervisor could not repair failed ',
+                     '"Supervisor returned no valid replacement '):
+            self.assertNotIn(gone, src, gone)
+        # the name comes from STATE, not off the agent object: build_* took
+        # it from there, and the agent is sometimes a test double
+        self.assertIn('room_helper_name(state, "supervisor")', src)
+        self.assertIn('room_helper_name(state, "moderator")', src)
+
 
 
 if __name__ == "__main__":

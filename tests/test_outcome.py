@@ -139,6 +139,128 @@ def test_ended_reasons():
        "unfinished run claims nothing")
 
 
+def test_completion_facts_do_not_turn_wrap_into_success():
+    d = make_session([row("s1", "done [[WRAP]]", name="Claude")],
+                     {"seats": SEATS, "ended": False})
+    facts = outcome.build_outcome(d)["hard_facts"]
+    eq(facts["ended"], "wrap", "legacy ended fact is preserved")
+    eq(facts["termination_reason"], "wrap", "wrap is normalized mechanically")
+    eq(facts["goal_verdict"], "unknown", "wrap does not prove resolution")
+    eq(facts["verdict_source"], None, "unknown verdict has no invented source")
+    eq(facts["lifecycle"], "paused", "finished run in open session is paused")
+
+
+def test_explicit_completion_facts_are_normalized():
+    meta = {"seats": SEATS, "termination_reason": "moderator_done",
+            "goal_verdict": "partial", "verdict_source": "moderator",
+            "lifecycle": "paused"}
+    d = make_session([row("s1", "last thought", name="Claude")], meta)
+    facts = outcome.build_outcome(d)["hard_facts"]
+    eq(facts["termination_reason"], "moderator_done",
+       "specific persisted termination survives rebuilding")
+    eq(facts["goal_verdict"], "partial", "typed partial verdict retained")
+    eq(facts["verdict_source"], "moderator", "typed verdict source retained")
+    eq(facts["lifecycle"], "paused", "typed lifecycle retained")
+
+    nested = dict(meta, termination_reason=None, goal_verdict=None,
+                  verdict_source=None, lifecycle=None,
+                  completion={"termination_reason": "ceiling",
+                              "goal_verdict": "unresolved",
+                              "verdict_source": "human",
+                              "lifecycle": "paused"})
+    d = make_session([row("s1", "last thought", name="Claude")], nested)
+    facts = outcome.build_outcome(d)["hard_facts"]
+    eq((facts["termination_reason"], facts["goal_verdict"],
+        facts["verdict_source"]), ("ceiling", "unresolved", "human"),
+       "nested additive completion shape is accepted")
+
+
+def test_supervisor_trace_is_a_real_semantic_verdict():
+    accepted = {"seats": SEATS, "mode": "supervisor",
+                "supervisor_trace": [{"type": "plan_created"},
+                                     {"type": "goal_accepted"}]}
+    d = make_session([row("s1", "worker report", name="Claude")], accepted)
+    facts = outcome.build_outcome(d, ended="wrapped")["hard_facts"]
+    eq(facts["termination_reason"], "supervisor_done",
+       "accepted supervisor wrap gets its precise reason")
+    eq(facts["goal_verdict"], "resolved", "goal acceptance proves resolution")
+    eq(facts["verdict_source"], "supervisor", "acceptance names supervisor")
+
+    unresolved = dict(accepted, supervisor_trace=[
+        {"type": "goal_unresolved"}])
+    d = make_session([row("s1", "worker report", name="Claude")], unresolved)
+    facts = outcome.build_outcome(d, ended="cap")["hard_facts"]
+    eq(facts["termination_reason"], "cap", "cap stays mechanical termination")
+    eq(facts["goal_verdict"], "unresolved",
+       "explicit unresolved supervisor trace is semantic")
+    eq(facts["verdict_source"], "supervisor", "unresolved source retained")
+
+
+def test_precise_ceiling_survives_generic_loop_cap():
+    d = make_session(
+        [row("s1", "last turn", name="Claude")],
+        {"seats": SEATS,
+         "completion": {"termination_reason": "ceiling",
+                        "lifecycle": "paused"}})
+    facts = outcome.build_outcome(d, ended="cap")["hard_facts"]
+    eq(facts["termination_reason"], "ceiling",
+       "generic loop cap does not erase precise ceiling")
+    eq(facts["goal_verdict"], "unknown",
+       "ceiling does not invent semantic success")
+
+
+def test_coordination_metrics_use_observed_delivery_and_usage_only():
+    rows = [
+        dict(row("s1", "same answer", name="Claude"),
+             message_id="m1", origin="seat", audience="*",
+             delivered_to=[1, 2], usage={"duration_ms": 100}),
+        dict(row("s2", "same answer", name="GPT"),
+             message_id="m2", origin="seat", audience=[0],
+             delivered_to=[0], usage={"duration_ms": 300}),
+        dict(row("system", "digest", name="relay"),
+             message_id="m3", origin="relay", audience=[2],
+             delivered_to=[2], digest_of=["m2"]),
+    ]
+    meta = {"seats": SEATS + [{"id": 2, "provider": "gemini",
+                                "label": "Gemini"}],
+            "usage": {"by_kind": {"digest": {"calls": 1,
+                                                "total_tokens": 25}}}}
+    d = make_session(rows, meta)
+    facts = outcome.build_outcome(d)["hard_facts"]["coordination"]
+    eq(facts["participation"]["max_minus_min"], 1,
+       "zero-turn seats participate in skew")
+    eq(facts["routing"]["broadcast_rows"], 1, "broadcast measured")
+    eq(facts["routing"]["addressed_rows"], 1, "addressing measured")
+    eq(facts["digests"]["source_rows"], 1, "digest sources measured")
+    eq(facts["repeated_content_rate"], 0.5, "exact repetition measured")
+    eq(facts["mean_turn_latency_ms"], 200.0, "reported latency averaged")
+    eq(facts["resent_input_tokens"], None,
+       "unattributed token resend is not estimated")
+
+
+def test_lifecycle_uses_persisted_session_state():
+    d = make_session([row("s1", "still live", name="Claude")],
+                     {"seats": SEATS})
+    eq(outcome.build_outcome(d)["hard_facts"]["lifecycle"], "active",
+       "no ending fact means active")
+
+    d = make_session([row("s1", "finished", name="Claude")],
+                     {"seats": SEATS, "ended": True,
+                      "lifecycle": "active", "termination_reason": "wrap"})
+    facts = outcome.build_outcome(d)["hard_facts"]
+    eq(facts["lifecycle"], "closed", "persisted closed fact outranks stale UI")
+
+    d = make_session([row("s1", "ambiguous", name="Claude")],
+                     {"seats": SEATS, "goal_verdict": "great",
+                      "verdict_source": "oracle", "lifecycle": "sleeping",
+                      "termination_reason": "victory"})
+    facts = outcome.build_outcome(d)["hard_facts"]
+    eq((facts["termination_reason"], facts["goal_verdict"],
+        facts["verdict_source"], facts["lifecycle"]),
+       ("unknown", "unknown", None, "active"),
+       "unknown vocabulary fails closed without semantic invention")
+
+
 def test_asks():
     rows = [row("s1", "which? [[ASK: pick | a | b]]", name="Claude"),
             row("josh", "a", meta="answer to Claude"),
@@ -234,7 +356,13 @@ def test_write_and_feedback():
 
 def main():
     for fn in (test_directives, test_classify, test_command_kinds,
-               test_build_counts, test_ended_reasons, test_asks,
+               test_build_counts, test_ended_reasons,
+               test_completion_facts_do_not_turn_wrap_into_success,
+               test_explicit_completion_facts_are_normalized,
+               test_supervisor_trace_is_a_real_semantic_verdict,
+               test_precise_ceiling_survives_generic_loop_cap,
+               test_coordination_metrics_use_observed_delivery_and_usage_only,
+               test_lifecycle_uses_persisted_session_state, test_asks,
                test_robustness, test_artifacts, test_write_and_feedback):
         print("--", fn.__name__)
         fn()

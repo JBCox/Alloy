@@ -196,6 +196,164 @@ def workspace_artifacts(workspace, since_ts):
 ENDED_FROM_LOOP = {"wrapped": "wrap", "stopped": "stop", "cap": "cap",
                    "fatal": "fatal"}
 
+# The v1 ``ended`` field remains untouched for compatibility.  These are the
+# normalized, deliberately narrower values exposed beside it.  In particular,
+# a participant playing [[WRAP]] is only a mechanical ending: it says nothing
+# about whether the user's goal was met.
+TERMINATION_REASONS = ("wrap", "moderator_done", "supervisor_done", "cap",
+                       "ceiling", "stop", "fatal", "unknown")
+TERMINATION_ALIASES = {"wrapped": "wrap", "stopped": "stop",
+                       "done": "wrap", "failed": "fatal"}
+GOAL_VERDICTS = ("resolved", "partial", "unresolved", "unknown")
+VERDICT_SOURCES = ("seat", "moderator", "synthesizer", "supervisor", "human")
+LIFECYCLES = ("active", "paused", "closed")
+
+
+def _completion_value(meta, key):
+    """Read an additive completion fact from either supported meta shape.
+
+    Top-level keys make the first engine writer simple; accepting the nested
+    ``completion`` form keeps outcome rebuilding forwards-compatible without
+    making either shape authoritative over structurally stronger facts below.
+    """
+    value = meta.get(key)
+    if value is None and isinstance(meta.get("completion"), dict):
+        value = meta["completion"].get(key)
+    return value
+
+
+def _normalize_choice(value, allowed, default):
+    value = str(value or "").strip().lower()
+    return value if value in allowed else default
+
+
+def _supervisor_verdict(meta):
+    """Latest explicit Supervisor verdict, or ``(unknown, None)``.
+
+    Settled tasks alone are intentionally insufficient.  The trace already
+    distinguishes "all work stopped" from the manager actually accepting the
+    goal, so outcome.json must preserve that distinction.
+    """
+    trace = meta.get("supervisor_trace") or []
+    for entry in reversed(trace):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") == "goal_accepted":
+            return "resolved", "supervisor"
+        if entry.get("type") == "goal_unresolved":
+            return "unresolved", "supervisor"
+    return "unknown", None
+
+
+def _completion_facts(meta, ended_reason):
+    """Normalized termination, semantic verdict/source, and lifecycle.
+
+    Only persisted typed facts may assert semantic success.  Mechanical
+    endings (including wrap and moderator DONE) therefore default to an
+    unknown goal verdict unless a producer persisted an explicit verdict.
+    """
+    termination = _normalize_choice(
+        _completion_value(meta, "termination_reason"),
+        TERMINATION_REASONS, "unknown")
+    inferred = _normalize_choice(
+        TERMINATION_ALIASES.get(ended_reason, ended_reason),
+        TERMINATION_REASONS, "unknown")
+
+    # A loop return is newer than an old persisted reason, except that its
+    # generic "wrapped" result cannot overwrite a more precise typed ending.
+    if inferred != "unknown":
+        precise = ((inferred == "wrap" and termination in
+                    ("moderator_done", "supervisor_done")) or
+                   (inferred == "cap" and termination == "ceiling"))
+        if not precise:
+            termination = inferred
+
+    supervisor_verdict, supervisor_source = _supervisor_verdict(meta)
+    if termination == "wrap" and supervisor_verdict == "resolved":
+        termination = "supervisor_done"
+
+    verdict = _normalize_choice(_completion_value(meta, "goal_verdict"),
+                                GOAL_VERDICTS, "unknown")
+    source = _normalize_choice(_completion_value(meta, "verdict_source"),
+                               VERDICT_SOURCES, None)
+    if verdict == "unknown":
+        verdict, source = supervisor_verdict, supervisor_source
+    elif source is None and verdict == supervisor_verdict:
+        source = supervisor_source
+    if verdict == "unknown":
+        source = None
+
+    explicit_lifecycle = _normalize_choice(
+        _completion_value(meta, "lifecycle"), LIFECYCLES, None)
+    if bool(meta.get("ended")):
+        lifecycle = "closed"
+    elif explicit_lifecycle is not None:
+        lifecycle = explicit_lifecycle
+    elif termination != "unknown":
+        # The engine finished one run but the persisted session remains open
+        # for another message/continuation.
+        lifecycle = "paused"
+    else:
+        lifecycle = "active"
+    return termination, verdict, source, lifecycle
+
+
+def _coordination_facts(rows, seats, meta, verdict, turns):
+    """Observable communication efficiency metrics; never token estimates."""
+    seat_ids = {str(s.get("id")) for s in seats if s.get("id") is not None}
+    counts = {sid: 0 for sid in seat_ids}
+    broadcast = addressed = digests = delivered_copies = resent_chars = 0
+    hidden_sources = 0
+    reply_texts = []
+    durations = []
+    for row in rows:
+        speaker = str(row.get("speaker"))
+        if speaker in counts:
+            counts[speaker] += 1
+            normalized = " ".join(str(row.get("text") or "").split()).lower()
+            if normalized:
+                reply_texts.append(normalized)
+        audience = row.get("audience")
+        delivered = row.get("delivered_to")
+        if isinstance(delivered, list):
+            copies = len(delivered)
+            delivered_copies += copies
+            if row.get("origin") == "seat":
+                if audience == "*":
+                    broadcast += 1
+                elif isinstance(audience, list):
+                    addressed += 1
+                resent_chars += max(0, copies - 1) * len(str(row.get("text") or ""))
+        if row.get("digest_of"):
+            digests += 1
+            hidden_sources += len(row.get("digest_of") or [])
+        usage = row.get("usage")
+        if isinstance(usage, dict) and isinstance(usage.get("duration_ms"),
+                                                  (int, float)):
+            durations.append(float(usage["duration_ms"]))
+    values = list(counts.values())
+    duplicate_count = len(reply_texts) - len(set(reply_texts))
+    by_kind = ((meta.get("usage") or {}).get("by_kind") or {})
+    return {
+        "participation": {"turns_by_seat": counts,
+                          "max_minus_min": (max(values) - min(values)
+                                            if values else 0)},
+        "routing": {"broadcast_rows": broadcast,
+                    "addressed_rows": addressed,
+                    "delivered_copies": delivered_copies,
+                    "resent_chars_beyond_first_copy": resent_chars},
+        "digests": {"rows": digests, "source_rows": hidden_sources,
+                    "usage": by_kind.get("digest")},
+        "repeated_content_rate": (round(duplicate_count / len(reply_texts), 4)
+                                  if reply_texts else 0.0),
+        "mean_turn_latency_ms": (round(sum(durations) / len(durations), 1)
+                                 if durations else None),
+        "turns_to_resolution": turns if verdict == "resolved" else None,
+        # Adapter usage exposes total input tokens, not which tokens were
+        # resent. Keep that unavailable rather than fabricate an estimate.
+        "resent_input_tokens": None,
+    }
+
 
 def build_outcome(session_dir, workspace=None, ended=None):
     """The hard-facts half of a session's outcome record."""
@@ -286,6 +444,9 @@ def build_outcome(session_dir, workspace=None, ended=None):
     else:
         ended = "unknown"
 
+    termination_reason, goal_verdict, verdict_source, lifecycle = \
+        _completion_facts(meta, ended)
+
     workspace = workspace or meta.get("workspace")
     if not workspace:
         guess = os.path.join(session_dir, "workspace")
@@ -328,6 +489,10 @@ def build_outcome(session_dir, workspace=None, ended=None):
         "turn_ceiling": meta.get("turn_ceiling"),
         "mode": meta.get("mode"),
         "ended": ended,
+        "termination_reason": termination_reason,
+        "goal_verdict": goal_verdict,
+        "verdict_source": verdict_source,
+        "lifecycle": lifecycle,
         "seats": seats,
         "interventions": interventions,
         "interventions_total": sum(interventions.values()),
@@ -337,6 +502,8 @@ def build_outcome(session_dir, workspace=None, ended=None):
         "system_notes": {"count": len(system_notes), "samples": system_notes},
         "artifacts": workspace_artifacts(workspace, first_ts),
         "usage": usage_fact,
+        "coordination": _coordination_facts(
+            rows, seats, meta, goal_verdict, turns),
         "started": rows[0].get("ts") if rows else None,
         "ended_at": rows[-1].get("ts") if rows else None,
         "duration_s": (int(last_ts - first_ts)

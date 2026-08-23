@@ -19,10 +19,13 @@ import threading
 
 import webview
 
+import dictation
 import outcome
 import relay
 from relay import (AGENT_TYPES, PROVIDERS, SESSIONS_DIR, HELP_TEXT,
                    MODES, DEFAULT_MODE, IMPLEMENTED_MODES, DEFAULT_CEILING,
+                   OX_FREE_MODELS, OX_DEFAULT_MODEL, helper_spec,
+                   ox_model_details, ox_default_level,
                    assign_labels, compact_agent, resolve_cmd, clean_env,
                    logout_gemini,
                    error_excerpt,
@@ -34,6 +37,87 @@ from relay import (AGENT_TYPES, PROVIDERS, SESSIONS_DIR, HELP_TEXT,
                    list_sessions as stored_sessions, session_path, rehydrate)
 
 AGENT_ORDER = ["claude", "gpt", "gemini"]
+
+# Goal-first composer recipes still persist the nearest legacy mode while the
+# migration window is open.  The normalized orchestration object is the
+# execution truth; this fallback only lets app clients omit the redundant
+# legacy key without turning a Panel or Live Room request into round-robin.
+APP_PRESET_MODES = {
+    "open_discussion": "round_robin",
+    "panel_review": "panel",
+    "build_execute": "supervisor",
+    "live_room": "free",
+}
+
+
+def _app_orchestration_config(cfg, turns, until_done=False, ceiling=None):
+    """Resolve one app launch into a legacy mode plus normalized recipe.
+
+    Explicit ``mode`` remains authoritative for old clients.  New clients may
+    send only the additive orchestration dictionary; in that case derive the
+    nearest legacy mode so saved sessions still open in older app versions.
+    The normalized budget limit also drives the corresponding engine cap,
+    preventing ``SessionStore.save`` from immediately overwriting an
+    Advanced-drawer value with a different top-level value.
+    """
+    raw = cfg.get("orchestration")
+    mode_value = cfg.get("mode")
+    if mode_value:
+        mode = str(mode_value).replace("-", "_")
+    else:
+        mode = None
+        if isinstance(raw, dict):
+            legacy = raw.get("legacy_mode")
+            if legacy in MODES:
+                mode = legacy
+            preset = str(raw.get("preset") or "").replace("-", "_")
+            mode = mode or APP_PRESET_MODES.get(preset)
+            if mode is None:
+                workflow = raw.get("workflow")
+                concurrency = raw.get("concurrency")
+                floor = raw.get("floor")
+                if workflow == "panel":
+                    mode = "panel"
+                elif workflow == "supervisor":
+                    mode = "supervisor"
+                elif concurrency == "reactive":
+                    mode = "free"
+                elif floor == "nomination":
+                    mode = "speaker"
+                elif floor == "moderated":
+                    mode = "moderator"
+                elif concurrency == "barrier":
+                    mode = "parallel"
+        mode = mode or DEFAULT_MODE
+
+    limit = ceiling if until_done else turns
+    # The reporting form: same policy, plus whatever the backend had to
+    # override.  A correction the UI never hears about is a silent one.
+    recipe, adjustments = relay.normalize_orchestration_report(
+        raw, mode, limit, bool(until_done))
+    return mode, recipe, adjustments
+
+
+def _panel_synthesizer(cfg, slot_ids):
+    """Return the configured Panel author as a stable slot id.
+
+    HTML ``select`` values arrive as strings even when seat ids are integers,
+    so a unique string-equivalent match is safe and keeps duplicate-provider
+    rosters working.  Missing selection means the start seat; an invalid or
+    ambiguous selection is rejected rather than silently changing authors.
+    """
+    panel_cfg = cfg.get("panel")
+    value = panel_cfg.get("synthesizer") \
+        if isinstance(panel_cfg, dict) else None
+    if value is None:
+        value = cfg.get("synthesizer")
+    if value is None:
+        return slot_ids[0]
+    exact = [slot for slot in slot_ids if slot == value]
+    matches = exact or [slot for slot in slot_ids if str(slot) == str(value)]
+    if len(matches) != 1:
+        raise ValueError("Panel synthesizer must be one enabled participant.")
+    return matches[0]
 
 # ------------------------------------------------------- file/image viewing --
 # The bridge serves ONLY files beneath the ACTIVE session's workspace (the
@@ -303,6 +387,13 @@ class Api:
         # runs; the LOCK is what had to become per-run (see Run.ask_lock).
         self._ask_waiters = {}         # qid -> Queue awaiting answer_question
         self._roles_lock = threading.Lock()
+        # Dictation: one microphone and one composer, so this is app-wide
+        # rather than per-run. Underscore-prefixed like everything else here —
+        # public attrs on the js_api object deadlock the pywebview bridge walk.
+        self._dict_lock = threading.Lock()
+        self._dict_rec = None          # the live dictation.Recorder, if any
+        self._dict_engine = None       # lazily built Transcriber, then cached
+        self._dict_probe = None        # dictation.probe() result, set at startup
         # Serialized emitter: evaluate_js is only ever called from ONE thread
         # (pywebview/WebView2 marshalling isn't documented thread-safe, and
         # parallel modes emit from several seat threads). A single queue also
@@ -425,6 +516,19 @@ class Api:
         return self._config_cache or self._fallback_config()
 
     @staticmethod
+    def _seatable_providers():
+        """Every provider with a real adapter, for BOTH provider pickers.
+
+        The UI used to hardcode claude/gpt/gemini in two places, so Ox was
+        seatable but could not be chosen as moderator or supervisor - the room
+        could run entirely on one provider except for the one call that routes
+        it. Deriving both lists from the registry means the next provider is
+        choosable everywhere the moment its adapter lands.
+        """
+        return [{"id": pid, "label": meta["label"]}
+                for pid, meta in PROVIDERS.items() if meta.get("agent")]
+
+    @staticmethod
     def _fallback_config():
         return {
             "claude_models": [{"id": "claude-opus-5", "label": "Opus 5"}],
@@ -440,6 +544,15 @@ class Api:
                  "levels": ["high", "medium", "low"]}],
             "gemini_default_family": "gemini-3.7-flash",
             "gemini_default_level": "high",
+            "ox_models": [dict(m, levels=[], default_level="")
+                          for m in OX_FREE_MODELS],
+            "ox_default_model": OX_DEFAULT_MODEL,
+            "ox_default_effort": "",
+            "providers": Api._seatable_providers(),
+            # The probe never finished, so claim nothing rather than showing a
+            # mic that cannot work — same posture as an `unknown` auth probe.
+            "dictation": {"available": False,
+                          "reason": "Still checking the microphone."},
         }
 
     def precompute_config(self):
@@ -450,6 +563,13 @@ class Api:
             _relay.codex_multi_agent_enabled()
         except Exception:
             pass
+        # Dictation availability: cheap (import checks + a device enumeration),
+        # but it touches PortAudio, so it belongs on this startup thread rather
+        # than in get_config, which runs on the js bridge.
+        try:
+            self._dict_probe = dictation.probe()
+        except Exception as exc:
+            self._dict_probe = {"available": False, "reason": relay.error_excerpt(exc)}
         gemini_models = []
         try:
             out = subprocess.run(
@@ -509,6 +629,49 @@ class Api:
                            "levels": ["low", "medium", "high"],
                            "default_level": "medium"}]
 
+        # Ox models: `opencode models` prints one id per line and lists the
+        # FREE Zen models even with zero credentials (verified 2026-08-22).
+        # Intersected with OX_FREE_MODELS rather than shown raw, for two
+        # reasons: the CLI prints ids with no labels, and once Josh signs in
+        # for the paid catalog the raw list becomes ~50 keyed models that this
+        # keyless seat would offer and then fail on. Order follows
+        # OX_FREE_MODELS, so Ox Alpha stays first while it exists.
+        ox_models = []
+        try:
+            out = subprocess.run(
+                # resolve_cmd, not a bare name: opencode installs as a .cmd
+                # shim and CreateProcess cannot find it without the extension.
+                resolve_cmd(["opencode", "models"]),
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=30,
+                stdin=subprocess.DEVNULL, env=clean_env(),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+            have = {ln.strip() for ln in (out or "").splitlines() if ln.strip()}
+            ox_models = [dict(m) for m in OX_FREE_MODELS if m["id"] in have]
+        except Exception:
+            pass
+        if not ox_models:
+            # CLI missing or the probe failed: show the known catalog rather
+            # than an empty picker. The Accounts panel is what reports a
+            # missing CLI; an empty dropdown would just look broken.
+            ox_models = [dict(m) for m in OX_FREE_MODELS]
+        # Each model carries ITS OWN thinking levels, straight from models.dev
+        # via opencode's cache. These genuinely differ - Ox Alpha has
+        # low/high/max, Muse Spark has five, Nemotron and MiMo have none at
+        # all - so one shared list would offer levels that do nothing on most
+        # of them (and opencode does not validate --variant, so a wrong level
+        # fails silently rather than loudly).
+        details = ox_model_details()
+        for m in ox_models:
+            info = details.get(m["id"].split("/", 1)[-1], {})
+            m["levels"] = info.get("levels", [])
+            m["default_level"] = ox_default_level(m["levels"])
+            if info.get("context"):
+                m["context"] = info["context"]
+        ox_default_model = (OX_DEFAULT_MODEL
+                            if any(m["id"] == OX_DEFAULT_MODEL for m in ox_models)
+                            else ox_models[0]["id"])
+
         # The GPT seat's real defaults live in ~/.codex/config.toml.
         gpt_default_model = gpt_models[0]["id"]
         gpt_default_effort = ""
@@ -537,6 +700,12 @@ class Api:
             "gemini_families": gemini_families,
             "gemini_default_family": "gemini-3.7-flash",
             "gemini_default_level": "high",
+            "ox_models": ox_models,
+            "ox_default_model": ox_default_model,
+            "ox_default_effort": next(
+                (m["default_level"] for m in ox_models
+                 if m["id"] == ox_default_model), ""),
+            "providers": self._seatable_providers(),
             # explicit IDs — all verified working on this Max account
             "claude_models": [
                 {"id": "claude-fable-5", "label": "Fable 5"},
@@ -548,6 +717,7 @@ class Api:
             "gpt_models": gpt_models,
             "gemini_models": gemini_models,
             "gemini_default": "gemini-3.7-flash-high",
+            "dictation": self._dict_probe or {"available": False, "reason": ""},
             "docs": os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  "README.md"),
         }
@@ -573,6 +743,110 @@ class Api:
     def open_path(self, path):
         if path and os.path.exists(path):
             os.startfile(path)
+
+    # ------------------------------------------------------------ dictation --
+    # A microphone for the composer, on a LOCAL engine (dictation.py explains
+    # why not Wispr Flow's own). Bridge-thread rules apply hard: opening
+    # PortAudio and loading the speech model both block for seconds, so every
+    # method here returns at once and the work happens on a worker thread that
+    # answers with a `dictation` event — the same shape as recheck_auth.
+    #
+    # States, in order: recording -> transcribing -> text | empty | error.
+    # `empty` and `error` carry NO text, ever. Dictation feeds a prompt three
+    # CLIs will act on, so a bad recording has to stay visibly empty rather
+    # than become plausible words (the never-forge rule, one field over).
+
+    def _dict_emit(self, state, text="", note=""):
+        self.emit("dictation", {"state": state, "text": text, "note": note})
+
+    @staticmethod
+    def _dict_reason(exc):
+        return relay.error_excerpt(str(exc) or exc.__class__.__name__)
+
+    def _dictation_engine(self):
+        with self._dict_lock:
+            if self._dict_engine is None:
+                self._dict_engine = dictation.make_transcriber()
+            return self._dict_engine
+
+    def _dict_warm(self):
+        """Load the speech model while Josh is still talking.
+
+        The model load is the slow part (~5 s cold for base.en) and it is
+        independent of the audio, so overlapping the two means the first
+        dictation of a session costs about as much as every later one.
+        """
+        try:
+            self._dictation_engine().warm()
+        except Exception:
+            pass          # the real failure will be reported by transcribe()
+
+    def dictation_start(self):
+        """Begin capturing. Returns immediately; progress arrives as events."""
+        with self._dict_lock:
+            live = self._dict_rec
+            if live is not None and live.recording:
+                return {"ok": True, "note": "already recording"}
+            rec = self._dict_rec = dictation.Recorder()
+
+        def work():
+            try:
+                if not rec.start():
+                    return           # stopped while the device was opening
+            except Exception as exc:
+                with self._dict_lock:
+                    if self._dict_rec is rec:
+                        self._dict_rec = None
+                self._dict_emit("error", note=self._dict_reason(exc))
+                return
+            self._dict_emit("recording")
+            self._dict_warm()
+
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True}
+
+    def dictation_stop(self):
+        """Stop capturing and transcribe. The text arrives as an event."""
+        with self._dict_lock:
+            rec, self._dict_rec = self._dict_rec, None
+        if rec is None:
+            return {"ok": True, "note": "not recording"}
+
+        def work():
+            try:
+                pcm = rec.stop()
+            except Exception as exc:
+                self._dict_emit("error", note=self._dict_reason(exc))
+                return
+            if dictation.pcm_seconds(pcm) < dictation.MIN_SECONDS:
+                self._dict_emit("empty",
+                                note="Too short — hold the mic while you speak.")
+                return
+            self._dict_emit("transcribing")
+            try:
+                text = self._dictation_engine().transcribe(pcm)
+            except Exception as exc:
+                self._dict_emit("error", note=self._dict_reason(exc))
+                return
+            if not text:
+                self._dict_emit("empty", note="Nothing was heard.")
+                return
+            self._dict_emit("text", text=text,
+                            note=("Recording hit the length cap."
+                                  if getattr(rec, "truncated", False) else ""))
+
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True}
+
+    def dictation_cancel(self):
+        """Drop the recording without transcribing (Escape while holding)."""
+        with self._dict_lock:
+            rec, self._dict_rec = self._dict_rec, None
+        if rec is None:
+            return {"ok": True, "note": "not recording"}
+        threading.Thread(target=rec.cancel, daemon=True).start()
+        self._dict_emit("idle")
+        return {"ok": True}
 
     # ------------------------------------------------- file/image viewing --
     # Bridge-thread rules apply: bounded file I/O and Pillow only — no
@@ -1478,11 +1752,15 @@ class Api:
         topic = (cfg.get("topic") or "").strip()
         opener = (cfg.get("opener") or "").strip()
         turns = max(1, int(cfg.get("turns", 10)))
+        until_done = bool(cfg.get("until_done"))
+        ceiling = max(1, int(cfg.get("ceiling") or DEFAULT_CEILING)) \
+            if until_done else None
         yolo = bool(cfg.get("yolo"))
         # Connected apps (MCP) — Josh's real Gmail/Drive/Calendar/M365/ERP.
         # Explicit per-conversation opt-in; never inferred from yolo.
         connectors = bool(cfg.get("connectors"))
-        mode = (cfg.get("mode") or DEFAULT_MODE).replace("-", "_")
+        mode, recipe, orchestration_adjustments = _app_orchestration_config(
+            cfg, turns, until_done=until_done, ceiling=ceiling)
         if mode not in MODES:
             self.emit("error", {"message": f"Unknown mode {mode!r}."})
             self.emit("done", {"transcript": None})
@@ -1492,8 +1770,15 @@ class Api:
                                            f"yet."})
             self.emit("done", {"transcript": None})
             return
+        # The normalized recipe owns the Advanced drawer's budget.  Keep the
+        # engine's mechanical cap in lockstep so its lazy orchestration(state)
+        # normalization does not rewrite the persisted value on first save.
+        if until_done:
+            ceiling = recipe["budget"]["limit"]
+        else:
+            turns = recipe["budget"]["limit"]
         moderator_spec = None
-        if mode == "moderator":
+        if recipe["floor"] == "moderated":
             m = cfg.get("moderator") or {}
             provider = (m.get("provider") or "claude").lower()
             if provider not in AGENT_TYPES:
@@ -1504,6 +1789,8 @@ class Api:
             moderator_spec = {"provider": provider,
                               "model": m.get("model") or None,
                               "effort": m.get("effort") or None}
+        supervisor_spec = (cfg.get("supervisor")
+                           if recipe["workflow"] == "supervisor" else None)
         seats_cfg = cfg.get("seats")
         if seats_cfg is None:  # legacy shape: {"agents": {provider: {...}}}
             seats_cfg = [dict(id=i, provider=k, **cfg["agents"][k])
@@ -1515,9 +1802,19 @@ class Api:
             self.emit("error", {"message": "Pick at least two participants."})
             self.emit("done", {"transcript": None})
             return
+        slot_ids = [s.get("id", i) for i, s in enumerate(picked)]
+        panel_state = None
+        if recipe["workflow"] == "panel":
+            try:
+                panel_state = {"synthesizer":
+                               _panel_synthesizer(cfg, slot_ids)}
+            except ValueError as e:
+                self.emit("error", {"message": str(e)})
+                self.emit("done", {"transcript": None})
+                return
         try:
-            labels = assign_labels([(s["provider"], s.get("label"))
-                                    for s in picked])
+            labels = assign_labels([(s["provider"], s.get("label"),
+                                     s.get("model")) for s in picked])
         except ValueError as e:
             self.emit("error", {"message": str(e)})
             self.emit("done", {"transcript": None})
@@ -1553,7 +1850,6 @@ class Api:
                 role=s.get("role") or None,
                 role_instructions=s.get("role_instructions") or None,
                 connectors=connectors))
-        slot_ids = [s.get("id", i) for i, s in enumerate(picked)]
         providers = [s["provider"] for s in picked]
 
         # Full opener text is the title — the rail ellipsizes in CSS and uses
@@ -1569,18 +1865,20 @@ class Api:
             "turns": turns, "store": store, "ended": False,
             "pending": {i: [] for i in range(len(agents))},
             "introduced": [False] * len(agents),
+            "floor_opened": {}, "floor_turns": {},
+            "forced_next": None, "deferred_wrap": None,
             "rnd": 0, "max": turns, "mode": mode,
+            "orchestration": recipe,
             "moderator": moderator_spec,
-            "supervisor": cfg.get("supervisor") if mode == "supervisor" else None,
+            "supervisor": supervisor_spec,
             "supervisor_trace": [],
             "supervisor_goal": None,
             "supervisor_waves": 0,
             "supervisor_wave_index": 1,
             "workstreams": None,
-            "until_done": bool(cfg.get("until_done")),
-            "turn_ceiling": (max(1, int(cfg.get("ceiling")
-                                        or DEFAULT_CEILING))
-                             if cfg.get("until_done") else None),
+            "panel": panel_state,
+            "until_done": until_done,
+            "turn_ceiling": ceiling,
             "spawn": {"tier1": bool((cfg.get("spawn") or {})
                                     .get("tier1", True)),
                       "max_helpers": max(0, int((cfg.get("spawn") or {})
@@ -1610,6 +1908,9 @@ class Api:
             "session_dir": self._session_dir, "workspace": workspace,
             "transcript": store.transcript, "mode": mode,
             "session": session_summary(self._session_dir),
+            # Anything the engine had to correct in the requested recipe, so
+            # the UI can show it in the same badges as its own adjustments.
+            "orchestration_adjustments": orchestration_adjustments,
             "participants": [
                 {"id": slot_ids[i], "provider": providers[i],
                  "name": agents[i].name,
@@ -1630,6 +1931,10 @@ class Api:
             self.emit("status", {"text": text})
 
         brief = project_brief(workspace, self._session_dir,
+                              spec=helper_spec([s.get("provider")
+                                                for s in picked],
+                                               moderator_spec,
+                                               supervisor_spec),
                               enabled=cfg.get("brief", True),
                               on_status=brief_status_row)
         if brief.get("status") != "off":
@@ -1673,6 +1978,7 @@ class Api:
         # local closing_left, which never survived a process anyway.)
         state["closing"] = None
         state["next_speaker"] = None
+        state["deferred_wrap"] = None
         # Project docs may have moved since this chat started. REPORT it, never
         # swap it: the seats already hold the original text, so regenerating
         # here would give a later /clear'd seat different context than its
