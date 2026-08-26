@@ -50,7 +50,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _log = logging.getLogger("alloy.webhook")
 
-BODY_MAX = 64 * 1024          # POST bodies larger than this are refused unread
+BODY_MAX = 64 * 1024          # POST bodies larger than this are refused
+_DRAIN_CAP = 8 * 1024 * 1024  # ...but drained up to here first, so the 413
+                              # actually arrives before any socket reset
 TOPIC_MAX = 500               # a topic is a sentence, not a document
 SEATS_MAX = 8                 # the stage itself caps practical rosters lower
 SEAT_MAX = 80                 # room for "claude:claude-haiku-4-5:low=Label"
@@ -240,10 +242,22 @@ class _Handler(BaseHTTPRequestHandler):
         length = max(0, length)
 
         if length > BODY_MAX:
-            # Refused UNREAD: draining 64KB+ just to say no wastes work and
-            # invites slow-loris style holds; closing the connection keeps
-            # the stream honest.
+            # Refused, but DRAINED FIRST up to a sane bound: answering 413
+            # with megabytes still inbound makes Windows reset the socket
+            # before the client has read the response (a race that only
+            # shows under load — the test suite caught it twice). Draining
+            # a bounded remainder costs microseconds on loopback; beyond
+            # the drain cap the connection is simply abandoned.
             self.close_connection = True
+            remaining = min(length - BODY_MAX, _DRAIN_CAP)
+            try:
+                while remaining > 0:
+                    chunk = self.rfile.read(min(remaining, 65536))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            except OSError:
+                pass
             return self._send_json(
                 413, {"error": "The request body is limited to %d bytes."
                                % BODY_MAX})
