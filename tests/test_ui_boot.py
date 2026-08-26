@@ -366,6 +366,14 @@ function apiReply(name, args) {
     case 'list_sessions': return [
       {id: 'sess-one', title: 'Death Factory', project: '', participants: [], run: {}},
       {id: 'sess-two', title: 'Second Chat', project: '', participants: [], run: {}},
+      // a spawned-team pair exercises the spawn-lineage tree (t6): Alloy
+      // persists provenance as meta.parent on every child row, and the UI
+      // derives the whole tree client-side from those hints.
+      {id: 'sess-team-parent', title: 'Team Parent', project: '',
+       participants: [{id: '0', provider: 'claude', name: 'Claude'}], run: {}},
+      {id: 'sess-team-child', title: 'Child Squad', project: '',
+       participants: [{id: '0', provider: 'claude', name: 'Claude'}], run: {},
+       parent: {id: 'sess-team-parent', label: 'Claude'}},
     ];
     case 'get_tabs': return {
       open: [{id: 'sess-one', color: 'rose'}, {id: 'sess-two', color: ''}],
@@ -1163,6 +1171,80 @@ if (topLevelError) {
       .map(l => String(l.className || ''));
   } catch (e) { more.narrationError = (e && e.stack) || String(e); }
 
+  // ---- spawn-lineage tree on rail rows (t6) -------------------------------
+  // Alloy persists provenance as meta.parent on child rows; the UI derives
+  // the whole parent→children chain client-side. Driven exactly the way a
+  // user drives it: find the row, click its chip, click a listed child.
+  try {
+    const rows = [...byId['chatList'].querySelectorAll('.chat-row')];
+    const tOf = r => ((r.querySelector('.t') || {}).textContent || '');
+    const parentRow = rows.find(r => tOf(r) === 'Team Parent');
+    const childRow = rows.find(r => tOf(r) === '\u21b3 Child Squad');
+    const plainRow = rows.find(r => tOf(r) === 'Death Factory');
+    const lin = parentRow && parentRow.querySelector('.lin');
+    const opensBefore = apiCalls.filter(n => n === 'open_session').length;
+    more.lineage = {
+      childPrefixed: !!childRow,
+      chipPresent: !!lin,
+      chipVisible: !!lin && !lin.hidden,
+      chipText: lin ? lin.textContent : null,
+      noKidsChipHidden: !plainRow || plainRow.querySelector('.lin').hidden,
+      popStartsHidden: !(parentRow && parentRow.querySelector('.lineage-pop')) ||
+        parentRow.querySelector('.lineage-pop').hidden,
+    };
+    if (lin) {
+      lin.onclick({stopPropagation() {}});
+      const pop = parentRow.querySelector('.lineage-pop');
+      more.lineage.popShownAfterClick = !!pop && !pop.hidden;
+      more.lineage.headText = pop && pop.querySelector('.lineage-h')
+        ? pop.querySelector('.lineage-h').textContent : null;
+      more.lineage.items = pop
+        ? [...pop.querySelectorAll('.lineage-item')]
+            .map(i => i.querySelector('.lt').textContent) : [];
+      if (pop && pop.querySelectorAll('.lineage-item').length) {
+        pop.querySelector('.lineage-item').onclick({stopPropagation() {}});
+        await new Promise(r => setTimeout(r, 40));
+        more.lineage.itemOpensChat =
+          apiCalls.filter(n => n === 'open_session').length > opensBefore;
+      }
+      lin.onclick({stopPropagation() {}});
+      more.lineage.popHiddenAfterSecondClick = pop.hidden;
+      more.lineage.chipOpenClassCleared =
+        lin.className.includes('open') === false;
+    }
+  } catch (e) { more.lineageError = (e && e.stack) || String(e); }
+
+  // ---- team-report caption link in the feed --------------------------------
+  // A team report row IS the parent→child edge rendered as a message; the
+  // jump is offered only when the referenced session still exists.
+  try {
+    const opensBefore = apiCalls.filter(n => n === 'open_session').length;
+    ctx.addMsg('claude', 'Team report',
+      "(Team finished. Report follows.) Full transcript: sessions/sess-two",
+      'team report for Claude', '', '2026-08-26T10:00:00', null, null,
+      {speaker: 'team-t1', message_id: 'probe-team-row'});
+    // a report pointing at a DELETED child must render no link…
+    ctx.addMsg('claude', 'Team report',
+      "(Team failed.) Partial transcript: sessions/gone-child",
+      'team report for Claude', '', '2026-08-26T10:01:00', null, null,
+      {speaker: 'team-t2', message_id: 'probe-team-row-2'});
+    // …and neither must an ordinary seat merely mentioning a session path
+    ctx.addMsg('claude', 'Claude', 'mentioning sessions/sess-team-child in prose',
+               '', '', '2026-08-26T10:02:00', null, null,
+               {speaker: 's0', message_id: 'probe-seat-row'});
+    const links = [...byId['feed'].querySelectorAll('.lineage-link')];
+    more.teamLink = {
+      count: links.length,   // exactly one: sess-two lives, gone-child does not
+      titles: links.map(b => b.title),
+    };
+    if (links.length === 1) {
+      links[0].onclick({stopPropagation() {}});
+      await new Promise(r => setTimeout(r, 40));
+      more.teamLink.opensChat =
+        apiCalls.filter(n => n === 'open_session').length > opensBefore;
+    }
+  } catch (e) { more.teamLinkError = (e && e.stack) || String(e); }
+
   report({bootRan: fns.length > 0, bootError, more});
 })();
 """
@@ -1604,6 +1686,49 @@ class UiBootTests(unittest.TestCase):
     def test_escape_clears_the_search_outright(self):
         self.assertEqual(self.report.get("valueAfterEscape"), "")
         self.assertTrue(self.report.get("railRestoredAfterEscape"))
+
+    # ---- spawn-lineage tree (t6) -------------------------------------------
+    def _lineage(self):
+        self.assertIsNone(self.report.get("lineageError"),
+                          "lineage probe threw: %s"
+                          % self.report.get("lineageError"))
+        return self.report["lineage"]
+
+    def test_spawn_lineage_chip_marks_a_chat_that_spawned_children(self):
+        """The ⌥ chip is the INDICATOR half: faintly visible on a parent row
+        with its child count, absent on rows that spawned nothing."""
+        lin = self._lineage()
+        self.assertTrue(lin["childPrefixed"],
+                        "the spawned child row lost its ↳ title prefix")
+        self.assertTrue(lin["chipPresent"])
+        self.assertTrue(lin["chipVisible"])
+        self.assertEqual(lin["chipText"], "\u2325 1")
+        self.assertTrue(lin["noKidsChipHidden"])
+
+    def test_spawn_lineage_tree_lists_and_opens_children(self):
+        """Click the chip → read-only popover listing each child; click a
+        listed child → that chat opens; click again → closed, cleanly."""
+        lin = self._lineage()
+        self.assertTrue(lin["popStartsHidden"])
+        self.assertTrue(lin["popShownAfterClick"])
+        self.assertIn("1", lin["headText"] or "")
+        self.assertEqual(lin["items"], ["\u21b3 Child Squad"])
+        self.assertTrue(lin["itemOpensChat"])
+        self.assertTrue(lin["popHiddenAfterSecondClick"])
+        self.assertTrue(lin["chipOpenClassCleared"])
+
+    def test_team_report_captions_link_only_to_living_children(self):
+        """A team report row grows exactly one ⌥ jump — for the session that
+        still exists. A deleted child and an ordinary seat merely mentioning
+        a sessions/<id> path must render no link at all."""
+        self.assertIsNone(self.report.get("teamLinkError"),
+                          "team-link probe threw: %s"
+                          % self.report.get("teamLinkError"))
+        tl = self.report["teamLink"]
+        self.assertEqual(tl["count"], 1)
+        self.assertEqual(tl["titles"],
+                         ["Open sub-conversation 'sess-two'"])
+        self.assertTrue(tl["opensChat"])
 
     def test_the_shortcuts_cheat_sheet_exists_and_starts_hidden(self):
         """The ? overlay: present in the page, not shown until asked for."""
