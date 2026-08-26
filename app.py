@@ -1507,6 +1507,30 @@ class Api:
     def tab_colors(self):
         return list(TAB_COLORS)
 
+    # ------------------------------------------------------- saved rooms --
+    # Room templates are one JSON file beside tabs.json: bounded file I/O,
+    # so these stay SYNCHRONOUS on the bridge thread exactly like
+    # get_skills/save_tabs — never a subprocess there.
+
+    def get_rooms(self):
+        """Saved room templates for the Rooms modal, newest first."""
+        return relay.list_rooms()
+
+    def save_room(self, name, cfg):
+        """Persist the stage config under `name`; an existing name is
+        overwritten (documented in relay.save_room)."""
+        try:
+            return relay.save_room(name, cfg or {})
+        except ValueError as e:
+            return {"error": str(e)}
+        except OSError as exc:
+            return {"error": error_excerpt(exc)}
+
+    def delete_room(self, name):
+        if relay.delete_room(name):
+            return {"ok": True}
+        return {"error": "No saved room with that name."}
+
     def rename_session(self, session_id, title):
         path = session_path(session_id)
         if not path:

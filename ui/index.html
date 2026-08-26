@@ -650,7 +650,7 @@
     color: var(--muted); user-select: all; overflow-wrap: anywhere;
   }
   .btn-sm.danger { border-color: var(--danger); color: var(--danger); }
-  #acctBtn, #skillBtn, #soundBtn {
+  #acctBtn, #skillBtn, #roomsBtn, #soundBtn {
     width: 100%; display: flex; align-items: center; gap: 8px;
     background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
     color: var(--text); padding: 9px 12px; margin-top: 16px; cursor: pointer;
@@ -658,21 +658,40 @@
     text-transform: uppercase;
   }
   #skillBtn { margin-top: 16px; font-size: 11px; }
+  #roomsBtn { margin-top: 6px; font-size: 11px; }
   #soundBtn { margin-top: 6px; font-size: 11px; }
   #soundBtn.off { color: var(--muted); }
   #acctBtn { margin-top: 6px; }
-  #acctBtn:hover, #skillBtn:hover, #soundBtn:hover { border-color: rgba(255,255,255,.25); }
+  #acctBtn:hover, #skillBtn:hover, #roomsBtn:hover, #soundBtn:hover { border-color: rgba(255,255,255,.25); }
   #acctBadge {
     margin-left: auto; background: var(--danger); color: #fff; border-radius: 999px;
     font: 11px "Cascadia Mono", Consolas, monospace; padding: 1px 7px;
   }
-  #acctModal, #roleModal, #askModal, #skillModal, #contModal, #kbdModal {
+  .room-row {
+    display: flex; align-items: center; gap: 8px; padding: 7px 0;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+  }
+  .room-row:last-child { border-bottom: none; }
+  .room-row .room-name {
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .room-row .room-when { color: var(--muted); font-size: 10px; white-space: nowrap; }
+  #roomsSaveRow { display: flex; gap: 8px; margin-bottom: 6px; }
+  #roomsSaveRow input {
+    flex: 1; min-width: 0; background: var(--surface); color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px;
+    font: 13px inherit;
+  }
+  #roomHint { color: var(--danger); font-size: 11px; min-height: 15px; margin-bottom: 4px; }
+  #roomEmpty { color: var(--muted); font-size: 12px; padding: 10px 0 4px; }
+  #acctModal, #roleModal, #askModal, #skillModal, #contModal, #kbdModal,
+  #roomsModal {
     position: fixed; inset: 0; z-index: 50; display: none;
     align-items: flex-start; justify-content: center; padding-top: 9vh;
     background: rgba(10,8,14,.6);
   }
   #acctModal.show, #roleModal.show, #askModal.show, #skillModal.show,
-  #contModal.show, #kbdModal.show { display: flex; }
+  #contModal.show, #kbdModal.show, #roomsModal.show { display: flex; }
   .kbd-grid {
     display: grid; grid-template-columns: auto 1fr; gap: 8px 14px;
     align-items: baseline; margin-top: 4px;
@@ -1765,6 +1784,9 @@
     <button id="skillBtn" title="Write skills once and give them to every seat; manage MCP servers">
       <span>Skills &amp; Connections</span>
     </button>
+    <button id="roomsBtn" title="Save this lineup — seats, models, roles, limits — and start it again in one click">
+      <span>Saved rooms</span>
+    </button>
     <button id="soundBtn" title="Sound cues when a conversation needs you or finishes — a question, a check-in, a completed run">
       <span id="soundLbl">Sound on</span>
     </button>
@@ -1955,6 +1977,23 @@
     </div>
 
     <div id="connPane" hidden></div>
+  </div>
+</div>
+
+<div id="roomsModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Saved rooms</h2>
+      <button class="close" id="roomsClose" title="Close" aria-label="Close">✕</button>
+    </div>
+    <div id="roomsSaveRow">
+      <input id="roomName" type="text" maxlength="80" spellcheck="false"
+             placeholder="Name this room — e.g. Code review, Cheap grunt work">
+      <button class="btn-sm" id="roomSaveBtn">Save current room</button>
+    </div>
+    <div id="roomHint"></div>
+    <div id="roomList"></div>
+    <div id="roomEmpty" hidden>No saved rooms yet — set up the seats and controls, then save the lineup here.</div>
   </div>
 </div>
 
@@ -5009,7 +5048,7 @@ $("kbdClose").onclick = closeKbd;
 $("kbdModal").onclick = e => { if (e.target === $("kbdModal")) closeKbd(); };
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
-    closeAccounts(); closeRole(); hideAsk(); closeSkills();
+    closeAccounts(); closeRole(); hideAsk(); closeSkills(); closeRooms();
     closeContinuous(); closeKbd();
     if ($("findBar") && !$("findBar").hidden) findClose();
     if (micOn) micStop(true);          // a live mic is the one thing Escape must kill
@@ -6734,6 +6773,144 @@ async function newChat() {
 $("tabNew").onclick = newChat;
 $("newBtn").onclick = newChat;
 $("newChatBtn").onclick = newChat;
+
+/* ---------- saved rooms ----------
+   A room template is exactly the cfg a Send would build (cfgFor per seat plus
+   the conversation-level controls), stored beside tabs.json through
+   relay.SESSIONS_DIR. Saving captures the CURRENT stage; starting rebuilds the
+   stage the same way openChat restores a reopened chat — seats first, then
+   orchestration controls, each truthfully. Everything here is textContent /
+   closures over values already read from the store, so nothing user-named is
+   ever interpolated into HTML. */
+let roomsCache = [];
+function roomCfgFromStage() {
+  const orchestration = orchestrationCfg();
+  const synthesizer = $("synthSel").value;
+  const panel = orchestration.workflow === "panel";
+  return {
+    permission: $("permissionMode").value,
+    connectors: $("connectors").checked,
+    workspace: customFolder,
+    brief: $("projBrief").checked,
+    mode: orchestration.legacy_mode,
+    orchestration,
+    synthesizer: panel ? synthesizer : null,
+    panel: panel ? {synthesizer} : null,
+    moderator: orchestration.floor === "moderated" ? moderatorCfg() : null,
+    supervisor: orchestration.workflow === "supervisor" ? moderatorCfg() : null,
+    until_done: untilDoneOn(), ceiling: ceiling,
+    continuous: continuousCfg(),
+    spawn: {tier1: true, max_helpers: parseInt($("spawnSel").value, 10) || 0,
+            max_teams: parseInt($("teamSel").value, 10) || 0},
+    seats: seats.map(cfgFor),
+  };
+}
+function applyRoomToStage(room) {
+  const cfg = room.cfg || {};
+  // Seats first (same order as openChat), then the conversation controls.
+  restoreSeats((cfg.seats || []).map(p => ({
+    provider: p.provider, id: p.id, name: p.label || null,
+    model: p.model, effort: p.effort,
+    role: p.role || "", role_instructions: p.role_instructions || ""})));
+  // restoreSeats locks the rail for a REOPENED chat; this stage is still
+  // pre-conversation, so unlock and let roles be typed again.
+  $("seatList").classList.remove("locked");
+  setSeated(false);
+  $("permissionMode").value = cfg.permission || "ask";
+  syncPermissionNote();
+  $("connectors").checked = !!cfg.connectors;
+  setFolder(cfg.workspace || null);
+  $("projBrief").checked = !!cfg.brief;
+  restoreModerator(cfg.mode === "supervisor" ? cfg.supervisor : cfg.moderator);
+  if (Number(cfg.ceiling) > 0) ceiling = Number(cfg.ceiling);
+  restoreOrchestration({orchestration: cfg.orchestration, mode: cfg.mode,
+                        until_done: !!cfg.until_done});
+  const helpers = (cfg.spawn || {}).max_helpers;
+  if ([0, 3, 10].includes(helpers)) $("spawnSel").value = String(helpers);
+  const teams = (cfg.spawn || {}).max_teams;
+  if ([0, 1, 3].includes(teams)) $("teamSel").value = String(teams);
+  restoreContinuous(cfg.continuous || null);
+  syncModCtl();
+}
+async function loadRooms() {
+  try {
+    const r = await pywebview.api.get_rooms();
+    roomsCache = (r && r.rooms) || [];
+  } catch (e) { roomsCache = []; }
+  renderRooms();
+}
+function renderRooms() {
+  const list = $("roomList");
+  list.replaceChildren();
+  $("roomEmpty").hidden = roomsCache.length > 0;
+  for (const room of roomsCache) {
+    const row = document.createElement("div");
+    row.className = "room-row";
+    const label = document.createElement("span");
+    label.className = "room-name";
+    label.textContent = room.name;          // never innerHTML with a name
+    label.title = (room.cfg.seats || [])
+      .map(s => s.label || s.provider).join(", ");
+    const when = document.createElement("span");
+    when.className = "room-when";
+    when.textContent = String(room.saved_at || "").replace("T", " ");
+    const start = document.createElement("button");
+    start.className = "btn-sm"; start.textContent = "Start";
+    start.onclick = () => startRoom(room.name);
+    const del = document.createElement("button");
+    del.className = "btn-sm danger"; del.textContent = "Delete";
+    del.onclick = async () => {
+      // two-step arm, like every other destructive button here
+      if (!del.dataset.arm) {
+        del.dataset.arm = "1"; del.textContent = "Really delete?";
+        setTimeout(() => { delete del.dataset.arm; del.textContent = "Delete"; },
+                   8000);
+        return;
+      }
+      delete del.dataset.arm;
+      await pywebview.api.delete_room(room.name);
+      await loadRooms();
+    };
+    row.append(label, when, start, del);
+    list.appendChild(row);
+  }
+}
+function openRooms() { $("roomsModal").classList.add("show"); loadRooms(); }
+function closeRooms() { $("roomsModal").classList.remove("show"); }
+$("roomsBtn").onclick = openRooms;
+$("roomsClose").onclick = closeRooms;
+$("roomsModal").onclick = e => { if (e.target === $("roomsModal")) closeRooms(); };
+$("roomSaveBtn").onclick = async () => {
+  const name = $("roomName").value.trim();
+  const hint = $("roomHint");
+  hint.textContent = "";
+  if (!name) { hint.textContent = "Give the room a name first."; return; }
+  const r = await pywebview.api.save_room(name, roomCfgFromStage());
+  if (r?.error) { hint.textContent = r.error; return; }
+  $("roomName").value = "";
+  await loadRooms();
+};
+$("roomName").addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); $("roomSaveBtn").onclick(); }
+});
+async function startRoom(name) {
+  if (running) {
+    addMsg("system", "relay", "Stop the running conversation before starting a saved room.", "");
+    return;
+  }
+  const room = roomsCache.find(r => r.name === name);
+  if (!room) { loadRooms(); return; }
+  clearAsk(); hideAllTyping(); hideFeedback();
+  // Same walk-away a fresh message in a reopened view-only chat performs:
+  // the old chat keeps its own tab and files, this stage goes back to a
+  // fresh one, then the template rebuilds it.
+  activeId = null;
+  resetStage();
+  applyRoomToStage(room);
+  renderChats();
+  closeRooms();
+  $("say").focus();
+}
 
 /* ---------- boot ---------- */
 function fill(sel, items, def) {
