@@ -287,16 +287,18 @@
     position: absolute; top: 50%; transform: translateY(-50%); right: 3px;
     display: flex; align-items: center; gap: 1px;
   }
-  .chat-row .x, .chat-row .chat-stop, .chat-row .pin, .chat-row .exp {
+  .chat-row .x, .chat-row .chat-stop, .chat-row .pin, .chat-row .exp,
+  .chat-row .arc {
     width: 20px; height: 20px;
     border: 0; border-radius: 6px; background: transparent; color: var(--muted);
     cursor: pointer; font-size: 12px; line-height: 1; opacity: 0;
     transition: opacity .12s;
   }
   .chat-row .pin.on { opacity: 1; color: var(--alloy); }
-  .chat-row:hover .pin, .chat-row:hover .exp, .chat-row .pin.on { opacity: 1; }
+  .chat-row:hover .pin, .chat-row:hover .exp, .chat-row:hover .arc,
+  .chat-row .pin.on { opacity: 1; }
   .chat-row .pin { color: var(--alloy); }
-  .chat-row .pin:hover, .chat-row .exp:hover { background: var(--surface2); color: var(--text); }
+  .chat-row .pin:hover, .chat-row .exp:hover, .chat-row .arc:hover { background: var(--surface2); color: var(--text); }
   .chat-row .chat-stop { color: #E7915C; }
   .chat-row.running .chat-stop, .chat-row.thinking .chat-stop,
   .chat-row.waiting .chat-stop, .chat-row.stopping .chat-stop,
@@ -528,6 +530,27 @@
     color: var(--text); padding: 7px 12px; font-size: 12.5px; cursor: pointer;
   }
   #askPill:hover { background: var(--surface2); }
+  #battleBar {
+    flex-basis: 100%; display: flex; gap: 8px; align-items: center;
+    flex-wrap: wrap; background: var(--surface);
+    border: 1px solid var(--alloy); border-radius: 9px; padding: 7px 12px;
+    font-size: 12.5px; color: var(--text);
+  }
+  .vote-btn {
+    background: var(--surface2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 7px; padding: 4px 12px;
+    font-size: 12px; cursor: pointer;
+  }
+  .vote-btn:hover { border-color: var(--alloy); color: var(--alloy); }
+  /* Blind phase: identities hidden in place — the row keeps its shape, the
+     name reads "Contestant A/B" in neutral ink, and the seat cards blur so a
+     stray glance cannot settle the vote for you. */
+  .msg.msg-masked { --who: var(--muted); }
+  #seatList.battle-blind .seat {
+    filter: blur(5px); pointer-events: none; user-select: none;
+  }
+  #seatList.battle-blind { position: relative; }
+  .react-btn.on { color: var(--alloy); border-color: var(--alloy); }
   .seat .switch { float: right; }
   .seat-head .rm {
     border: 0; background: none; color: var(--muted); cursor: pointer;
@@ -1510,7 +1533,12 @@
   /* permission mode picker — lives in the composer's bottom bar like Claude
      Code's mode selector: a compact pill that opens an upward menu of modes,
      each with its name, a one-line "when to use", and a number shortcut */
-  #permPickWrap { position: relative; flex-basis: 100%; display: flex; }
+  /* ONE bottom bar holds both pills (2026-08-25: they used to be two
+     flex-basis:100% rows, which stacked into a tower on a narrow window) */
+  #composerBar {
+    flex-basis: 100%; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  }
+  #modePickWrap, #permPickWrap { position: relative; display: flex; }
   #permPickBtn {
     display: inline-flex; align-items: center; gap: 7px;
     border: 1px solid var(--line); background: none; color: var(--muted);
@@ -1548,9 +1576,8 @@
   }
   #permPickMenu .permission-note { margin: 6px 4px 2px; border-top: 1px solid var(--line); padding-top: 7px; }
   /* conversation-mode picker — same composer-pill pattern as permissions:
-     a compact button that opens an upward menu of modes (2026-08-25; the old
-     card grid ate the whole seat rail) */
-  #modePickWrap { position: relative; flex-basis: 100%; display: flex; }
+      a compact button that opens an upward menu of modes (2026-08-25; the old
+      card grid ate the whole seat rail) */
   #modePickBtn {
     display: inline-flex; align-items: center; gap: 7px;
     border: 1px solid var(--line); background: none; color: var(--muted);
@@ -1764,8 +1791,9 @@
             <option value="free">Free-running</option>
             <option value="supervisor">Supervisor</option>
             <option value="panel">Panel</option>
+            <option value="battle">Battle</option>
           </select></label>
-          <label>What the room is doing<select id="workflowSel"><option value="conversation">Talking it through</option><option value="panel">Each answering, then one final answer</option><option value="supervisor">Building real files in your folder</option></select><i>Talking needs no files; building splits the work up and checks it.</i></label>
+          <label>What the room is doing<select id="workflowSel"><option value="conversation">Talking it through</option><option value="panel">Each answering, then one final answer</option><option value="supervisor">Building real files in your folder</option><option value="battle">Blind duel — answer, vote, reveal</option></select><i>Talking needs no files; building splits the work up and checks it.</i></label>
           <label>When they reply<select id="concurrencySel"><option value="sequential">One at a time</option><option value="barrier">All at once, each round</option><option value="reactive">Whenever each one is ready</option></select><i>“All at once” is faster but noisier; “whenever ready” has no turns at all.</i></label>
           <label>Who speaks next<select id="floorSel"><option value="cyclic">Fixed rotation</option><option value="nomination">The last AI names who is next</option><option value="moderated">A moderator AI picks</option><option value="all">Everyone, every round</option><option value="fair">No turns — first ready, fairly capped</option><option value="manager">The work manager assigns it</option></select><i>A moderator or manager is a separate cheap AI call that never speaks in the chat.</i></label>
         </div>
@@ -1922,6 +1950,14 @@
       <span id="feedbackStatus" hidden></span>
     </div>
     <div class="composer">
+      <div id="battleBar" hidden role="group" aria-label="Battle vote">
+        <span id="battleQ">Both answers are in — who made the better case?</span>
+        <button class="vote-btn" data-vote="a" title="Contestant A wins">A wins</button>
+        <button class="vote-btn" data-vote="b" title="Contestant B wins">B wins</button>
+        <button class="vote-btn" data-vote="tie" title="Equally good">Tie</button>
+        <button class="vote-btn" data-vote="bad" title="Neither was good">Both bad</button>
+        <span id="battleNote"></span>
+      </div>
       <button id="askPill" hidden
         title="A seat is waiting on your answer — click to reopen the question"></button>
       <div id="sayGrip" title="Drag up or down to resize the message box (or focus and use ↑/↓)"
@@ -1937,36 +1973,38 @@
         aria-label="Dictate">🎤</button>
       <textarea id="say" rows="1" placeholder="Type your opening message — Send starts the conversation" autocomplete="off" spellcheck="false"></textarea>
       <button id="sayBtn" class="display">Send</button>
-      <div id="modePickWrap">
-        <!-- the mode pill: label/icon are a PAINT of #presetSel (see
-             setSelectedPreset); the menu's rows call applyPreset like the old
-             cards did, so the Keep-Improving warning path is unchanged -->
-        <button id="modePickBtn" aria-haspopup="listbox" aria-expanded="false"
-                title="What the room is doing">
-          <span class="mode-ico" id="modePickIcon"></span><span id="modePickLabel">Discuss in Turns</span>
-          <span class="perm-caret">⌄</span>
-        </button>
-        <div id="modePickMenu" role="listbox" aria-label="Conversation mode" hidden>
-          <div id="modeOptList"></div>
+      <div id="composerBar">
+        <div id="modePickWrap">
+          <!-- the mode pill: label/icon are a PAINT of #presetSel (see
+               setSelectedPreset); the menu's rows call applyPreset like the old
+               cards did, so the Keep-Improving warning path is unchanged -->
+          <button id="modePickBtn" aria-haspopup="listbox" aria-expanded="false"
+                  title="What the room is doing">
+            <span class="mode-ico" id="modePickIcon"></span><span id="modePickLabel">Discuss in Turns</span>
+            <span class="perm-caret">⌄</span>
+          </button>
+          <div id="modePickMenu" role="listbox" aria-label="Conversation mode" hidden>
+            <div id="modeOptList"></div>
+          </div>
         </div>
-      </div>
-      <div id="permPickWrap">
-        <!-- state holder: every engine-facing read (cfgFor, restore, setSeated)
-             goes through this select; the pill and menu below drive it -->
-        <select id="permissionMode" hidden title="Locked once the conversation starts">
-          <option value="read_only">Read only — no changes</option>
-          <option value="ask">Ask first — supervised</option>
-          <option value="auto" selected>Workspace — autonomous, sandboxed</option>
-          <option value="full">Full access — no sandbox or approvals</option>
-        </select>
-        <button id="permPickBtn" aria-haspopup="listbox" aria-expanded="false"
-                title="Permissions — what the seats may change">
-          <span class="perm-dot"></span><span id="permPickLabel">Workspace</span>
-          <span class="perm-caret">⌄</span>
-        </button>
-        <div id="permPickMenu" role="listbox" aria-label="Permission mode" hidden>
-          <div id="permOptList"></div>
-          <div class="permission-note" id="permissionNote"></div>
+        <div id="permPickWrap">
+          <!-- state holder: every engine-facing read (cfgFor, restore, setSeated)
+               goes through this select; the pill and menu below drive it -->
+          <select id="permissionMode" hidden title="Locked once the conversation starts">
+            <option value="read_only">Read only — no changes</option>
+            <option value="ask">Ask first — supervised</option>
+            <option value="auto" selected>Workspace — autonomous, sandboxed</option>
+            <option value="full">Full access — no sandbox or approvals</option>
+          </select>
+          <button id="permPickBtn" aria-haspopup="listbox" aria-expanded="false"
+                  title="Permissions — what the seats may change">
+            <span class="perm-dot"></span><span id="permPickLabel">Workspace</span>
+            <span class="perm-caret">⌄</span>
+          </button>
+          <div id="permPickMenu" role="listbox" aria-label="Permission mode" hidden>
+            <div id="permOptList"></div>
+            <div class="permission-note" id="permissionNote"></div>
+          </div>
         </div>
       </div>
       <div class="after" id="afterRow">
@@ -2976,6 +3014,51 @@ function deliveryPill(row) {
   const title = `Intended: ${intended}; delivered: ${label}`;
   return `<span class="delivery-pill" title="${esc(title)}">${esc(label)}</span>`;
 }
+// Blind-duel context for the OPEN chat. Null everywhere else. letters maps
+// seat slot id -> "A"/"B" (lower slot id = A, same mapping as the engine's
+// battle_seats); masked while the duel is unanswered, revealed flips on the
+// vote so painted rows can restore their real identities without a re-render.
+let battleCtx = null;
+
+function syncBattleUI(summary) {
+  const b = summary && summary.battle;
+  const masked = !!(b && (b.state === "answering" || b.state === "awaiting"));
+  const letters = {};
+  ((b && b.slots) || []).forEach((sid, idx) => {
+    letters[String(sid)] = idx === 0 ? "A" : "B";
+  });
+  battleCtx = masked ? {masked: true, revealed: false, letters} : null;
+  const seatList = $("seatList");
+  if (seatList) seatList.classList.toggle("battle-blind", masked);
+  const bar = $("battleBar");
+  bar.hidden = !(b && b.state === "awaiting");
+  $("battleNote").textContent = "";
+}
+function revealBattle(reveal) {
+  if (battleCtx) battleCtx.revealed = true;
+  $("seatList")?.classList.remove("battle-blind");
+  $("battleBar").hidden = true;
+  document.querySelectorAll(".msg.msg-masked").forEach(d => {
+    d.classList.remove("msg-masked");
+    if (d.dataset.realProvider) d.dataset.provider = d.dataset.realProvider;
+    const who = d.querySelector(".who");
+    if (who && d.dataset.realName !== undefined) {
+      who.textContent = d.dataset.realName;
+    }
+    delete d.dataset.realName;
+    delete d.dataset.realProvider;
+  });
+  const c = (reveal && reveal.contestants) || [];
+  if (c.length === 2) {
+    const tag = c.map(x =>
+      `${x.letter}: ${x.provider}:${x.model}` +
+      (x.rating ? ` (${Math.round(x.rating)})` : "")).join(" · ");
+    addMsg("system", "relay",
+           `Battle revealed — ${tag}. Vote recorded; ratings updated.`,
+           "");
+  }
+  refreshChats();
+}
 function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
   // kind: "josh" | "system" | a provider id ("claude"/"gpt"/"gemini")
   // `role` is the role the seat held WHEN IT SPOKE (stamped into the stored
@@ -2983,8 +3066,23 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
   // relabel rounds 1-5 and the transcript would lie about who said what.
   $("emptyState")?.remove();
   const d = document.createElement("div");
+  // Blind-duel masking: until the vote lands, a battle round's rows read
+  // "Contestant A/B" in neutral ink. The real identity stays on the row
+  // (dataset.real*) so the reveal can restore it WITHOUT a re-render, and
+  // messages.jsonl always held the truth anyway — this is honesty paint,
+  // not security. Replay passes through here too, so reopening an unvoted
+  // battle masks identically to live.
+  if (battleCtx && battleCtx.masked && !battleCtx.revealed && row
+      && String(row.intent || "") === "battle"
+      && battleCtx.letters[String(row.speaker)] !== undefined) {
+    d.dataset.realName = name;
+    d.dataset.realProvider = kind || "";
+    name = "Contestant " + battleCtx.letters[String(row.speaker)];
+    kind = "";
+  }
   if (kind === "josh" || kind === "system") d.className = "msg " + kind;
   else { d.className = "msg"; d.dataset.provider = kind; }
+  if (d.dataset.realName !== undefined) d.classList.add("msg-masked");
   if (row && Array.isArray(row.delivered_to)) {
     historyHasDelivery = true;
     d.dataset.deliveryKnown = "true";
@@ -3047,6 +3145,40 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
     fb.textContent = "⑂";
     fb.onclick = e => { e.stopPropagation(); armFork(fb, d.dataset.messageId); };
     d.querySelector(".msg-head").appendChild(fb);
+    // Per-message thumbs: instant-apply, reversible (no two-step arm — same
+    // rule as archive). The verdict rides into outcome.json's human_feedback
+    // so retro can eventually weigh WHICH replies Josh liked, not just which
+    // chats. Seat rows only — rating your own echo teaches nothing.
+    if (!d.dataset.uiOnly && kind !== "josh" && kind !== "system") {
+      const mk = (verdict, icon, label) => {
+        const rb = document.createElement("button");
+        rb.className = "copy-btn react-btn";
+        rb.dataset.verdict = verdict;
+        rb.title = label;
+        rb.textContent = icon;
+        rb.onclick = async e => {
+          e.stopPropagation();
+          const on = rb.classList.contains("on");
+          const next = on ? null : verdict;
+          // one thumb per row: turning one on turns the other off
+          d.querySelectorAll(".react-btn").forEach(b => b.classList.remove("on"));
+          if (!on) rb.classList.add("on");
+          let r;
+          try { r = await pywebview.api.react_message(d.dataset.messageId,
+                                                      next, activeId); }
+          catch (err) {}
+          if (r?.error) addMsg("system", "relay", r.error, "");
+        };
+        return rb;
+      };
+      const up = mk("helpful", "👍", "This reply was helpful");
+      const down = mk("not_helpful", "👎", "This reply was not helpful");
+      if (row && row._reaction === "helpful") up.classList.add("on");
+      if (row && row._reaction === "not_helpful") down.classList.add("on");
+      const head = d.querySelector(".msg-head");
+      head.appendChild(up);
+      head.appendChild(down);
+    }
   }
   // an agent mentioning an image it made ⇒ show it right here in the chat
   if (kind !== "system") attachThumbs(d.querySelector(".msg-body"), findImageRefs(text));
@@ -3157,9 +3289,16 @@ function ensureTypingTimer() {
 }
 function showTyping(speakerId, provider, name, opts = {}) {
   hideTyping(speakerId);
+  // A blind duel masks the typing indicator too: "Contestant B is thinking"
+  // must not leak a provider color while the vote is still open.
+  if (battleCtx && battleCtx.masked && !battleCtx.revealed
+      && battleCtx.letters[String(speakerId)] !== undefined) {
+    name = "Contestant " + battleCtx.letters[String(speakerId)];
+    provider = "";
+  }
   const el = document.createElement("div");
   el.className = "typing";
-  el.style.setProperty("--who", `var(--${provider})`);
+  el.style.setProperty("--who", provider ? `var(--${provider})` : "var(--muted)");
   el.innerHTML = `<span class="trow"><span class="dot"></span> ${esc(name)} is thinking…` +
                  `<span class="tclock"></span></span>`;
   // started comes from the ENGINE when we are replaying a reopened chat, so
@@ -3510,6 +3649,7 @@ window.uiEvent = packet => {
     renderSupervisorTrace(supRun?.supervisorTrace || [], payload.mode || "");
     syncModCtl();
     setSeated(true);       // roles are now APPLIED (a turn each), not just typed
+    syncBattleUI(payload.session || null);   // a duel starts masked
     imgCache.clear(); resetEditing();      // new chat = new workspace boundary
     scheduleFilesRefresh();
     $("openTranscript").style.display = ""; $("openWorkspace").style.display = "";
@@ -3521,6 +3661,22 @@ window.uiEvent = packet => {
     renderConns(payload);
   } else if (event === "webhook_status") {
     paintWebhook(payload);
+  } else if (event === "battle_ready") {
+    // Answers are in. Build the mask context from the payload's slot order
+    // (lower slot = A, same rule as relay.battle_seats) if the open chat
+    // didn't already establish it, and show the vote bar for the focused chat.
+    if (!battleCtx) {
+      const letters = {};
+      (payload.slots || []).forEach((sid, idx) => {
+        letters[String(sid)] = idx === 0 ? "A" : "B";
+      });
+      battleCtx = {masked: true, revealed: false, letters};
+    }
+    $("seatList")?.classList.add("battle-blind");
+    $("battleBar").hidden = false;
+    $("battleNote").textContent = "";
+  } else if (event === "battle_revealed") {
+    revealBattle(payload);
   } else if (event === "run_status") {
     if (canonicalRunState(payload.status) === "waiting" && payload.pending_ask)
       showQuestion(payload.pending_ask);
@@ -4059,6 +4215,9 @@ const PRESET_RECIPES = Object.freeze({
   keep_improving: {mode: "supervisor", concurrency: "barrier", floor: "manager",
     workflow: "supervisor", routing: "isolated", completion: "supervisor",
     unit: "waves", continuous: true},
+  arena: {mode: "battle", concurrency: "barrier", floor: "all",
+    workflow: "battle", routing: "isolated", completion: "participants",
+    unit: "phases"},
 });
 const PRESET_NOTES = Object.freeze({
   open_discussion: "Best for a quick exchange. Advanced can enable nominations, moderation, or a parallel lap.",
@@ -4066,6 +4225,7 @@ const PRESET_NOTES = Object.freeze({
   build_execute: "A rolling Supervisor assigns isolated workstreams and verifies their artifacts.",
   live_room: "Experimental: seats react independently; addressed messages synchronize through relay digests.",
   keep_improving: "Runs unattended: the manager picks its own next objective when one is met, verifies each round, and keeps going until you stop it.",
+  arena: "Exactly two seats answer unseen; you vote blind (A/B/tie/bad), identities reveal, and Elo accumulates.",
 });
 
 function selectedPreset() { return $("presetSel").value || "open_discussion"; }
@@ -4101,11 +4261,15 @@ const MODE_PRESETS = [
   {v: "keep_improving", name: "Keep Improving",
    icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 1.5v3h-3"/></svg>',
    desc: "Works on your project non-stop, inventing its own next improvements, until you stop it."},
+  {v: "arena", name: "Arena Duel",
+   icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13l7.5-7.5M13 13L5.5 5.5M4 2.5 2.5 4l2 2L6 4.5zM12 2.5l1.5 1.5-2 2L10 4.5z"/></svg>',
+   desc: "Two seats answer blind; you vote, identities reveal, Elo keeps score."},
 ];
 const MODE_SHORT = {open_discussion: "Discuss in Turns", live_room: "Talk Live",
                     panel_review: "Compare & Decide",
                     build_execute: "Build Together",
-                    keep_improving: "Keep Improving"};
+                    keep_improving: "Keep Improving",
+                    arena: "Arena Duel"};
 function renderModePick() {
   const cur = selectedPreset();
   const list = $("modeOptList");
@@ -4212,7 +4376,7 @@ const CONTROL_NAMES = {
   completionSel: "Who decides it is finished", budgetUnitSel: "How the length is counted",
 };
 const WORKFLOW_NAMES = {conversation: "Discuss in Turns", panel: "Compare & Decide",
-                        supervisor: "Build Together"};
+                        supervisor: "Build Together", battle: "Arena Duel"};
 const BACKEND_FIELD_CONTROLS = {
   workflow: "workflowSel", concurrency: "concurrencySel", floor: "floorSel",
   routing: "routingSel", completion: "completionSel",
@@ -4267,6 +4431,7 @@ function modeForPolicy() {
   const workflow = $("workflowSel").value;
   if (workflow === "panel") return "panel";
   if (workflow === "supervisor") return "supervisor";
+  if (workflow === "battle") return "battle";
   const concurrency = $("concurrencySel").value;
   if (concurrency === "reactive") return "free";
   if (concurrency === "barrier") return "parallel";
@@ -4299,6 +4464,12 @@ function normalizePolicyControls(anchor) {
     reason = "Build Together: a manager splits the job into tasks, each AI works its own "
       + "task in your folder without seeing the others, and the manager checks the files "
       + "before handing out the next wave.";
+  } else if (workflow === "battle") {
+    $("concurrencySel").value = "barrier"; $("floorSel").value = "all";
+    $("routingSel").value = "isolated"; $("completionSel").value = "participants";
+    $("budgetUnitSel").value = "phases";
+    reason = "Arena Duel: two seats answer the same question unseen by each other, "
+      + "you vote blind, and only then do identities reveal.";
   } else {
     allowOptions($("routingSel"), ["broadcast", "addressed"]);
     allowOptions($("completionSel"), ["participants", "moderator"]);
@@ -4390,6 +4561,7 @@ function applyLegacyMode(mode, restoring=false) {
     free: ["live_room", "reactive", "fair", "conversation", restoring ? "broadcast" : "addressed", "participants", "turns"],
     supervisor: ["build_execute", "barrier", "manager", "supervisor", "isolated", "supervisor", "waves"],
     panel: ["panel_review", "barrier", "all", "panel", "broadcast", "synthesizer", "phases"],
+    battle: ["arena", "barrier", "all", "battle", "isolated", "participants", "phases"],
   }[mode] || null;
   if (!legacy) return applyPreset("open_discussion");
   setSelectedPreset(legacy[0]);
@@ -4419,6 +4591,7 @@ function updateCallEstimate() {
   let seatCalls, sideCalls = 0, qualifier = "estimated";
   if (workflow === "panel") { seatCalls = 2 * n + 1; qualifier = "exact base recipe"; }
   else if (workflow === "supervisor") { seatCalls = n * limit; sideCalls = 1 + limit; }
+  else if (workflow === "battle") { seatCalls = n; qualifier = "exact base recipe"; }
   else if (concurrency === "reactive") seatCalls = n * limit;
   else {
     seatCalls = n * limit;
@@ -4450,6 +4623,7 @@ function restoreOrchestration(session={}) {
     const preset = PRESET_RECIPES[recipe.preset] ? recipe.preset
       : (recipe.workflow === "panel" ? "panel_review"
         : recipe.workflow === "supervisor" ? "build_execute"
+        : recipe.workflow === "battle" ? "arena"
         : recipe.concurrency === "reactive" ? "live_room" : "open_discussion");
     setSelectedPreset(preset);
     $("modeSel").value = recipe.legacy_mode || session.mode || PRESET_RECIPES[preset].mode;
@@ -5131,6 +5305,19 @@ $("whCopy").onclick = async () => {
     (tok ? ` -H "X-Alloy-Token: ${tok}"` : "") +
     ' -d "{\\"topic\\": \\"hello\\", \\"turns\\": 4}"', $("whCopy"));
 };
+
+/* ---------- battle vote bar ---------- */
+// One handler per button; success is silent here because the truth arrives
+// painted via the battle_revealed event (unmask + ratings row), exactly like
+// recheck_auth's shape.
+document.querySelectorAll("#battleBar .vote-btn").forEach(btn => {
+  btn.onclick = async () => {
+    let r;
+    try { r = await pywebview.api.vote_battle(btn.dataset.vote, activeId); }
+    catch (e) { $("battleNote").textContent = String(e); return; }
+    if (r?.error) $("battleNote").textContent = r.error;
+  };
+});
 
 async function refreshSkills() {
   let r;
@@ -6391,6 +6578,37 @@ function bindRail(cls, storeKey, collapseBtnId, railSel) {
 bindRail("no-chats", "hideChatRail", "chatsCollapse", "#chatRail");
 bindRail("no-seats", "hideSeatRail", "seatsCollapse", "#seatRail");
 bindRail("no-files", "hideFileRail", "filesCollapse", "#fileRail");
+// Narrow windows shed the side rails on their own (files first, then chat
+// history, then seats) — a squeezed stage reads as a broken app. This rides
+// the SAME classes the « buttons use, but never WRITES the saved preference:
+// crossing out of a band restores whatever the user actually chose. Reopening
+// a rail inside a band is respected until the window leaves that band.
+const RAIL_BANDS = [                 // widest first; band i implies bands < i
+  { limit: 1240, cls: "no-files", store: "hideFileRail" },
+  { limit: 1040, cls: "no-chats", store: "hideChatRail" },
+  { limit: 860,  cls: "no-seats", store: "hideSeatRail" },
+];
+let railBandSeen = -1;
+function syncRailBands() {
+  const now = RAIL_BANDS.filter(b => window.innerWidth <= b.limit).length;
+  if (now === railBandSeen) return;
+  const prev = railBandSeen;
+  railBandSeen = now;
+  const mainEl = document.querySelector("main");
+  RAIL_BANDS.forEach((b, i) => {
+    if ((i < now) === (i < prev)) return;      // membership unchanged
+    if (i < now) {
+      mainEl.classList.add(b.cls);
+    } else {
+      let saved = "0";
+      try { saved = localStorage.getItem(b.store) || "0"; } catch (e) {}
+      mainEl.classList.toggle(b.cls, saved === "1");
+    }
+    autoGrow();                    // the stage just changed width
+  });
+}
+window.addEventListener("resize", syncRailBands);
+syncRailBands();                   // a window BORN narrow collapses at boot
 // bindFeedScroll() is called at its definition — one binding only, or the
 // scroll and #jumpBtn click handlers fire twice per event.
 
@@ -6730,6 +6948,9 @@ function chatRow(s) {
     const st = s.supervisor_status;
     sub.textContent = `Supervisor · ${st.label}`;
     sub.dataset.sup = st.state;
+    sub.hidden = false;
+  } else if (s.battle) {
+    sub.textContent = `Battle · ${s.battle.label}`;
     sub.hidden = false;
   }
   const unread = d.querySelector(".unread");
@@ -7199,10 +7420,16 @@ async function openChat(id, findQuery, findExcerpt) {
   restoreOrchestration(s);
   // historical spend from meta.json — truthfully, with no clock attached
   budgetRestore(s.usage);
-  renderCompletion(s.completion);
-  renderWorkstreams(s.tasks || []);
-  renderSupervisorOverview(s.goal || "", s.tasks || [], s.mode || "");
-  $("feed").innerHTML = "";
+   renderCompletion(s.completion);
+   renderWorkstreams(s.tasks || []);
+   renderSupervisorOverview(s.goal || "", s.tasks || [], s.mode || "");
+   // BEFORE the replay loop: an unvoted duel must already be masked when its
+   // rows render, or the first paint leaks both identities.
+   syncBattleUI(s);
+   let reactions = {};
+   try { reactions = (await pywebview.api.get_reactions(activeId)) || {}; }
+   catch (e) {}
+   $("feed").innerHTML = "";
   historyHasDelivery = false;
   resetTranscriptStructure();   // dividers/groups restart with this chat
   findClose();                  // and no stale find hits from the last one
@@ -7210,6 +7437,7 @@ async function openChat(id, findQuery, findExcerpt) {
   stickBottom(true);   // a chat you just opened starts at its newest message
   msgs.forEach((m, i) => {
     if (missed && i === msgs.length - missed) addNewBoundary();
+    m._reaction = reactions[m.message_id]?.verdict || null;
     addMsg(m.provider || m.speaker, m.name, m.text,
            m.meta || "", m.role, m.ts, m.activity, m.usage, m);
   });

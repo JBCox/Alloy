@@ -56,14 +56,14 @@ seat" checkbox, cfg key `brief`). Cheap e2e:
 
 **Orchestration** (ORCHESTRATION_DESIGN.md — all conversation-level, mirrored
 in the app's Conversation controls): `--mode round-robin|speaker|moderator|
-supervisor|parallel|free` (speaker = seats end replies with `[[NEXT: seat]]`; moderator =
+supervisor|parallel|free|panel|battle` (speaker = seats end replies with `[[NEXT: seat]]`; moderator =
 a stateless cheap side call picks each turn, `--moderator provider[:model
 [:effort]]`, default claude:claude-haiku-4-5:low, can answer DONE; parallel =
 simultaneous barrier rounds; free = seats reply whenever messages arrive,
 FREE_MAX_LEAD throttle). `--until-done --ceiling N` = no round cap, wrap-driven
 end with a hard turn ceiling (default 60, `/ceiling N` mid-run). Spawning:
 tier 1 native CLI subagents on by default (`--no-native-subagents` to hide);
-`--spawn-helpers N` = seats may play `[[SPAWN: provider[:model[:effort]] |
+`--spawn-helpers N` = seats may play `[[SPAWN: provider[:model[:effort]] |`
 task]]` for one-shot helpers (requester-only results); `--spawn-teams N` =
 `[[TEAM: seats | rounds=N mode=m | task]]` spawns a whole child session
 (depth 1, ≤ CHILD_ROUNDS rounds, reports back, replayable from the rail).
@@ -154,6 +154,33 @@ adds a same-model note so instances don't mistake each other for echoes; each
 codex seat writes its own `.codex-last-message-<uid>.txt`. The app UI has an
 "+ Add seat" row (engine config = `seats` list; legacy `agents` dict still
 accepted by `app.Api._conversation`).
+
+**Battle (Arena Duel, added 2026-08-25):** mode `battle`, exactly two seats
+(app refuses otherwise), one barrier round answered UNSEEN — isolation is
+`commit_reply(fan_out=False)` plus rows stamped `intent:"battle"`, the same
+mechanism as panel drafts. The run then ends on purpose
+(`termination_reason: "battle_vote"`); `Api.vote_battle` records the verdict
+in meta AND moves Elo in `sessions/leaderboard.json` (model-level keys
+`provider:model`, K=32, tie=half, "both bad" counts without moving ratings),
+emits `battle_revealed`, and every later continue rides ordinary
+run_parallel. Blindness lives in the UI on purpose (`addMsg`/`showTyping`
+mask via `battleCtx`, seat cards blur; dataset.real* restores on reveal) —
+messages.jsonl always held the truth; this is honesty paint, not security.
+Registration is THREE tables or normalize_orchestration silently rewrites
+the mode back to round_robin on first save: MODES+IMPLEMENTED_MODES,
+LEGACY_ORCHESTRATION, and a forcing branch keyed on workflow=="battle".
+Known v1 edge: a crash MID-blind-round resumes through run_parallel, so one
+seat may answer twice.
+
+**Reactions (added 2026-08-25):** per-message 👍/👎 land in outcome.json's
+`human_feedback.reactions` keyed by message_id through `outcome.set_reaction`
+(the single validator). The end card and reactions preserve each other in
+BOTH directions on purpose — set_feedback carries `reactions` forward,
+set_reaction merges into the existing feedback dict — because they are
+different questions about different scopes, and write_outcome's
+any-non-empty-value rule keeps both across rebuilds with no special case.
+UI: instant-toggle buttons on persisted seat rows (no arm; reversible, like
+archive), repainted on reopen from `Api.get_reactions`.
 
 **Per-seat roles** (`ROLES_DESIGN.md` — specialization by INSTRUCTION, never
 capability; a role changes what a seat is told, not what it can do):
@@ -280,7 +307,7 @@ modal: edits there are free before a chat starts; once seated, only the modal's
   `/help` exists in the CLI, the opener nudge is `rnd == 1`-guarded, and the
   failed-twice/empty-reply skip paths save state in the app too (they didn't).
   `run_rounds(state, LoopIO())` with scripted fake agents = token-free loop
-  tests — see `tests/` (1242 tests across 55 suites, all runnable as plain scripts, or `python tests/run_all.py` for the lot).
+  tests — see `tests/` (1255 tests across 56 suites, all runnable as plain scripts, or `python tests/run_all.py` for the lot).
 - **Cost and token telemetry (truth over estimation).** `ClaudeAgent` and `CodexAgent`
   stream parsers extract `total_cost_usd`, input/output/cached tokens, and duration
   per turn (`last_usage`), resetting at the start of `Agent.turn`. On failed CLI error
@@ -809,7 +836,7 @@ mojibakes every em-dash in the file).
 
 ## Testing
 
-**Token-free first**: `tests/` holds 1242 tests across 55 suites (plus three
+**Token-free first**: `tests/` holds 1255 tests across 56 suites (plus three
 custom-runner suites — `test_outcome`, `test_retro`, `test_workstreams` — which print
 their own `N passed` line instead of unittest's `OK`; judge those by exit code), each suite a plain script
 (`python tests/test_loop.py` etc.) — FakeAgents drive the REAL loop via

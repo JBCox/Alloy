@@ -189,6 +189,8 @@ RAIL_SUMMARY_FIELDS = (
     "parent", "fork_of", "project",
     # rail decluttering (the Archived group at the bottom of the rail)
     "archived",
+    # blind-duel badge ("Awaiting your vote" / decided)
+    "battle",
     # outcome pill + compact manager badge (NOT the trace behind it)
     "completion", "supervisor_status",
 )
@@ -1823,6 +1825,106 @@ class Api:
             return {"error": f"Could not update chat: {e}"}
         return {"ok": True, "session": session_summary(path, meta)}
 
+    def vote_battle(self, choice, chat_id=None):
+        """Record the human's verdict on a blind duel and move Elo.
+
+        Bridge-thread safe (submit_feedback's class: bounded atomic JSON
+        writes, no subprocess). The verdict lands twice on purpose — in the
+        session's meta (so the rail badge and the reveal survive restarts)
+        and in leaderboard.json (the cross-battle tally). A second vote is
+        refused rather than re-scored: Elo already moved once.
+        """
+        choice = (choice or "").strip().lower()
+        if choice not in relay.BATTLE_CHOICES:
+            return {"error": "Vote must be one of: a, b, tie, bad."}
+        run = self._runs.get(chat_id) if chat_id else self._runs.focused()
+        session_dir = run.session_dir if run else None
+        if not session_dir or not os.path.isdir(session_dir):
+            return {"error": "There is no battle to vote on."}
+        meta = read_meta(session_dir)
+        if not meta:
+            return {"error": "This chat has no readable record."}
+        pair = relay.battle_seats(meta)
+        if not pair:
+            return {"error": "This conversation is not a battle."}
+        b = meta.get("battle") or {}
+        if b.get("phase") == relay.BATTLE_VOTED:
+            return {"error": "You already voted on this battle."}
+        board = relay.read_leaderboard()
+        relay.apply_battle_result(board, pair[0]["key"], pair[1]["key"],
+                                  choice)
+        relay.write_leaderboard(board)
+        b["phase"] = relay.BATTLE_VOTED
+        b["verdict"] = choice
+        b["voted_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+        meta["battle"] = b
+        target = os.path.join(session_dir, "meta.json")
+        tmp = f"{target}.vote-{os.getpid()}-{threading.get_ident()}"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=1)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, target)
+        except OSError as e:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return {"error": f"Could not record the vote: {e}"}
+        if run is not None and run.state:
+            run.state["battle"] = b     # continuation now rides run_parallel
+        self.emit("battle_revealed", {
+            "verdict": choice,
+            "contestants": [
+                {"slot": pair[0]["slot"], "letter": "A",
+                 "provider": pair[0]["provider"], "model": pair[0]["model"],
+                 "rating": board["ratings"].get(pair[0]["key"])},
+                {"slot": pair[1]["slot"], "letter": "B",
+                 "provider": pair[1]["provider"], "model": pair[1]["model"],
+                 "rating": board["ratings"].get(pair[1]["key"])},
+            ],
+            "games": board["games"],
+        })
+        return {"ok": True}
+
+    def get_leaderboard(self):
+        """Cross-battle Elo tally. Bridge-thread safe (one small JSON read)."""
+        return relay.read_leaderboard()
+
+    def react_message(self, message_id, verdict, chat_id=None):
+        """One per-message thumb feeding outcome.json. Bridge-thread safe
+        (submit_feedback's class: bounded atomic JSON via outcome.py, whose
+        set_reaction is the single validator of the vocabulary). verdict None
+        toggles the reaction off."""
+        run = self._runs.get(chat_id) if chat_id else self._runs.focused()
+        session_dir = run.session_dir if run else None
+        if not session_dir or not os.path.isdir(session_dir):
+            return {"error": "There is no conversation to react to."}
+        try:
+            rec = outcome.set_reaction(session_dir, message_id, verdict)
+        except ValueError as e:
+            return {"error": str(e)}
+        if rec is None:
+            return {"error": "Could not save the reaction."}
+        return {"ok": True,
+                "reaction": (rec.get("human_feedback", {})
+                             .get("reactions", {}).get(message_id))}
+
+    def get_reactions(self, chat_id=None):
+        """The chat's per-message thumbs, for repainting buttons on reopen.
+        Bridge-thread safe: one small JSON read."""
+        run = self._runs.get(chat_id) if chat_id else self._runs.focused()
+        session_dir = run.session_dir if run else None
+        if not session_dir:
+            return {}
+        rec = outcome.read_outcome(session_dir) or {}
+        fb = rec.get("human_feedback")
+        if not isinstance(fb, dict):
+            return {}
+        rx = fb.get("reactions")
+        return rx if isinstance(rx, dict) else {}
+
     def export_session(self, session_id):
         """Render one chat as a self-contained HTML file and open it.
 
@@ -2439,6 +2541,17 @@ class Api:
             return
         slot_ids = [s.get("id", i) for i, s in enumerate(picked)]
         panel_state = None
+        battle_state = None
+        if recipe["workflow"] == "battle":
+            # A duel is two-boxing by definition: one answer can't be ranked
+            # and three makes the A/B vote a lie. Refuse at start, visibly.
+            if len(picked) != 2:
+                self.emit("error", {"message": "A battle needs exactly two "
+                                               "participants."})
+                self.emit("done", {"transcript": None})
+                return
+            battle_state = {"phase": "blind",
+                            "slots": sorted(slot_ids)[:2]}
         if recipe["workflow"] == "panel":
             try:
                 panel_state = {"synthesizer":
@@ -2521,6 +2634,7 @@ class Api:
             "supervisor_wave_index": 1,
             "workstreams": None,
             "panel": panel_state,
+            "battle": battle_state,
             "continuous": continuous_cfg,
             # Keep Improving has no round cap and no ceiling of its own — the
             # limits Josh acknowledged in the warning modal are the brakes.

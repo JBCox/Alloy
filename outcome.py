@@ -228,7 +228,11 @@ TERMINATION_REASONS = ("wrap", "moderator_done", "supervisor_done", "cap",
                        # mode. Never recorded as "fatal" — that means a dead
                        # CLI, and blending the two would lie in hard facts.
                        "starved",
-                       "ceiling", "stop", "fatal", "unknown")
+                       "ceiling", "stop", "fatal", "unknown",
+                       # A blind-duel round ending on purpose: both answers
+                       # are in and the human must vote before anything else
+                       # can happen. Benign like starved — nothing failed.
+                       "battle_vote")
 TERMINATION_ALIASES = {"wrapped": "wrap", "stopped": "stop",
                        "done": "wrap", "failed": "fatal"}
 GOAL_VERDICTS = ("resolved", "partial", "unresolved", "unknown")
@@ -619,9 +623,58 @@ def set_feedback(session_dir, rating, reasons=None, note="", workspace=None):
     rec = read_outcome(session_dir)
     if rec is None:
         rec = build_outcome(session_dir, workspace=workspace)
+    # Reactions live in the SAME namespace on purpose (one preserve rule, one
+    # file) — but this write carries REACTIONS only forward: a mid-run thumb
+    # can never erase an end-card answer, and the four end-card keys below
+    # deliberately win over any stale copies.
+    previous = rec.get("human_feedback")
     rec["human_feedback"] = {
+        "reactions": (previous.get("reactions")
+                      if isinstance(previous, dict)
+                      and isinstance(previous.get("reactions"), dict)
+                      else {}),
         "rating": rating, "reasons": reasons, "note": (note or "")[:2000],
         "ts": datetime.datetime.now().isoformat(timespec="seconds")}
+    try:
+        _atomic_write(os.path.join(session_dir, OUTCOME_FILE),
+                      json.dumps(rec, ensure_ascii=False, indent=1))
+    except OSError:
+        return None
+    return rec
+
+
+REACTION_VERDICTS = ("helpful", "not_helpful")
+
+
+def set_reaction(session_dir, message_id, verdict, workspace=None):
+    """One per-message thumb, MERGED into human_feedback.reactions keyed by
+    message_id. verdict None removes the reaction (a toggle-off is a real
+    action, not a no-op). Never touches rating/reasons/note — the end card
+    and per-message thumbs are different questions about different scopes.
+    The write_outcome preserve rule keeps any non-empty dict-valued key, so
+    reactions survive every rebuild without special-casing."""
+    if not message_id or not isinstance(message_id, str):
+        raise ValueError("message_id must be a non-empty string")
+    verdict = (verdict or "").strip().lower() or None
+    if verdict is not None and verdict not in REACTION_VERDICTS:
+        raise ValueError("verdict must be one of %s" % (REACTION_VERDICTS,))
+    rec = read_outcome(session_dir)
+    if rec is None:
+        rec = build_outcome(session_dir, workspace=workspace)
+    fb = rec.get("human_feedback")
+    if not isinstance(fb, dict):
+        fb = {}
+    reactions = fb.get("reactions")
+    if not isinstance(reactions, dict):
+        reactions = {}
+    if verdict is None:
+        reactions.pop(message_id, None)
+    else:
+        reactions[message_id] = {
+            "verdict": verdict,
+            "ts": datetime.datetime.now().isoformat(timespec="seconds")}
+    fb["reactions"] = reactions
+    rec["human_feedback"] = fb
     try:
         _atomic_write(os.path.join(session_dir, OUTCOME_FILE),
                       json.dumps(rec, ensure_ascii=False, indent=1))

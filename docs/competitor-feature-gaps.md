@@ -41,8 +41,8 @@ everyone else already ships).
 
 ## Evaluation & comparison (LMArena's whole game)
 
-24. **Blind A/B battle mode** — two anonymous seats answer the same prompt; Josh votes, then identities reveal
-25. **Elo leaderboard** accumulated across battles for your own seats/models
+24. **Blind A/B battle mode** — two anonymous seats answer the same prompt; Josh votes, then identities reveal ✅ **SHIPPED 2026-08-25**: `battle` mode (`run_battle`, isolation via `commit_reply(fan_out=False)` + `intent:"battle"` row stamp); Arena Duel preset; blind masking at `addMsg`/`showTyping` with blurred seat cards; vote bar (A/B/tie/bad); `battle_vote` termination reason
+25. **Elo leaderboard** accumulated across battles for your own seats/models ✅ **SHIPPED 2026-08-25**: `sessions/leaderboard.json` (call-time path derivation), model-level keys `provider:model`, K=32, tie=draw, bad=no-move; ratings revealed per duel via `Api.vote_battle` → `battle_revealed`; `Api.get_leaderboard` for future surfaces
 26. **LLM-as-judge scoring** — automated grading of replies on rubrics (helpfulness, accuracy) logged to outcome.json
 27. **Regression evals** — replay a fixed prompt suite against new models/settings and diff results
 28. **Prompt A/B testing** — run the same conversation twice with different preambles/roles, compare transcripts side-by-side
@@ -59,7 +59,7 @@ everyone else already ships).
 ## Human-in-the-loop upgrades
 
 35. **Inline edit of agent replies** — fix a seat's message before it fans out to peers
-36. **Message reactions** (👍/👎) feeding outcome.json human_feedback from the transcript, not just at end
+36. **Message reactions** (👍/👎) feeding outcome.json human_feedback from the transcript, not just at end ✅ **SHIPPED 2026-08-25**: `outcome.set_reaction` merges under `human_feedback.reactions` keyed by message_id (end-card keys preserved both directions, survives rebuilds); `Api.react_message`/`get_reactions`; per-row 👍/👎 toggle buttons
 37. **Approval queues** — batch-review pending asks/edits from a single panel instead of sequential modals
 38. **Per-edit approval mode** — yolo is global; add "propose edit → Josh approves each diff" granularity (Claude Code permission modes)
 39. **Scheduled send / undo send** in composer

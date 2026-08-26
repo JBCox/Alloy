@@ -100,10 +100,10 @@ ACTIVITY_KEEP = 50
 # both front ends validate against, so an unbuilt mode is a clear error at
 # start time, never a silent fall-through to round-robin.
 MODES = ("round_robin", "speaker", "moderator", "parallel", "free",
-         "supervisor", "panel")
+         "supervisor", "panel", "battle")
 DEFAULT_MODE = "round_robin"
 IMPLEMENTED_MODES = ("round_robin", "speaker", "moderator", "parallel",
-                     "free", "supervisor", "panel")
+                     "free", "supervisor", "panel", "battle")
 
 # V2 policy normalization. Legacy mode strings remain the public compatibility
 # surface while sessions migrate; every one maps to an explicit recipe so the
@@ -111,7 +111,7 @@ IMPLEMENTED_MODES = ("round_robin", "speaker", "moderator", "parallel",
 ORCHESTRATION_VALUES = {
     "concurrency": {"sequential", "barrier", "reactive"},
     "floor": {"cyclic", "nomination", "moderated", "all", "fair", "manager"},
-    "workflow": {"conversation", "panel", "supervisor"},
+    "workflow": {"conversation", "panel", "supervisor", "battle"},
     "routing": {"broadcast", "addressed", "isolated"},
     "completion": {"participants", "moderator", "synthesizer", "supervisor"},
     "budget_unit": {"laps", "turns", "phases", "waves", "ceiling"},
@@ -131,6 +131,10 @@ LEGACY_ORCHESTRATION = {
                    "supervisor", "isolated", "waves", "supervisor"),
     "panel": ("panel_review", "barrier", "all",
               "panel", "broadcast", "phases", "synthesizer"),
+    # LMArena-style blind duel: exactly two seats answer the opener unseen,
+    # the human votes, identities reveal, Elo accumulates in leaderboard.json.
+    "battle": ("arena", "barrier", "all",
+               "battle", "isolated", "phases", "participants"),
 }
 PRESET_MODES = {
     "open-discussion": "round_robin",
@@ -205,6 +209,10 @@ def normalize_orchestration(value=None, mode=DEFAULT_MODE, turns=10,
     if out["workflow"] == "panel":
         out.update(concurrency="barrier", floor="all", routing="broadcast",
                    completion="synthesizer")
+        out["budget"]["unit"] = "phases"
+    elif out["workflow"] == "battle":
+        out.update(concurrency="barrier", floor="all", routing="isolated",
+                   completion="participants")
         out["budget"]["unit"] = "phases"
     elif out["workflow"] == "supervisor":
         out.update(concurrency="barrier", floor="manager", routing="isolated",
@@ -3193,6 +3201,9 @@ class SessionStore:
             # completion live here so a restart never replays a successful
             # draft, critique, or synthesis call.
             "panel": state.get("panel"),
+            # Battle phase machine: blind -> awaiting_vote -> voted. Slots and
+            # verdict ride meta so the rail badge and reveal survive restarts.
+            "battle": state.get("battle"),
             "hidden": {str(k): list(v) for k, v in
                        (state.get("hidden") or {}).items()},
             "digest": state.get("digest"),
@@ -4032,6 +4043,155 @@ def supervisor_status(meta):
             "waves_used": int(meta.get("supervisor_waves") or 0)}
 
 
+# ---------------------------------------------------------------- battle ----
+# LMArena-style blind duel. Two seats answer the opener independently
+# (commit_reply fan_out=False — the panel draft phase's proven isolation), the
+# human votes, identities reveal, and Elo ratings accumulate across battles in
+# sessions/leaderboard.json. The truth (real names) stays in messages.jsonl the
+# whole time: blindness is a UI discipline for the human's own honesty, not a
+# security property, so nothing engine-side is redacted.
+
+BATTLE_AWAITING = "awaiting_vote"
+BATTLE_VOTED = "voted"
+BATTLE_CHOICES = ("a", "b", "tie", "bad")
+ELO_START = 1200.0
+ELO_K = 32.0
+
+BATTLE_BLIND_NOTE = (
+    "\n\n(Battle round: you are answering independently and your counterpart "
+    "is answering the same question unseen. Do not assume what they said — "
+    "make your single best case in this one reply.)\n")
+
+
+def _leaderboard_path(path=None):
+    # call-time derivation, same rule as event-hooks.json / webhook.json:
+    # no second module constant, so redirecting SESSIONS_DIR redirects this
+    return path or os.path.join(SESSIONS_DIR, "leaderboard.json")
+
+
+def read_leaderboard(path=None):
+    """Never raises: corrupt/missing degrades to an empty board, exactly like
+    read_event_hooks — pre-feature behaviour, never a crash."""
+    try:
+        with open(_leaderboard_path(path), encoding="utf-8") as f:
+            board = json.load(f)
+    except (OSError, ValueError):
+        return {"ratings": {}, "games": 0}
+    if not isinstance(board, dict):
+        return {"ratings": {}, "games": 0}
+    ratings = board.get("ratings")
+    out = {"ratings": ratings if isinstance(ratings, dict) else {},
+           "games": max(0, int(board.get("games") or 0))}
+    return out
+
+
+def write_leaderboard(board, path=None):
+    target = _leaderboard_path(path)
+    tmp = f"{target}.tmp-{os.getpid()}-{threading.get_ident()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(board, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, target)
+        return True
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def _elo_expected(ra, rb):
+    return 1.0 / (1.0 + 10.0 ** ((rb - ra) / 400.0))
+
+
+def _elo_pair(ra, rb, score_a, k=ELO_K):
+    """One rated game. score_a: 1 win / 0.5 draw / 0 loss."""
+    ea = _elo_expected(ra, rb)
+    na = ra + k * (score_a - ea)
+    nb = rb + k * ((1.0 - score_a) - (1.0 - ea))
+    return round(na, 1), round(nb, 1)
+
+
+def seat_rating_key(provider, model):
+    """Model-level granularity on purpose: haiku vs opus are different
+    contestants even under one provider."""
+    return f"{provider}:{model or 'default'}"
+
+
+def apply_battle_result(board, key_a, key_b, verdict):
+    """Apply one verdict to the board and return it. 'a'/'b' move ratings;
+    'tie' is a drawn game; 'bad' (both bad) counts as played but moves
+    nothing — a vote that says nothing about relative strength must not
+    distort the numbers."""
+    ratings = board.setdefault("ratings", {})
+    ra = float(ratings.get(key_a, ELO_START))
+    rb = float(ratings.get(key_b, ELO_START))
+    if verdict == "a":
+        ra, rb = _elo_pair(ra, rb, 1.0)
+    elif verdict == "b":
+        ra, rb = _elo_pair(ra, rb, 0.0)
+    elif verdict == "tie":
+        ra, rb = _elo_pair(ra, rb, 0.5)
+    ratings[key_a], ratings[key_b] = ra, rb
+    board["games"] = int(board.get("games") or 0) + 1
+    return board
+
+
+def battle_seats(meta):
+    """The two contesting slots from meta, A first (lower slot id), with the
+    rating keys resolved. None when this meta is not a usable battle."""
+    b = (meta or {}).get("battle")
+    if not isinstance(b, dict):
+        return None
+    slots = b.get("slots") or []
+    seats = (meta or {}).get("seats") or []
+    out = []
+    for sid in sorted(slots)[:2]:
+        entry = next((s for s in seats if s.get("id") == sid), None)
+        if entry is None:
+            return None
+        out.append({"slot": sid,
+                    "provider": entry.get("provider"),
+                    "model": entry.get("model") or "default",
+                    "key": seat_rating_key(entry.get("provider"),
+                                           entry.get("model"))})
+    return out if len(out) == 2 else None
+
+
+def battle_status(meta):
+    """One-glance battle state for a rail row, or None. Derived HERE for the
+    same reason supervisor_status is: the label the rail needs ("awaiting
+    YOUR vote" vs "decided") is a fact about the record, not about the UI."""
+    if (meta or {}).get("mode") != "battle":
+        return None
+    b = (meta or {}).get("battle") or {}
+    phase = b.get("phase")
+    pair = battle_seats(meta)
+    slots = [p["slot"] for p in pair] if pair else []
+    if phase == BATTLE_AWAITING:
+        return {"state": "awaiting", "label": "Awaiting your vote",
+                "slots": slots}
+    if phase == BATTLE_VOTED:
+        v = b.get("verdict")
+        who = ""
+        if pair and v in ("a", "b"):
+            who = " · %s:%s won" % (pair[0]["provider"], pair[0]["model"]) \
+                if v == "a" else \
+                " · %s:%s won" % (pair[1]["provider"], pair[1]["model"])
+        label = {None: "Battle voted",
+                 "a": "Battle decided%s" % who, "b": "Battle decided%s" % who,
+                 "tie": "Battle tied", "bad": "Both bad"}.get(v, "Battle voted")
+        return {"state": "voted", "label": label, "verdict": v,
+                "slots": slots}
+    # phase "blind": the seats are answering (or a crash interrupted them).
+    # Either way identities must stay masked until a vote lands.
+    return {"state": "answering", "label": "Answering unseen",
+            "slots": slots}
+
+
 # ------------------------------------------------------------------ tabs ----
 # The open-tab strip: which conversations Josh is flipping between, in what
 # order, and what colour he gave each one.
@@ -4344,6 +4504,7 @@ def session_summary(session_dir, meta=None):
         # whether Josh ever approved it, rather than guessing from the rail
         "plan": meta.get("plan") or None,
         "panel": meta.get("panel") or None,
+        "battle": battle_status(meta),
         "digest": meta.get("digest") or None,
         "completion": meta.get("completion") or None,
         "until_done": bool(meta.get("until_done")),
@@ -4636,6 +4797,7 @@ def rehydrate(meta, workspace=None):
         "auto_titled": bool(meta.get("auto_titled")),
         "plan": meta.get("plan"),
         "panel": meta.get("panel"),
+        "battle": meta.get("battle"),
         "hidden": dict(meta.get("hidden") or {}),
         "digest": meta.get("digest"),
         "completion": meta.get("completion"),
@@ -9303,6 +9465,8 @@ def _run_rounds(state, io):
     policy = orchestration(state)
     if policy["workflow"] == "panel":
         return run_panel(state, io)
+    if policy["workflow"] == "battle":
+        return run_battle(state, io)
     if policy["workflow"] == "supervisor":
         if (not state.get("workstreams")
                 and not state.get("supervisor_plan_attempted")):
@@ -9939,11 +10103,159 @@ def run_panel(state, io):
                                         if next_phase != "done" else ".")})
 
 
+def run_battle(state, io):
+    """Blind A/B duel (mode `battle`): exactly two seats answer the opener
+    unseen by each other, then the run ENDS on purpose so the human can vote
+    (app.vote_battle records it and moves Elo). Everything after the vote —
+    reveal, discussion, further rounds — is an ordinary parallel conversation,
+    which is why every non-fresh battle delegates to run_parallel wholesale.
+
+    Blindness rides commit_reply(fan_out=False), the panel draft phase's
+    proven isolation: both rows are logged/emitted/replayed, neither seat's
+    queue ever receives its peer's answer. Rows are stamped intent="battle"
+    so the UI can mask identities until the vote lands.
+
+    Known v1 edge, stated honestly: a crash MID-blind-round resumes through
+    run_parallel (rnd>=1), so a seat whose answer never committed may answer
+    once more, now with the peer's row in reach. Panel solves this with a
+    messages.jsonl replay; battle v1 accepts the rarer, milder edge.
+    """
+    agents = state["agents"]
+    store = state["store"]
+    slot_ids, providers = state["slot_ids"], state["providers"]
+    pending = state["pending"]
+    lock = state.setdefault("lock", threading.RLock())
+    b = state.get("battle") or {}
+    fresh = b.get("phase") == "blind" and int(state.get("rnd") or 0) == 0
+    if not fresh:
+        return run_parallel(state, io)
+
+    state["rnd"] += 1
+    rnd = state["rnd"]
+    roster = list(range(len(agents)))
+    # compose everything BEFORE any thread runs — the commit-consume contract
+    prompts = {}
+    for i in roster:
+        msg, consumed, _first = compose_prompt(state, i)
+        prompts[i] = ((msg or "") + BATTLE_BLIND_NOTE, consumed)
+    for i in roster:
+        io.emit("thinking", {"speaker": slot_ids[i],
+                             "provider": providers[i],
+                             "name": agents[i].name,
+                             "limit": getattr(agents[i], "turn_timeout", None),
+                             "idle": getattr(agents[i], "idle_timeout", None),
+                             "round": rnd, "turns": state["max"],
+                             "turn": 1, "until_done": False,
+                             "ceiling": state.get("turn_ceiling")})
+
+    results = {}
+
+    def seat_task(i):
+        agent = agents[i]
+        message, consumed = prompts[i]
+        key = slot_ids[i]
+        on_act, acts = make_activity_sink(io, key, providers[i],
+                                          agent.name, state["workspace"])
+        try:
+            try:
+                reply = agent.turn(message, on_activity=on_act)
+            except Exception as e1:
+                if fatal_seat_error(agent, e1):
+                    with lock:
+                        commit_skip(state, i,
+                                    f"{agent.name}: {error_excerpt(e1)}",
+                                    io, fatal=True)
+                    results[i] = "fatal"
+                    return
+                if no_retry(e1):
+                    with lock:
+                        record_usage(state,
+                                     getattr(agent, "last_usage", None),
+                                     seat_key=key, kind="failed")
+                        commit_skip(state, i, error_excerpt(e1), io,
+                                    kind="timeout", retried=False)
+                    results[i] = "skip"
+                    return
+                with lock:
+                    record_usage(state, getattr(agent, "last_usage", None),
+                                 seat_key=key, kind="retry")
+                # A provider that just failed is not working: pause, then
+                # retry on a SHORT window (see retry_plan).
+                delay, window = retry_plan(agent, e1)
+                note_retry(state, io, agent, e1, delay, window)
+                backoff_wait(io, delay)
+                on_act, acts = make_activity_sink(io, key, providers[i],
+                                                  agent.name,
+                                                  state["workspace"])
+                try:
+                    with retry_window(agent, window):
+                        reply = agent.turn(message, on_activity=on_act)
+                except Exception as e2:
+                    with lock:
+                        commit_skip(state, i,
+                                    f"{agent.name} failed twice; skipping "
+                                    f"this round. ({error_excerpt(e2)})", io)
+                    results[i] = "skip"
+                    return
+            if not (reply or "").strip():
+                with lock:
+                    commit_skip(state, i,
+                                f"{agent.name} returned an empty reply; "
+                                f"skipping this round (nothing sent to "
+                                f"the others).", io)
+                results[i] = "skip"
+                return
+            try:
+                with lock:
+                    # fan_out=False is the whole feature: logged + emitted +
+                    # replayed, but the counterpart's queue never sees it
+                    commit_reply(state, i, reply, consumed, io,
+                                 activity=acts, fan_out=False,
+                                 envelope_extra={"intent": "battle"})
+            except Exception as e3:
+                results[i] = "fatal"
+                io.emit("agent_error", {
+                    "speaker": key, "provider": providers[i],
+                    "fatal": True,
+                    "message": f"{agent.name}: failed to record its "
+                               f"reply ({error_excerpt(e3)}) — stopping."})
+                return
+            results[i] = "ok"
+        finally:
+            io.emit("thinking_done", {"speaker": key})
+
+    threads = [threading.Thread(target=seat_task, args=(i,), daemon=True)
+               for i in roster]
+    for t in threads:
+        t.start()
+    while any(t.is_alive() for t in threads):
+        for h in io.drain_human():
+            with lock:
+                dispatch_command(state, h, io)
+        for t in threads:
+            t.join(timeout=0.25)
+
+    answered = [slot_ids[i] for i in roster if results.get(i) == "ok"]
+    with lock:
+        b["phase"] = BATTLE_AWAITING
+        b["slots"] = sorted(slot_ids[i] for i in roster)[:2]
+        state["battle"] = b
+        store.save(state)
+    if answered:
+        io.emit("status", {"text": "Both answers are in — cast your vote."})
+    else:
+        io.emit("status", {"text": "No answers came back — nothing to "
+                                   "compare. Continue the chat to retry."})
+    io.emit("battle_ready", {"slots": b["slots"], "answered": answered})
+    # A deliberate stop so the human can vote — not a failure, not a cap
+    state["termination_reason"] = "battle_vote"
+    return "wrapped"
+
+
 def run_parallel(state, io):
     """Simultaneous rounds: every seat answers the same backlog at once, and
     all replies are shared as the round completes — replies to what a seat
     says now reach it next round.
-
     The parallel contract (ORCHESTRATION_DESIGN.md):
     - `state["lock"]` guards pending/introduced/turn and every store.save
       while seat threads are alive. Lock order: state["lock"] -> store._lock,

@@ -1154,10 +1154,11 @@ class UiBootTests(unittest.TestCase):
         c = self.report.get("cont") or {}
         self.assertEqual(c.get("pillLabelAtBoot"), "Discuss in Turns")
         self.assertTrue(c.get("menuOpenedByPill"))
-        self.assertEqual(c.get("menuRows"), 5)
+        # six modes since the Arena Duel landed (2026-08-25)
+        self.assertEqual(c.get("menuRows"), 6)
         self.assertEqual(c.get("menuNames"),
                          ["Discuss in Turns", "Talk Live", "Compare & Decide",
-                          "Build Together", "Keep Improving"])
+                          "Build Together", "Keep Improving", "Arena Duel"])
         # exactly ONE row claims to be the current mode at boot
         self.assertEqual(c.get("menuSelectedCount"), 1)
         # picking a mode repaints the pill and closes the popover
