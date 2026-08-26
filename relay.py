@@ -4015,6 +4015,87 @@ def write_tabs(payload, path=None):
     return out
 
 
+# ------------------------------------------------------------- event hooks --
+# User-configured shell commands fired when the APP sees a conversation event
+# (a question waiting on Josh, a check-in, a finished run, a failed gate).
+# The ENGINE never runs these — app.py's emitter thread does, on a throwaway
+# daemon thread with everything swallowed (the same contract as activity
+# narration). The config lives beside tabs.json and resolves through
+# SESSIONS_DIR at CALL time — no second module constant, so redirecting the
+# global redirects this too.
+HOOK_EVENTS = ("question", "checkin", "done", "gate_red")
+EVENT_HOOKS_FILE = "event-hooks.json"
+HOOKS_MAX_COMMAND = 2000
+
+
+def valid_event_hook_name(name):
+    return str(name or "").strip() in HOOK_EVENTS
+
+
+def _event_hooks_path(path=None):
+    return path or os.path.join(SESSIONS_DIR, EVENT_HOOKS_FILE)
+
+
+def read_event_hooks(path=None):
+    """{"version": 1, "hooks": {event: command}}, always well-formed.
+
+    Never raises: a corrupt or missing file means "no hooks configured",
+    which degrades to exactly the behaviour that existed before hooks.
+    Unknown names on disk are DROPPED rather than trusted.
+    """
+    try:
+        with open(_event_hooks_path(path), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {"version": 1, "hooks": {}}
+    hooks = {}
+    raw = data.get("hooks") if isinstance(data, dict) else None
+    if isinstance(raw, dict):
+        for name, cmd in raw.items():
+            if name in HOOK_EVENTS and isinstance(cmd, str) and cmd.strip():
+                hooks[name] = cmd.strip()
+    return {"version": 1, "hooks": hooks}
+
+
+def write_event_hooks(hooks, path=None):
+    """Atomically persist hook commands; returns the normalized value.
+
+    Unknown event names REJECT loudly (ValueError): a typo'd event would
+    otherwise save as a hook that can never fire and look configured while
+    doing nothing.
+    """
+    if not isinstance(hooks, dict):
+        raise ValueError("Event hooks must be an object of event -> command.")
+    out = {}
+    for name, cmd in hooks.items():
+        if name not in HOOK_EVENTS:
+            raise ValueError("Unknown hook event %r — expected one of: %s."
+                             % (name, ", ".join(HOOK_EVENTS)))
+        text = str(cmd or "").strip()
+        if not text:
+            continue
+        if len(text) > HOOKS_MAX_COMMAND:
+            raise ValueError("The %s hook command is too long." % name)
+        out[name] = text
+    data = {"version": 1, "hooks": out}
+    target = _event_hooks_path(path)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    tmp = f"{target}.tmp-{os.getpid()}-{threading.get_ident()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, target)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    return data
+
+
 def session_summary(session_dir, meta=None):
     """One sidebar row. Pure file reads (one meta.json + one stat)."""
     sid = os.path.basename(session_dir.rstrip("\\/"))
@@ -7681,6 +7762,10 @@ def wave_gate(state, io):
         state["store"].save(state)
     except Exception:
         pass
+    # One honest signal for the app's event hooks (a RED gate is exactly what
+    # an unattended run should raise the alarm about). Emitted for both
+    # colours; app.py maps only ok:False to its "gate_red" hook.
+    io.emit("gate", {"ok": bool(result.get("ok")), "command": command})
     return result
 
 

@@ -650,7 +650,7 @@
     color: var(--muted); user-select: all; overflow-wrap: anywhere;
   }
   .btn-sm.danger { border-color: var(--danger); color: var(--danger); }
-  #acctBtn, #skillBtn, #soundBtn {
+  #acctBtn, #skillBtn, #soundBtn, #hooksBtn {
     width: 100%; display: flex; align-items: center; gap: 8px;
     background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
     color: var(--text); padding: 9px 12px; margin-top: 16px; cursor: pointer;
@@ -660,19 +660,39 @@
   #skillBtn { margin-top: 16px; font-size: 11px; }
   #soundBtn { margin-top: 6px; font-size: 11px; }
   #soundBtn.off { color: var(--muted); }
+  #hooksBtn { margin-top: 6px; font-size: 11px; }
   #acctBtn { margin-top: 6px; }
-  #acctBtn:hover, #skillBtn:hover, #soundBtn:hover { border-color: rgba(255,255,255,.25); }
+  #acctBtn:hover, #skillBtn:hover, #soundBtn:hover, #hooksBtn:hover { border-color: rgba(255,255,255,.25); }
   #acctBadge {
     margin-left: auto; background: var(--danger); color: #fff; border-radius: 999px;
     font: 11px "Cascadia Mono", Consolas, monospace; padding: 1px 7px;
   }
-  #acctModal, #roleModal, #askModal, #skillModal, #contModal, #kbdModal {
+  #acctModal, #roleModal, #askModal, #skillModal, #contModal, #kbdModal,
+  #hooksModal {
     position: fixed; inset: 0; z-index: 50; display: none;
     align-items: flex-start; justify-content: center; padding-top: 9vh;
     background: rgba(10,8,14,.6);
   }
   #acctModal.show, #roleModal.show, #askModal.show, #skillModal.show,
-  #contModal.show, #kbdModal.show { display: flex; }
+  #contModal.show, #kbdModal.show, #hooksModal.show { display: flex; }
+  .hook-row { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+  .hook-row label {
+    width: 120px; flex: none; font-family: Bahnschrift, sans-serif;
+    font-size: 12px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted); text-align: right;
+  }
+  .hook-row input {
+    flex: 1; min-width: 0; background: var(--surface2);
+    border: 1px solid var(--line); border-radius: 6px; color: var(--text);
+    padding: 7px 9px; font-family: "Cascadia Mono", Consolas, monospace;
+    font-size: 12px;
+  }
+  .hook-row input:focus { outline: none; border-color: var(--alloy); }
+  #hookSave {
+    margin-top: 14px; float: right;
+    background: var(--alloy); color: #1A1520; border: 0; border-radius: 8px;
+    padding: 7px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
   .kbd-grid {
     display: grid; grid-template-columns: auto 1fr; gap: 8px 14px;
     align-items: baseline; margin-top: 4px;
@@ -1768,6 +1788,9 @@
     <button id="soundBtn" title="Sound cues when a conversation needs you or finishes — a question, a check-in, a completed run">
       <span id="soundLbl">Sound on</span>
     </button>
+    <button id="hooksBtn" title="Run your own shell commands when a conversation asks you something, checks in, finishes, or its verification gate fails">
+      <span>Event hooks</span>
+    </button>
     <button id="acctBtn" title="Sign in and out of the AI accounts">
       <span>Accounts</span><span id="acctBadge" hidden></span>
     </button>
@@ -2111,6 +2134,23 @@
     </div>
     <div class="kbd-note">Press ? again or Escape to close. Shortcuts are off while
     you're typing in a text box.</div>
+  </div>
+</div>
+
+<div id="hooksModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Event hooks</h2>
+      <button class="close" id="hooksClose" title="Close" aria-label="Close">✕</button>
+    </div>
+    <div class="kbd-note">A shell command run when the event happens — e.g.
+      <span class="mono">ssh phone termux-notification -t Alloy --content "$AICHAT_DETAIL"</span>.
+      The command receives AICHAT_EVENT, AICHAT_SESSION, AICHAT_TITLE and
+      AICHAT_DETAIL (a short excerpt). Leave a box empty for no hook. Hooks are
+      best-effort: failures and slow commands (10&nbsp;s cap) stay silent.</div>
+    <div id="hookRows"></div>
+    <div class="kbd-note"><span id="hookNote"></span></div>
+    <button id="hookSave" title="Save the hook commands">Save</button>
   </div>
 </div>
 
@@ -3430,6 +3470,13 @@ window.uiEvent = packet => {
     strip.classList.toggle("show", !!strip.textContent);
   } else if (event === "checkin") {
     showContBanner(payload.text || "The scheduled check-in ran.");
+  } else if (event === "hooks_status") {
+    if (payload.ok) {
+      if ($("hooksModal").classList.contains("show"))
+        $("hookNote").textContent = "Saved.";
+    } else {
+      $("hookNote").textContent = payload.error || "Could not save the hooks.";
+    }
   } else if (event === "workstreams") {
     renderWorkstreams(payload.tasks || []);
   } else if (event === "plan") {
@@ -4670,10 +4717,56 @@ $("soundBtn").onclick = () => {
   paintSound();
   pywebview.api.set_sound(soundOn);
 };
-$("skClose").onclick = closeSkills;
-$("skTabSkills").onclick = () => showSkTab("skills");
-$("skTabConn").onclick = () => showSkTab("conn");
-$("skillModal").onclick = e => { if (e.target === $("skillModal")) closeSkills(); };
+ $("skClose").onclick = closeSkills;
+ $("skTabSkills").onclick = () => showSkTab("skills");
+ $("skTabConn").onclick = () => showSkTab("conn");
+ $("skillModal").onclick = e => { if (e.target === $("skillModal")) closeSkills(); };
+
+// Event hooks: Josh's own shell commands per conversation event. Rows are
+// built with createElement/textContent only — hook commands are arbitrary
+// CLI text and must never pass through innerHTML.
+const hookLabels = {question: "Question", checkin: "Check-in", done: "Done",
+                    gate_red: "Gate failed"};
+function closeHooks() { $("hooksModal").classList.remove("show"); }
+async function openHooks() {
+  let r;
+  try { r = await pywebview.api.get_event_hooks(); }
+  catch (e) { $("hookNote").textContent = String(e); return; }
+  if (r && r.error) { $("hookNote").textContent = r.error; return; }
+  const rows = $("hookRows");
+  rows.replaceChildren();
+  const saved = (r && r.hooks) || {};
+  for (const ev of (r && r.events) || Object.keys(hookLabels)) {
+    const row = document.createElement("div");
+    row.className = "hook-row";
+    const lab = document.createElement("label");
+    lab.htmlFor = "hook-" + ev;
+    lab.textContent = hookLabels[ev] || ev;
+    const inp = document.createElement("input");
+    inp.type = "text"; inp.id = "hook-" + ev; inp.className = "mono";
+    inp.spellcheck = false; inp.autocomplete = "off";
+    inp.value = saved[ev] || "";
+    row.append(lab, inp);
+    rows.append(row);
+  }
+  $("hookNote").textContent = "";
+  $("hooksModal").classList.add("show");
+}
+$("hooksBtn").onclick = openHooks;
+$("hooksClose").onclick = closeHooks;
+$("hooksModal").onclick = e => { if (e.target === $("hooksModal")) closeHooks(); };
+$("hookSave").onclick = async () => {
+  const hooks = {};
+  for (const ev of Object.keys(hookLabels)) {
+    const box = $("hook-" + ev);
+    const v = ((box && box.value) || "").trim();
+    if (v) hooks[ev] = v;
+  }
+  let r;
+  try { r = await pywebview.api.set_event_hooks(hooks); }
+  catch (e) { $("hookNote").textContent = String(e); return; }
+  if (r && r.error) $("hookNote").textContent = r.error;
+};
 
 async function refreshSkills() {
   let r;
@@ -5010,7 +5103,7 @@ $("kbdModal").onclick = e => { if (e.target === $("kbdModal")) closeKbd(); };
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
     closeAccounts(); closeRole(); hideAsk(); closeSkills();
-    closeContinuous(); closeKbd();
+    closeContinuous(); closeKbd(); closeHooks();
     if ($("findBar") && !$("findBar").hidden) findClose();
     if (micOn) micStop(true);          // a live mic is the one thing Escape must kill
   }
