@@ -953,7 +953,6 @@ if (topLevelError) {
     p.hiddenAfterNewChat = !(byId['budgetStrip'].className || '').includes('show');
     p.textAfterNewChat = String(byId['budgetStrip'].textContent);
   } catch (e) { more.budgetError = (e && e.stack) || String(e); }
-=======
 
   // ---- @-mention hint + composer drag-and-drop, through their seams ------
   // The chip only MIRRORS engine routing (relay.parse_mention), so the probe
