@@ -1533,6 +1533,11 @@
   }
   #attRow { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; }
   #attRow[hidden] { display: none; }
+  .mention-hint {
+    flex-basis: 100%; font-size: 11.5px; color: var(--alloy);
+    padding: 0 2px;
+  }
+  .mention-hint[hidden] { display: none; }
   .att-chip {
     display: inline-flex; align-items: center; gap: 7px; background: var(--surface);
     border: 1px solid var(--line); border-radius: 999px; padding: 3px 11px;
@@ -1846,6 +1851,7 @@
         title="A seat is waiting on your answer — click to reopen the question"></button>
       <div id="sayGrip" title="Drag up or down to resize the message box (or focus and use ↑/↓)"
            role="separator" aria-label="Message box height" tabindex="0"></div>
+      <div id="mentionHint" class="mention-hint" hidden></div>
       <div id="attRow" hidden></div>
       <button id="attachBtn" title="Attach files — saved into the working folder for the AIs to open"
               aria-label="Attach files">📎</button>
@@ -5313,6 +5319,43 @@ $("say").addEventListener("paste", e => {
     addAttachment(f, `pasted-${++pasteN}.${ext}`);
   });
 });
+/* ---------- @-mention hint ---------- */
+// "@SeatName …" typed at the START of a draft is delivered to that one seat
+// only — the ENGINE does the routing (relay.parse_mention, the same matcher
+// /clear and [[TO:]] use). This chip only mirrors what will happen: it is a
+// JS mirror over the seated labels (typed name first, auto display name
+// second), case-insensitive, longest match up to 3 words ("@Claude 2"). An
+// @name that matches nobody — or is ambiguous — stays literal text here too.
+function mentionCandidates() {
+  return seats.map(s => {
+    const box = s.el.querySelector(".name");
+    return ((box && box.value.trim()) || seatDisplayName(s)).toLowerCase();
+  });
+}
+function mentionTarget(text) {
+  const t = String(text || "").replace(/^\s+/, "");
+  if (!t.startsWith("@")) return null;
+  const words = t.slice(1).trim().split(/\s+/).filter(Boolean);
+  const names = mentionCandidates();
+  for (let k = Math.min(3, words.length); k >= 1; k--) {
+    const token = words.slice(0, k).join(" ").toLowerCase();
+    const hits = names.filter(n => n === token);
+    if (hits.length === 1)
+      return k < words.length ? { index: names.indexOf(hits[0]) } : null;
+    if (hits.length) return null;   // ambiguous label: no magic anywhere
+  }
+  return null;
+}
+function updateMentionHint() {
+  const el = $("mentionHint"), hit = mentionTarget($("say").value);
+  if (!hit) { el.hidden = true; el.textContent = ""; return; }
+  const seat = seats[hit.index];
+  const box = seat && seat.el.querySelector(".name");
+  el.textContent = "→ only " + ((box && box.value.trim()) ||
+    seatDisplayName(seat)) + " will receive this";
+  el.hidden = false;
+}
+$("say").addEventListener("input", updateMentionHint);
 /* ---------- dictation ---------- */
 // Hold the mic (or Ctrl+Shift+Space) and talk. Capture AND transcription both
 // happen in Python — this side only asks, paints the state, and inserts the
@@ -5381,6 +5424,7 @@ function insertDictation(text) {
   el.setSelectionRange(caret, caret);
   histIdx = -1;
   autoGrow();
+  updateMentionHint();
 }
 function onDictation(p) {
   const st = p && p.state;

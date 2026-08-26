@@ -5960,6 +5960,70 @@ def _addressed_recipients(state, i, reply, io):
     return intended, actual
 
 
+MENTION_MAX_WORDS = 3
+
+
+def parse_mention(text, agents):
+    """Split a leading ``@Seat `` mention off a HUMAN message.
+
+    Returns (seat index or None, remaining text). The token — up to
+    MENTION_MAX_WORDS words of it, so "@Claude 2" matches a multi-word
+    label — resolves through the SAME matcher /clear, [[TO:]] and --role
+    use (case-insensitive labels first, provider names second). A name that
+    matches NOBODY, an ambiguous one (a provider with several seats), or a
+    mention with no message after it is not magic: the text stays literal
+    and the message broadcasts exactly as it always did.
+    """
+    raw = (text or "").lstrip()
+    if not raw.startswith("@"):
+        return None, (text or "")
+    words = raw[1:].split()
+    for k in range(min(MENTION_MAX_WORDS, len(words)), 0, -1):
+        token = " ".join(words[:k])
+        hits = match_seats(agents, token)
+        if len(hits) == 1:
+            rest = raw[1 + len(token):].strip()
+            if rest:
+                return hits[0], rest
+            return None, (text or "")   # address with no message: literal
+        if hits:
+            break                       # ambiguous on purpose; stop digging
+    return None, (text or "")
+
+
+def enqueue_josh_message(state, io, text):
+    """Record ONE human message and put it where the queues say it goes.
+
+    The one funnel behind every front end's drain loop (sequential, panel,
+    parallel and free all call this). Without a leading @mention this is the
+    historic broadcast, byte-for-byte; with one, delivery narrows to the
+    addressed seat only — the transcript row still carries the full verbatim
+    text, and its envelope records the narrowed audience so replay shows the
+    routing. Deliberately NOT wired into hidden/digest synchronization: the
+    point of addressing Josh's message is that the other seats never hear it.
+    """
+    agents = state["agents"]
+    store = state["store"]
+    target, rest = parse_mention(text, agents)
+    if target is None:
+        row = state["log"]("Josh (human)", text)
+        io.emit("message", row)
+        for j in range(len(agents)):
+            state["pending"][j].append(f"Josh (human) interjects: {text}")
+        store.save(state)
+        return row
+    sid = state["slot_ids"][target]
+    row = state["log"]("Josh (human)", text, envelope={
+        "audience": [sid], "delivered_to": [sid]})
+    io.emit("message", row)
+    state["pending"][target].append(f"Josh (human) says to you: {rest}")
+    note = f"Josh addressed this message to {agents[target].name} only."
+    io.emit("status", {"text": note})
+    store.system(note, round=state.get("rnd", 0))
+    store.save(state)
+    return row
+
+
 def artifact_descriptors(workspace, activity, producer, message_id):
     """Turn confined edit activity into truthful, verified file references."""
     found = []
@@ -9017,11 +9081,7 @@ def _run_rounds(state, io):
                 if dispatch_command(state, h, io):
                     stopped = True
                 continue
-            row = log("Josh (human)", h)
-            io.emit("message", row)
-            for j in range(len(agents)):
-                pending[j].append(f"Josh (human) interjects: {h}")
-            store.save(state)
+            enqueue_josh_message(state, io, h)
         mgr.drain_into_pending()
         if stopped:
             outcome = "stopped"
@@ -9438,12 +9498,7 @@ def run_panel(state, io):
                         stopped = True
                 continue
             with lock:
-                row = state["log"]("Josh (human)", h)
-                io.emit("message", row)
-                for j in range(len(agents)):
-                    state["pending"][j].append(
-                        f"Josh (human) interjects: {h}")
-                store.save(state)
+                enqueue_josh_message(state, io, h)
         return stopped
 
     while True:
@@ -9653,11 +9708,7 @@ def run_parallel(state, io):
                         stop = True
                 continue
             with lock:
-                row = log("Josh (human)", h)
-                io.emit("message", row)
-                for j in range(len(agents)):
-                    pending[j].append(f"Josh (human) interjects: {h}")
-                store.save(state)
+                enqueue_josh_message(state, io, h)
         return stop
 
     while True:
@@ -10225,11 +10276,7 @@ def run_free(state, io):
                     stop_all("stopped")
                 continue
             with cond:
-                row = log("Josh (human)", h)
-                io.emit("message", row)
-                for j in range(n):
-                    pending[j].append(f"Josh (human) interjects: {h}")
-                store.save(state)
+                enqueue_josh_message(state, io, h)
                 cond.notify_all()
         # one-shot auto-title, OUTSIDE cond: a slow side call must never hold
         # the lock every seat thread waits on

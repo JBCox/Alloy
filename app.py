@@ -2248,10 +2248,19 @@ class Api:
         if opener:
             # emit the recorded row so live and replayed chats carry the
             # same keys (ts, meta, …) for this message
-            self.emit("message", log("Josh (human)", opener))
-            for j in state["pending"]:
-                state["pending"][j].append(
-                    f"Josh (human) opens the conversation: {opener}")
+            target, rest = relay.parse_mention(opener, state["agents"])
+            if target is None:
+                self.emit("message", log("Josh (human)", opener))
+                for j in state["pending"]:
+                    state["pending"][j].append(
+                        f"Josh (human) opens the conversation: {opener}")
+            else:
+                # "@Seat ..." opener: the named seat alone opens with it
+                sid = state["slot_ids"][target]
+                self.emit("message", log("Josh (human)", opener, envelope={
+                    "audience": [sid], "delivered_to": [sid]}))
+                state["pending"][target].append(
+                    f"Josh (human) opens the conversation: {rest}")
             store.save(state)
         self._rounds(state)
 
@@ -2315,9 +2324,18 @@ class Api:
             state["store"].system(note, round=state["rnd"])
             self.emit("status", {"text": note})
         if opener:
-            self.emit("message", state["log"]("Josh (human)", opener))
-            for j in state["pending"]:
-                state["pending"][j].append(f"Josh (human) says: {opener}")
+            target, rest = relay.parse_mention(opener, state["agents"])
+            if target is None:
+                self.emit("message", state["log"]("Josh (human)", opener))
+                for j in state["pending"]:
+                    state["pending"][j].append(f"Josh (human) says: {opener}")
+            else:
+                sid = state["slot_ids"][target]
+                self.emit("message", state["log"](
+                    "Josh (human)", opener,
+                    envelope={"audience": [sid], "delivered_to": [sid]}))
+                state["pending"][target].append(
+                    f"Josh (human) says to you: {rest}")
             state["store"].save(state)
         self._rounds(state)
 
