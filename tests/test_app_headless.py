@@ -85,6 +85,119 @@ class HeadlessAppTests(unittest.TestCase):
         self.assertIsNotNone(api._conv, "run did not start")
         return api
 
+    def test_a_seat_mid_turn_survives_reopening_the_chat(self):
+        """Typing indicators are live-only in the UI, so a reopened chat whose
+        seats are mid-turn rendered as idle. open_session replays them."""
+        api = self._stopped_api()
+        run = api._runs.focused()
+        io = app._AppIO(api, run)
+        io.emit("thinking", {"speaker": 0, "provider": "claude",
+                             "name": "Claude", "limit": 900})
+        api._emit_q.join()
+        self.assertEqual(len(run.thinking), 1)
+        payload = api.open_session(run.id)["thinking"]
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["name"], "Claude")
+        self.assertEqual(payload[0]["limit"], 900)
+        self.assertGreater(payload[0]["started"], 0,
+                           "the UI needs the true age, not a fresh 0:00")
+        io.emit("thinking_done", {"speaker": 0})
+        api._emit_q.join()
+        self.assertEqual(api.open_session(run.id)["thinking"], [])
+
+    def test_a_finished_run_reports_nobody_mid_turn(self):
+        """Whatever the last event managed to say before the loop ended."""
+        api = self._stopped_api()
+        run = api._runs.focused()
+        run.thinking["0"] = {"speaker": 0, "name": "stale"}
+        api._rounds(run.state)
+        api._emit_q.join()
+        self.assertEqual(run.thinking, {})
+
+    # ---- picking a chat back up after the app was killed ----------------
+    def _sandbox_relay_paths(self):
+        """Point relay's OWN globals at the temp dir for this test.
+
+        setUp only redirects `app.SESSIONS_DIR`; `session_path` and
+        `TABS_FILE` are relay's, so without this a tabs test writes the real
+        `sessions/tabs.json` and throws away whatever Josh had open. (It did,
+        once. Restored by hand.)
+        """
+        old_dir, old_tabs = relay.SESSIONS_DIR, relay.TABS_FILE
+        relay.SESSIONS_DIR = self.tmp
+        relay.TABS_FILE = os.path.join(self.tmp, "tabs.json")
+
+        def restore():
+            relay.SESSIONS_DIR, relay.TABS_FILE = old_dir, old_tabs
+        self.addCleanup(restore)
+
+    def _set_completion(self, run, completion):
+        meta_path = os.path.join(run.session_dir, "meta.json")
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        meta["completion"] = completion
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+
+    def _killed_mid_run_chat(self):
+        """A finished run, then doctored to look like the process died: the
+        exact shape found on disk on 2026-08-23 (lifecycle active, no
+        termination_reason, because run_rounds' finally never ran)."""
+        api = self._stopped_api()
+        run = api._runs.focused()
+        self._sandbox_relay_paths()
+        self._set_completion(run, {"lifecycle": "active",
+                                   "goal_verdict": "unknown"})
+        relay.write_tabs({"open": [{"id": run.id, "color": ""}],
+                          "active": run.id})
+        return api, run
+
+    def test_a_chat_killed_mid_run_is_offered_for_resume(self):
+        api, run = self._killed_mid_run_chat()
+        plan = api.restart_resume()
+        self.assertEqual(plan["session_id"], run.id)
+        self.assertTrue(plan["resume"])
+        self.assertIn("still running when the app closed", plan["reason"])
+
+    def test_a_chat_that_ENDED_is_reopened_but_never_resumed(self):
+        """Every ending except a killed process was somebody's decision."""
+        api, run = self._killed_mid_run_chat()
+        self._set_completion(run, {"lifecycle": "paused",
+                                   "termination_reason": "wrap"})
+        plan = api.restart_resume()
+        self.assertEqual(plan["session_id"], run.id, "still reopened")
+        self.assertFalse(plan["resume"], "but not resumed")
+
+    def test_two_barren_auto_resumes_stop_the_third(self):
+        """Otherwise a chat that crashes on resume bills itself in a loop."""
+        api, run = self._killed_mid_run_chat()
+        self.assertTrue(api.restart_resume()["resume"])
+        self.assertEqual(api.note_auto_resume(run.id)["count"], 1)
+        self.assertTrue(api.restart_resume()["resume"], "one is not a loop")
+        self.assertEqual(api.note_auto_resume(run.id)["count"], 2)
+        plan = api.restart_resume()
+        self.assertFalse(plan["resume"])
+        self.assertIn("no turns", plan["reason"])
+
+    def test_a_resume_that_produced_a_turn_resets_the_guard(self):
+        api, run = self._killed_mid_run_chat()
+        api.note_auto_resume(run.id)
+        api.note_auto_resume(run.id)
+        self.assertFalse(api.restart_resume()["resume"])
+        meta_path = os.path.join(run.session_dir, "meta.json")
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        meta["turn"] = int(meta.get("turn") or 0) + 1   # it committed one
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+        self.assertTrue(api.restart_resume()["resume"],
+                        "progress clears the guard")
+
+    def test_no_saved_tab_means_nothing_to_resume(self):
+        api, _run = self._killed_mid_run_chat()
+        relay.write_tabs({"open": [], "active": None})
+        self.assertEqual(api.restart_resume(), {})
+
     def test_supervisor_picker_and_public_trace_reach_the_live_run(self):
         relay.AGENT_TYPES["claude"] = scripted_agent_class(
             "Claude", ["Claude finished the research."])
@@ -113,6 +226,100 @@ class HeadlessAppTests(unittest.TestCase):
         self.assertIn("verification", phases)
         events = api._window.events()
         self.assertTrue(any(e["event"] == "supervisor" for e in events))
+
+    # ---- Keep Improving reaches the engine through the bridge ----------
+    def test_keep_improving_cfg_reaches_the_engine_unbounded(self):
+        """The app's job here is to hand the engine an unbounded run with the
+        limits Josh acknowledged — nothing else can express "runs forever"."""
+        relay.AGENT_TYPES["claude"] = scripted_agent_class("Claude", ["c1"])
+        relay.AGENT_TYPES["gpt"] = scripted_agent_class("GPT", ["g1"])
+        api = app.Api()
+        api._window = FakeWindow()
+        # Continuous mode has NO cap, so the test needs a limit that actually
+        # trips: scripted agents report no cost, so a spend cap never would,
+        # while the accumulated clock passes any positive hours value at the
+        # second barrier. That asymmetry is itself worth knowing.
+        api._conv = None
+        api._conversation({
+            "opener": "keep improving it", "turns": 3, "mode": "supervisor",
+            "continuous": {"on": True,
+                           "checkin": {"minutes": 45, "action": "permission"},
+                           "limits": {"spend_usd": 0.0001, "hours": 1e-9,
+                                      "watchdog_may_stop": False},
+                           "gate": {"command": "", "commit": True}},
+            "seats": [{"id": 0, "provider": "claude", "enabled": True},
+                      {"id": 1, "provider": "gpt", "enabled": True}],
+        })
+        api._emit_q.join()
+        state = api._conv
+        pol = state["continuous"]
+        self.assertTrue(pol["on"])
+        self.assertEqual(pol["checkin"], {"minutes": 45,
+                                          "action": "permission"})
+        self.assertEqual(pol["limits"]["spend_usd"], 0.0001)
+        self.assertEqual(pol["limits"]["hours"], 1e-9)
+        self.assertFalse(pol["limits"]["watchdog_may_stop"])
+        self.assertEqual(state["completion"]["termination_reason"], "limit",
+                         "a limit is not a cap and not a stop")
+        # the two things only the app can get wrong
+        self.assertTrue(state["until_done"])
+        self.assertIsNone(state["turn_ceiling"])
+        self.assertIsNone(relay.effective_ceiling(state))
+
+    def test_an_ordinary_app_chat_gets_no_continuous_block(self):
+        relay.AGENT_TYPES["claude"] = scripted_agent_class("Claude", ["c1"])
+        relay.AGENT_TYPES["gpt"] = scripted_agent_class("GPT", ["g1"])
+        api = app.Api()
+        api._window = FakeWindow()
+        api._conversation({
+            "opener": "hi", "turns": 1,
+            "seats": [{"id": 0, "provider": "claude", "enabled": True},
+                      {"id": 1, "provider": "gpt", "enabled": True}]})
+        api._emit_q.join()
+        self.assertIsNone(api._conv["continuous"])
+        self.assertEqual(relay.effective_ceiling(api._conv),
+                         relay.DEFAULT_CEILING)
+
+    def test_continuous_probe_answers_with_an_event_not_a_return(self):
+        """git status is a subprocess, and subprocess.run deadlocks on the
+        pywebview bridge thread — so this must follow the recheck_auth shape."""
+        api = app.Api()
+        api._window = FakeWindow()
+        proj = os.path.join(self.tmp, "proj", "tests")
+        os.makedirs(proj)
+        open(os.path.join(proj, "run_all.py"), "w").close()
+        self.assertEqual(api.continuous_probe(os.path.dirname(proj)),
+                         {"ok": True})
+        deadline = time.monotonic() + 10
+        payload = None
+        while time.monotonic() < deadline and payload is None:
+            api._emit_q.join()
+            for e in api._window.events():
+                if e["event"] == "continuous_probe":
+                    payload = e["payload"]
+            if payload is None:
+                time.sleep(0.05)
+        self.assertIsNotNone(payload, "no continuous_probe event arrived")
+        self.assertEqual(payload["command"], "python tests/run_all.py")
+        self.assertIn("dirty", payload)
+        self.assertIn("git", payload)
+
+    def test_the_probe_survives_a_folder_that_does_not_exist(self):
+        api = app.Api()
+        api._window = FakeWindow()
+        self.assertEqual(api.continuous_probe(""), {"ok": True})
+        deadline = time.monotonic() + 10
+        payload = None
+        while time.monotonic() < deadline and payload is None:
+            api._emit_q.join()
+            for e in api._window.events():
+                if e["event"] == "continuous_probe":
+                    payload = e["payload"]
+            if payload is None:
+                time.sleep(0.05)
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["command"], "",
+                         "an empty path must NOT detect this repo's own runner")
 
     def _mid_job_supervised_chat(self):
         """A supervised run that stops with work still open — the state Josh

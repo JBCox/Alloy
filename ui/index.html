@@ -98,6 +98,11 @@
   /* app-chrome focus ring — participants never wear this color */
   :focus-visible { outline: 2px solid color-mix(in srgb, var(--alloy) 65%, transparent); outline-offset: 1px; }
   #say:focus { border-color: color-mix(in srgb, var(--alloy) 55%, transparent); }
+  /* Controls that suppress the outline for aesthetics still need a visible
+     keyboard ring — these get the alloy border, same pattern as #say:focus. */
+  .ctl select:focus-visible, .seat select:focus-visible,
+  #addSeatRow select:focus-visible { border-color: var(--alloy); }
+  #sayGrip:focus-visible { outline-offset: -1px; border-radius: 999px; }
   /* Rail collapsing lives ON the rails: a « button in each rail's header,
      and a collapsed rail becomes a slim click-to-reopen strip. */
   .rail-collapse {
@@ -106,24 +111,45 @@
     border-radius: 6px;
   }
   .rail-collapse:hover { color: var(--text); background: var(--surface2); }
-  .rail-reopen { display: none; }
+  .rail-reopen { display: none; transition: color .15s ease; }
   main.no-chats #chatRail, main.no-seats #seatRail, main.no-files #fileRail {
-    width: 22px; min-width: 22px; padding: 0; overflow: hidden; cursor: pointer;
+    width: 26px; min-width: 26px; padding: 0; overflow: hidden; cursor: pointer;
+    transition: background-color .15s ease;
   }
   main.no-chats #chatRail > *, main.no-seats #seatRail > *,
   main.no-files #fileRail > * { display: none; }
   main.no-chats #chatRail .rail-reopen, main.no-seats #seatRail .rail-reopen,
   main.no-files #fileRail .rail-reopen {
-    display: block; height: 100%; padding-top: 10px; text-align: center;
-    color: var(--muted); font-size: 14px;
+    display: block; height: 100%; padding-top: 12px; text-align: center;
+    color: var(--muted); font-size: 15px;
   }
   main.no-chats #chatRail:hover, main.no-seats #seatRail:hover,
   main.no-files #fileRail:hover { background: var(--surface); }
   main.no-chats #chatRail:hover .rail-reopen,
   main.no-seats #seatRail:hover .rail-reopen,
   main.no-files #fileRail:hover .rail-reopen { color: var(--text); }
+  /* the strips are role=button divs: they need the same visible keyboard ring
+     every real button got, and a label that says what reopening gives you */
+  .rail-reopen:focus-visible {
+    outline: 2px solid var(--alloy); outline-offset: -2px; border-radius: 4px;
+  }
   .rail-head { display: flex; align-items: center; }
   .rail-head .rail-label { flex: 1; margin-top: 0; }
+  /* The seat rail scrolls as one column, so its header would drift off
+     screen mid-config — pin it while cards slide underneath. (The chat and
+     file rails scroll their lists, not themselves, so they need none.) */
+  #seatRail > .rail-head {
+    position: sticky; top: 0; z-index: 5;
+    margin: -16px -14px 12px; padding: 16px 14px 10px;
+    background: #1A1720;
+  }
+  /* section sub-headers inside the Conversation group: scan-level grouping
+     without moving or wrapping any existing control */
+  .rail-sub {
+    font-family: Bahnschrift, sans-serif; font-size: 9.5px;
+    letter-spacing: .16em; text-transform: uppercase;
+    color: var(--muted); opacity: .8; margin: 14px 2px 6px;
+  }
 
   /* ---------- layout ---------- */
   main { flex: 1; display: flex; min-height: 0; }
@@ -145,6 +171,57 @@
   #newChatBtn:hover { border-color: rgba(255,255,255,.25); background: #322D3A; }
   #newChatBtn .plus { font-size: 16px; line-height: 1; color: var(--muted); }
   #chatList { flex: 1; overflow-y: auto; padding: 0 8px 14px; min-height: 0; }
+  #chatSearchWrap {
+    position: relative; margin: 8px 8px 6px; flex: 0 0 auto;
+  }
+  #chatSearch {
+    width: 100%; box-sizing: border-box;
+    background: var(--surface2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 7px 26px 7px 10px; font-size: 12.5px;
+    font-family: Bahnschrift, "Segoe UI", sans-serif;
+  }
+  #chatSearch::placeholder { color: var(--muted); }
+  #chatSearch:focus { outline: none; border-color: rgba(255,255,255,.25); }
+  #chatSearchClear {
+    position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+    border: 0; background: none; color: var(--muted); cursor: pointer;
+    font-size: 12px; padding: 4px; line-height: 1;
+  }
+  #chatSearchClear:hover { color: var(--text); }
+  .chat-search-h {
+    padding: 6px 6px 3px; color: var(--muted);
+    font-family: Bahnschrift, sans-serif; font-size: 11px; letter-spacing: .12em;
+    text-transform: uppercase; text-align: left;
+  }
+  .search-row {
+    display: flex; align-items: flex-start; gap: 7px;
+    border-radius: 9px; padding: 6px 9px; cursor: pointer; margin-bottom: 2px;
+    border: 1px solid transparent;
+  }
+  .search-row:hover { background: var(--surface2); }
+  .search-row.active { background: var(--surface2); border-color: var(--line); }
+  .search-row .t {
+    font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .search-row .s-proj { color: var(--muted); font-size: 11.5px; }
+  .search-row .s-snippet {
+    color: var(--muted); font-size: 12px; margin-top: 1px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .search-row .s-count {
+    flex: 0 0 auto; margin-left: auto; color: var(--alloy);
+    font-family: Bahnschrift, sans-serif; font-size: 11px;
+    border: 1px solid var(--line); border-radius: 20px; padding: 1px 7px;
+  }
+  .msg.hit-flash { animation: hitFlash 2.4s forwards; border-radius: 10px; }
+  @keyframes hitFlash {
+    0%, 55% { outline-color: var(--alloy); }
+    100% { outline-color: transparent; }
+  }
+  .msg.hit-flash {
+    outline: 2px solid transparent; outline-offset: 2px;
+  }
   .chat-group { margin-bottom: 8px; }
   .chat-group-h {
     width: 100%; display: flex; align-items: center; gap: 6px; border: 0;
@@ -204,17 +281,21 @@
   }
   .chat-row.done .unread { background: #75C995; }
   .chat-row .unread[hidden] { display: none; }
-  .chat-row.legacy .t { color: var(--muted); }
+  .chat-row.legacy .t, .search-row.legacy .t { color: var(--muted); }
   .chat-row .chat-actions {
     position: absolute; top: 50%; transform: translateY(-50%); right: 3px;
     display: flex; align-items: center; gap: 1px;
   }
-  .chat-row .x, .chat-row .chat-stop {
+  .chat-row .x, .chat-row .chat-stop, .chat-row .pin, .chat-row .exp {
     width: 20px; height: 20px;
     border: 0; border-radius: 6px; background: transparent; color: var(--muted);
     cursor: pointer; font-size: 12px; line-height: 1; opacity: 0;
     transition: opacity .12s;
   }
+  .chat-row .pin.on { opacity: 1; color: var(--alloy); }
+  .chat-row:hover .pin, .chat-row:hover .exp, .chat-row .pin.on { opacity: 1; }
+  .chat-row .pin { color: var(--alloy); }
+  .chat-row .pin:hover, .chat-row .exp:hover { background: var(--surface2); color: var(--text); }
   .chat-row .chat-stop { color: #E7915C; }
   .chat-row.running .chat-stop, .chat-row.thinking .chat-stop,
   .chat-row.waiting .chat-stop, .chat-row.stopping .chat-stop,
@@ -569,7 +650,7 @@
     color: var(--muted); user-select: all; overflow-wrap: anywhere;
   }
   .btn-sm.danger { border-color: var(--danger); color: var(--danger); }
-  #acctBtn, #skillBtn {
+  #acctBtn, #skillBtn, #soundBtn {
     width: 100%; display: flex; align-items: center; gap: 8px;
     background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
     color: var(--text); padding: 9px 12px; margin-top: 16px; cursor: pointer;
@@ -577,18 +658,33 @@
     text-transform: uppercase;
   }
   #skillBtn { margin-top: 16px; font-size: 11px; }
+  #soundBtn { margin-top: 6px; font-size: 11px; }
+  #soundBtn.off { color: var(--muted); }
   #acctBtn { margin-top: 6px; }
-  #acctBtn:hover, #skillBtn:hover { border-color: rgba(255,255,255,.25); }
+  #acctBtn:hover, #skillBtn:hover, #soundBtn:hover { border-color: rgba(255,255,255,.25); }
   #acctBadge {
     margin-left: auto; background: var(--danger); color: #fff; border-radius: 999px;
     font: 11px "Cascadia Mono", Consolas, monospace; padding: 1px 7px;
   }
-  #acctModal, #roleModal, #askModal, #skillModal {
+  #acctModal, #roleModal, #askModal, #skillModal, #contModal, #kbdModal {
     position: fixed; inset: 0; z-index: 50; display: none;
     align-items: flex-start; justify-content: center; padding-top: 9vh;
     background: rgba(10,8,14,.6);
   }
-  #acctModal.show, #roleModal.show, #askModal.show, #skillModal.show { display: flex; }
+  #acctModal.show, #roleModal.show, #askModal.show, #skillModal.show,
+  #contModal.show, #kbdModal.show { display: flex; }
+  .kbd-grid {
+    display: grid; grid-template-columns: auto 1fr; gap: 8px 14px;
+    align-items: baseline; margin-top: 4px;
+  }
+  .kbd-grid kbd {
+    font-family: Consolas, monospace; font-size: 11px; color: var(--text);
+    background: var(--surface2); border: 1px solid var(--line);
+    border-radius: 4px; padding: 2px 7px; white-space: nowrap;
+    justify-self: start;
+  }
+  .kbd-grid span { color: var(--muted); font-size: 11.5px; }
+  .kbd-note { margin-top: 12px; color: var(--muted); font-size: 11px; }
   .modal {
     background: #1A1720; border: 1px solid var(--line); border-radius: 12px;
     width: min(460px, 92vw); max-height: 78vh; overflow-y: auto;
@@ -701,16 +797,28 @@
   .ctl { background: var(--surface); border: 1px solid var(--line);
     border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
   .ctl label { font-size: 12.5px; color: var(--muted); display: block; margin-bottom: 6px; }
+  /* a checkbox row under a control — replaces ad-hoc inline styles so every
+     check row in the Conversation group sits at the same rhythm */
+  .ctl label.check-row {
+    display: flex; align-items: center; gap: 8px; margin: 8px 0 0;
+    font-size: 12.5px; color: var(--muted);
+  }
+  /* unless it opens its box, where the box's own padding is enough */
+  .ctl > label.check-row:first-child { margin-top: 0; }
+  /* a second, related checkbox in the same box gets a hairline, not a gap */
+  .ctl label.check-div { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line); }
   /* An author `display` beats the UA sheet's [hidden] rule, so a hidden label
      here renders anyway -- which is how Compatibility recipe stayed on screen
      after being marked hidden (caught only by driving the real window). */
   .ctl label[hidden] { display: none; }
-  .ctl select {
+  /* the drawer left the .ctl boxes, so it carries the same rule itself */
+  #advancedOrchestration label[hidden] { display: none; }
+  .ctl select, #advancedOrchestration select {
     width: 100%; background: var(--surface2); color: var(--text);
     border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px;
     font: 12.5px "Cascadia Mono", Consolas, monospace; outline: none;
   }
-  .ctl select:disabled { color: var(--muted); cursor: not-allowed; }
+  .ctl select:disabled, #advancedOrchestration select:disabled { color: var(--muted); cursor: not-allowed; }
   .preset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
   .preset-card {
     min-height: 58px; padding: 7px 8px; border: 1px solid var(--line);
@@ -721,12 +829,42 @@
   .preset-card[aria-pressed=true] { border-color: var(--alloy); background: #2D2731; }
   .preset-card b { display: block; font-size: 11.5px; font-weight: 600; }
   .preset-card span { display: block; margin-top: 3px; color: var(--muted); font-size: 9.5px; line-height: 1.25; }
+  /* mode cards carry an icon on the title line — the icon span must NOT
+     inherit the description span's top margin or block layout */
+  .preset-card .pc-head {
+    display: flex; align-items: center; gap: 5px; margin-top: 0;
+  }
+  .preset-card .pc-head svg {
+    flex: 0 0 auto; width: 13px; height: 13px;
+    color: var(--alloy); opacity: .85;
+  }
+  /* two short, related selects share one control box instead of stacking */
+  .duo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .duo-grid > label { margin-bottom: 0; }
+  /* The Advanced drawer is a DIFFERENT altitude of control than the preset
+     cards above it — its own collapsed card BELOW the Goal box, so the goal
+     picker stays one glance tall and the rare knobs wait behind one click.
+     Inside, mini-headings cut the eight knobs into three readable groups. */
+  #advancedOrchestration {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 10px; margin-bottom: 10px;
+  }
+  #advancedOrchestration > summary {
+    color: var(--muted); cursor: pointer; font-size: 11px;
+    padding: 9px 12px; user-select: none;
+  }
+  #advancedOrchestration[open] > summary { border-bottom: 1px solid var(--line); }
+  .policy-body { padding: 0 12px 10px; }
+  .policy-h {
+    font-family: Bahnschrift, sans-serif; font-size: 9.5px;
+    letter-spacing: .16em; text-transform: uppercase;
+    color: var(--muted); opacity: .8; margin: 12px 2px 2px;
+  }
+  .policy-body .policy-h:first-child { margin-top: 9px; }
   #presetNote, #callEstimate, #policyReason {
     margin-top: 7px; color: var(--muted); font-size: 10.5px; line-height: 1.35;
   }
   #callEstimate { color: var(--alloy); font-family: "Cascadia Mono", Consolas, monospace; }
-  #advancedOrchestration { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 7px; }
-  #advancedOrchestration summary { color: var(--muted); cursor: pointer; font-size: 11px; }
   .policy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
   .policy-grid label { margin: 0; font-size: 10px; }
   .policy-grid select { margin-top: 3px; font-size: 10.5px; padding: 4px 5px; }
@@ -747,12 +885,113 @@
   #synthCtl select { margin-top: 4px; }
   #modCtl { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
   #modCtl select + select { margin-top: 6px; }
+  /* ---------- Keep Improving warning modal ---------- */
+  #contModal .modal { width: min(620px, 94vw); border-left: 3px solid var(--alloy); }
+  #contWarn {
+    background: rgba(244, 185, 66, .08); border: 1px solid rgba(244, 185, 66, .35);
+    border-radius: 8px; padding: 10px 12px; font-size: 12.5px; line-height: 1.5;
+    color: var(--text);
+  }
+  #contWarn b { color: var(--alloy); }
+  #contFolder { color: var(--muted); font-size: 11.5px; }
+  .cont-label {
+    display: block; margin: 14px 0 6px; font-size: 11px; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .cont-row { display: flex; align-items: center; gap: 8px; }
+  .cont-row input[type=text] {
+    background: var(--surface2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 7px; padding: 5px 8px; font-size: 13px;
+  }
+  #contMinutes, #contSpend, #contHours { width: 6ch; text-align: center; }
+  #contGate { flex: 1; font: 12px "Cascadia Mono", Consolas, monospace; }
+  .cont-unit { color: var(--muted); font-size: 12px; }
+  .cont-hint {
+    display: block; margin-top: 6px; color: var(--muted); font-size: 11.5px;
+    line-height: 1.45; font-style: normal;
+  }
+  .cont-radios { display: grid; gap: 6px; margin-top: 10px; }
+  .cont-radios label {
+    display: grid; grid-template-columns: auto 1fr; column-gap: 8px;
+    align-items: baseline; padding: 7px 9px; border: 1px solid var(--line);
+    border-radius: 8px; cursor: pointer; font-size: 12.5px;
+  }
+  .cont-radios label:has(input:checked) { border-color: var(--alloy); background: #2D2731; }
+  .cont-radios b { grid-column: 2; }
+  .cont-radios span { grid-column: 2; color: var(--muted); font-size: 11.5px; line-height: 1.4; }
+  .cont-limits { display: grid; gap: 7px; }
+  .cont-limit {
+    display: flex; align-items: center; gap: 8px; font-size: 12.5px; cursor: pointer;
+  }
+  .cont-limit.wide { align-items: flex-start; line-height: 1.4; }
+  .cont-limit input[type=text]:disabled { opacity: .4; }
+  .cont-check {
+    display: flex; align-items: flex-start; gap: 8px; margin-top: 8px;
+    font-size: 12.5px; line-height: 1.4; cursor: pointer;
+  }
+  /* an explicit `display` BEATS the hidden attribute, so `el.hidden = true`
+     silently does nothing without this — the dirty-tree row was showing on a
+     clean folder with committing switched off (caught by looking at it) */
+  .cont-check[hidden], .cont-limit[hidden], .cont-row[hidden] { display: none; }
+  #contAck {
+    margin-top: 14px; padding: 9px 11px; border-radius: 8px; font-size: 12.5px;
+    line-height: 1.45; background: var(--surface2); color: var(--text);
+  }
+  #contAck.nolimit {
+    background: rgba(224, 96, 126, .1); border: 1px solid rgba(224, 96, 126, .4);
+  }
+  .cont-ack {
+    display: flex; align-items: flex-start; gap: 9px; margin-top: 10px;
+    font-size: 13px; line-height: 1.45; cursor: pointer;
+  }
+  #contFoot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+  #contOk {
+    background: var(--alloy); color: #1A1520; border: 0; border-radius: 8px;
+    padding: 7px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  #contOk:disabled { opacity: .35; cursor: not-allowed; }
+  #contSummary {
+    margin-top: 6px; font-size: 11.5px; line-height: 1.45; color: var(--muted);
+  }
+  #contSummary b { color: var(--alloy); font-weight: 600; }
+  #contSummary button {
+    background: none; border: 0; color: var(--alloy); cursor: pointer;
+    padding: 0; font: inherit; text-decoration: underline;
+  }
+  /* the live strip while a Keep Improving run is going */
+  #contStrip {
+    display: none; align-items: center; gap: 10px; padding: 5px 12px;
+    font: 11.5px "Cascadia Mono", Consolas, monospace; color: var(--muted);
+    border-bottom: 1px solid var(--line); background: var(--surface2);
+  }
+  #contStrip.show { display: flex; }
+  #contStrip b { color: var(--alloy); font-weight: 600; }
+  #contBanner {
+    display: none; gap: 10px; align-items: flex-start; margin: 8px 0;
+    padding: 9px 11px; border-radius: 8px; font-size: 12.5px; line-height: 1.45;
+    background: rgba(244, 185, 66, .1); border: 1px solid rgba(244, 185, 66, .4);
+  }
+  #contBanner.show { display: flex; }
+  #contBanner button {
+    margin-left: auto; background: none; border: 0; color: var(--muted);
+    cursor: pointer; font-size: 14px; line-height: 1;
+  }
   .rounds { display: flex; align-items: center; gap: 10px; }
   .rounds button {
     width: 28px; height: 28px; border-radius: 7px; border: 1px solid var(--line);
     background: var(--surface2); color: var(--text); font-size: 16px; cursor: pointer;
   }
-  .rounds b { font-family: "Cascadia Mono", Consolas, monospace; font-size: 15px; min-width: 2ch; text-align: center; }
+  /* Typable, not just steppable: getting from 6 to 40 rounds was 34 clicks.
+     type="text"+inputmode, never type="number" -- WebView2 draws its own
+     spinners (duplicating the -/+ buttons) and reports value==="" for
+     partially-typed junk, which makes a clamp-on-blur silently lie. */
+  .rounds input {
+    font-family: "Cascadia Mono", Consolas, monospace; font-size: 15px;
+    width: 4ch; text-align: center; padding: 3px 0;
+    background: var(--surface2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 7px;
+  }
+  .rounds input:focus-visible { outline: 2px solid var(--alloy); outline-offset: 1px; }
   #folderRow { display: flex; gap: 6px; }
   #folderPath {
     flex: 1; font: 11.5px "Cascadia Mono", Consolas, monospace; color: var(--muted);
@@ -905,21 +1144,70 @@
     border-radius: 999px; padding: 1px 6px; font-size: 11px;
   }
   #jumpBtn .n[hidden] { display: none; }
+  /* in-transcript find (Ctrl+F): a compact bar pinned inside the transcript
+     viewport, same overlay grammar as #jumpBtn */
+  #findBar {
+    position: absolute; top: 10px; right: 16px; z-index: 7;
+    display: flex; align-items: center; gap: 6px;
+    background: var(--surface2); border: 1px solid var(--line);
+    border-radius: 9px; padding: 5px 8px;
+    box-shadow: 0 6px 18px rgba(0,0,0,.4);
+  }
+  #findBar[hidden] { display: none; }
+  #findInput {
+    width: 190px; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 6px; color: var(--text); padding: 4px 8px;
+    font-size: 13px; outline: none;
+  }
+  #findInput:focus { border-color: var(--alloy); }
+  #findInput::placeholder { color: var(--muted); }
+  #findCount {
+    font: 11px "Cascadia Mono", Consolas, monospace; color: var(--muted);
+    min-width: 38px; text-align: center; white-space: nowrap;
+  }
+  .find-btn {
+    width: 24px; height: 24px; padding: 0; cursor: pointer;
+    background: none; border: 1px solid var(--line); border-radius: 6px;
+    color: var(--muted); font-size: 11px; line-height: 1;
+  }
+  .find-btn:hover { color: var(--text); border-color: var(--alloy); }
+  /* exact-text hits paint through the CSS Custom Highlight API — no DOM
+     mutation, so rendered markdown/thumbnails are never touched. The
+     .find-cur-msg glow is the fallback for engines without it. */
+  ::highlight(find-hits) { background: color-mix(in srgb, var(--alloy) 32%, transparent); }
+  ::highlight(find-cur) { background: var(--alloy); color: #17130d; }
+  .msg.find-cur-msg { border-color: var(--alloy); box-shadow: 0 0 0 1px var(--alloy); }
   .empty {
     height: 100%; display: flex; flex-direction: column; align-items: center;
-    justify-content: center; gap: 10px; color: var(--muted); text-align: center;
+    justify-content: center; gap: 12px; color: var(--muted); text-align: center;
   }
   /* the LIVE roster cluster: N circles in real provider colors, one per seat
-     (dynamic — this is the participant indicator, NOT the logo) */
-  .empty .dots { display: flex; margin-bottom: 6px; }
+     (dynamic — this is the participant indicator, NOT the logo). The amber
+     seam beneath is app chrome wearing --alloy per BRANDING.md's grammar:
+     participants keep their own colors and never borrow it. The bg-colored
+     ring makes the overlap read as fused strands rather than stacked dots. */
+  .empty .dots { display: flex; margin-bottom: 6px; position: relative; padding-bottom: 12px; }
+  .empty .dots::after {
+    content: ""; position: absolute; left: 50%; bottom: 0;
+    transform: translateX(-50%); width: 42px; height: 2px; border-radius: 999px;
+    background: linear-gradient(90deg, transparent, var(--alloy), transparent);
+    opacity: .75;
+  }
   .empty .dots i {
     width: 16px; height: 16px; border-radius: 50%; margin-left: -4px;
-    opacity: .85; background: var(--rc, #6C6677);
+    opacity: .85; background: var(--rc, var(--muted));
+    box-shadow: 0 0 0 2px var(--bg);
   }
   .empty .dots i:first-child { margin-left: 0; }
   .empty h2 { font-family: Bahnschrift, sans-serif; font-weight: 500; font-size: 19px;
     letter-spacing: .05em; color: var(--text); }
   .empty p { font-size: 13.5px; max-width: 380px; }
+  /* the at-a-glance key row — every shortcut listed already exists */
+  .empty .keys {
+    margin-top: 4px; font-size: 11px; line-height: 1.7; color: var(--muted);
+    font-family: "Cascadia Mono", Consolas, monospace;
+  }
+  .empty .keys b { color: var(--text); font-weight: 600; }
 
   .msg {
     max-width: 860px; margin: 0 0 18px; padding: 12px 16px 13px;
@@ -936,6 +1224,21 @@
   .msg.josh { --who: var(--josh); background: #241F17; margin-left: 60px; }
   .msg.system { --who: var(--muted); color: var(--muted); font-size: 13px; }
   .msg-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+  /* day dividers — a new calendar day in the transcript gets a labelled rule */
+  .day-divider {
+    display: flex; align-items: center; gap: 12px;
+    margin: 2px 0 16px; color: var(--muted);
+    font: 10.5px "Cascadia Mono", Consolas, monospace;
+    letter-spacing: .14em; text-transform: uppercase;
+  }
+  .day-divider::before, .day-divider::after {
+    content: ""; flex: 1; height: 1px; background: var(--line);
+  }
+  /* consecutive rows from the same speaker read as one run: a tighter head,
+     a dimmed repeated name — never an overlap, borders stay honest */
+  .msg.cont { padding-top: 8px; }
+  .msg.cont .msg-head { margin-bottom: 4px; }
+  .msg.cont .msg-head .who { font-size: 11.5px; opacity: .55; }
   .msg-head .who {
     font-family: Bahnschrift, sans-serif; font-size: 12.5px; letter-spacing: .12em;
     text-transform: uppercase; color: var(--who);
@@ -953,6 +1256,7 @@
     padding: 1px 7px; white-space: nowrap;
   }
   .msg.lens-hidden { display: none; }
+  .day-divider.lens-hidden { display: none; }
   .msg-head .mtime {
     font: 11px "Cascadia Mono", Consolas, monospace; color: var(--muted);
     margin-left: auto; opacity: .7; cursor: default;
@@ -994,6 +1298,9 @@
   }
   .msg:hover .copy-btn, .msg .copy-btn:focus-visible { opacity: 1; }
   .msg .copy-btn:hover { color: var(--text); }
+  /* armed fork button widens to its word, like the rail's armed delete */
+  .msg .fork-btn[data-arm] { width: auto; padding: 0 6px; font-size: 10.5px;
+    color: var(--alloy); }
 
   /* ---------- inline image previews ---------- */
   .msg-imgs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 9px; user-select: none; }
@@ -1103,6 +1410,14 @@
   .typing .dot { animation: blink 1.2s infinite; }
   @keyframes blink { 50% { opacity: .25; } }
   @media (prefers-reduced-motion: reduce) { .typing .dot { animation: none; } }
+  /* How long this turn has been going, against the watchdog that will end it.
+     Without it a seat 14 minutes into a 15-minute window is indistinguishable
+     from a dead app -- which is exactly how it was read (2026-08-23). */
+  .typing .tclock {
+    font: 11px "Cascadia Mono", Consolas, monospace; color: var(--muted);
+    opacity: .75; margin-left: 2px;
+  }
+  .typing .tclock.late { color: var(--alloy); opacity: 1; }
 
   /* ---------- live activity narration ---------- */
   .act-log { margin: 2px 0 0 17px; border-left: 2px solid var(--who, var(--line));
@@ -1156,6 +1471,46 @@
   #sayBtn:disabled { opacity: .35; cursor: default; }
   .after { display: none; gap: 8px; align-items: center; }
   .after.show { display: flex; }
+  /* permission mode picker — lives in the composer's bottom bar like Claude
+     Code's mode selector: a compact pill that opens an upward menu of modes,
+     each with its name, a one-line "when to use", and a number shortcut */
+  #permPickWrap { position: relative; flex-basis: 100%; display: flex; }
+  #permPickBtn {
+    display: inline-flex; align-items: center; gap: 7px;
+    border: 1px solid var(--line); background: none; color: var(--muted);
+    border-radius: 7px; padding: 5px 11px; font-size: 11.5px; cursor: pointer;
+    width: max-content; font-family: Bahnschrift, "Segoe UI", sans-serif;
+  }
+  #permPickBtn:hover, #permPickBtn[aria-expanded=true] {
+    color: var(--text); border-color: rgba(255,255,255,.25);
+  }
+  #permPickBtn:disabled { opacity: .4; cursor: default; }
+  #permPickBtn .perm-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--perm); }
+  #permPickBtn .perm-caret { color: var(--muted); font-size: 10px; }
+  #permPickMenu {
+    position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 60;
+    width: 320px; background: #241F2B; border: 1px solid var(--line);
+    border-radius: 10px; padding: 6px;
+    box-shadow: 0 10px 28px rgba(0,0,0,.5);
+  }
+  #permPickMenu[hidden] { display: none; }
+  .perm-opt {
+    display: flex; width: 100%; align-items: flex-start; gap: 8px;
+    background: none; border: 0; color: var(--text); text-align: left;
+    border-radius: 7px; padding: 7px 9px; cursor: pointer; font: inherit;
+  }
+  .perm-opt:hover { background: var(--surface2); }
+  .perm-opt[aria-selected=true] { background: var(--surface2); }
+  .perm-opt:disabled { opacity: .4; cursor: not-allowed; }
+  .perm-opt .perm-check { flex: 0 0 12px; color: var(--alloy); font-size: 12px; }
+  .perm-opt .perm-main { flex: 1; min-width: 0; }
+  .perm-opt b { display: block; font-size: 12px; font-weight: 600; }
+  .perm-opt .perm-desc { display: block; color: var(--muted); font-size: 10.5px; margin-top: 2px; line-height: 1.3; }
+  .perm-opt kbd {
+    flex: none; color: var(--muted); font: 10.5px "Cascadia Mono", Consolas, monospace;
+    border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; margin-top: 2px;
+  }
+  #permPickMenu .permission-note { margin: 6px 4px 2px; border-top: 1px solid var(--line); padding-top: 7px; }
   #attachBtn, #micBtn {
     border: 1px solid var(--line); background: var(--surface); color: var(--muted);
     border-radius: 9px; padding: 0 13px; font-size: 15px; cursor: pointer;
@@ -1246,50 +1601,58 @@
 
 <div id="tabStrip" hidden role="tablist" aria-label="Open conversations">
   <div id="tabList"></div>
-  <button id="tabNew" title="Start another conversation (Ctrl+T)">＋</button>
+  <button id="tabNew" title="Start another conversation (Ctrl+T)" aria-label="New conversation tab">＋</button>
 </div>
 <div id="tabMenu" role="menu" aria-label="Tab colour"></div>
 
 <main>
   <nav id="chatRail">
-    <div class="rail-reopen" title="Show chat history">»</div>
+    <div class="rail-reopen" title="Show chat history" role="button" tabindex="0"
+         aria-label="Show chat history">»</div>
     <div id="chatRailHead">
       <button id="newChatBtn" class="display"><span class="plus">＋</span> New chat</button>
-      <button class="rail-collapse" id="chatsCollapse" title="Hide chat history">«</button>
+      <button class="rail-collapse" id="chatsCollapse" title="Hide chat history" aria-label="Hide chat history">«</button>
+    </div>
+    <div id="chatSearchWrap">
+      <input id="chatSearch" type="text" placeholder="Search all chats…" spellcheck="false" autocomplete="off" />
+      <button id="chatSearchClear" title="Clear search" aria-label="Clear search" hidden>✕</button>
     </div>
     <div id="chatList"></div>
   </nav>
 
   <aside id="seatRail">
-    <div class="rail-reopen" title="Show seats">»</div>
+    <div class="rail-reopen" title="Show seats" role="button" tabindex="0"
+         aria-label="Show seats">»</div>
     <div class="rail-head">
       <div class="rail-label">Seats</div>
-      <button class="rail-collapse" id="seatsCollapse" title="Hide seats">«</button>
+      <button class="rail-collapse" id="seatsCollapse" title="Hide seats" aria-label="Hide seats">«</button>
     </div>
 
     <div id="seatList"></div>
     <div id="addSeatRow">
-      <select id="addSeatProvider">
+      <select id="addSeatProvider" title="Provider for the new seat">
         <option value="claude">Claude</option>
         <option value="gpt">GPT</option>
         <option value="gemini">Gemini</option>
         <option value="ox">Ox</option>
       </select>
-      <button class="btn-sm" id="addSeatBtn">+ Add seat</button>
+      <button class="btn-sm" id="addSeatBtn" title="Add another participant card">+ Add seat</button>
     </div>
 
     <div class="rail-label">Conversation</div>
+    <div class="rail-sub">Goal</div>
     <div class="ctl" id="orchestrationCtl">
       <label>What should the room do?</label>
       <input type="hidden" id="presetSel" value="open_discussion">
       <div id="presetGrid" class="preset-grid" role="group" aria-label="Conversation goal">
-        <button class="preset-card" data-preset="open_discussion" aria-pressed="true"><b>Discuss in Turns</b><span>Ask questions and think together in an orderly conversation.</span></button>
-        <button class="preset-card" data-preset="live_room" aria-pressed="false"><b>Talk Live</b><span>Everyone responds whenever ready — faster, but less orderly.</span></button>
-        <button class="preset-card" data-preset="panel_review" aria-pressed="false"><b>Compare &amp; Decide</b><span>Get separate answers, critiques, and one final recommendation.</span></button>
-        <button class="preset-card" data-preset="build_execute" aria-pressed="false"><b>Build Together</b><span>Split real work and create verified files in your folder.</span></button>
+        <button class="preset-card" data-preset="open_discussion" aria-pressed="true"><span class="pc-head"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.5h11v7h-6l-3 2.8v-2.8h-2z"/></svg><b>Discuss in Turns</b></span><span>Ask questions and think together in an orderly conversation.</span></button>
+        <button class="preset-card" data-preset="live_room" aria-pressed="false"><span class="pc-head"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 1.5 3.5 9H8l-.9 5.5L13 7H8z"/></svg><b>Talk Live</b></span><span>Everyone responds whenever ready — faster, but less orderly.</span></button>
+        <button class="preset-card" data-preset="panel_review" aria-pressed="false"><span class="pc-head"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v11M3 4.5h10M3 4.5l-1.6 3.6a2.1 2.1 0 0 0 3.2 0zM13 4.5l-1.6 3.6a2.1 2.1 0 0 0 3.2 0zM5.5 13.5h5"/></svg><b>Compare &amp; Decide</b></span><span>Get separate answers, critiques, and one final recommendation.</span></button>
+        <button class="preset-card" data-preset="build_execute" aria-pressed="false"><span class="pc-head"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 13.5v-4h4v4zM6 9.5v-4h4v4M9.5 5.5v-3h4v7h-4"/></svg><b>Build Together</b></span><span>Split real work and create verified files in your folder.</span></button>
+        <button class="preset-card" data-preset="keep_improving" aria-pressed="false"><span class="pc-head"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 1.5v3h-3"/></svg><b>Keep Improving</b></span><span>Works on your project non-stop, inventing its own next improvements, until you stop it.</span></button>
       </div>
       <div id="presetNote"></div>
-      <div id="callEstimate" role="status"></div>
+      <div id="contSummary" hidden></div>
       <div id="synthCtl" hidden>
         <label>Synthesizer — writes the final Panel result</label>
         <select id="synthSel"></select>
@@ -1309,11 +1672,14 @@
         <select id="modModel"></select>
         <select id="modEffort"></select>
         <input id="modName" type="text" maxlength="24" spellcheck="false"
-               autocomplete="off"
+               autocomplete="off" aria-label="Moderator name"
                title="Name this one — leave blank for the default">
       </div>
-      <details id="advancedOrchestration">
-        <summary>Advanced orchestration</summary>
+    </div>
+    <details id="advancedOrchestration">
+      <summary>Advanced orchestration</summary>
+      <div class="policy-body">
+        <div class="policy-h">Shape of the conversation</div>
         <div class="policy-grid">
           <!-- Persisted for older Alloy versions, never shown: it is saved
                metadata, not a behavioral control anyone should be steering. -->
@@ -1329,63 +1695,68 @@
           <label>What the room is doing<select id="workflowSel"><option value="conversation">Talking it through</option><option value="panel">Each answering, then one final answer</option><option value="supervisor">Building real files in your folder</option></select><i>Talking needs no files; building splits the work up and checks it.</i></label>
           <label>When they reply<select id="concurrencySel"><option value="sequential">One at a time</option><option value="barrier">All at once, each round</option><option value="reactive">Whenever each one is ready</option></select><i>“All at once” is faster but noisier; “whenever ready” has no turns at all.</i></label>
           <label>Who speaks next<select id="floorSel"><option value="cyclic">Fixed rotation</option><option value="nomination">The last AI names who is next</option><option value="moderated">A moderator AI picks</option><option value="all">Everyone, every round</option><option value="fair">No turns — first ready, fairly capped</option><option value="manager">The work manager assigns it</option></select><i>A moderator or manager is a separate cheap AI call that never speaks in the chat.</i></label>
+        </div>
+        <div class="policy-h">Privacy &amp; endings</div>
+        <div class="policy-grid">
           <label>Who sees each message<select id="routingSel"><option value="broadcast">Everyone sees everything</option><option value="addressed">Only who it is addressed to, plus a digest</option><option value="isolated">Workers only see their own task</option></select><i>Isolating workers is what stops them overwriting each other while building.</i></label>
           <label>Who decides it is finished<select id="completionSel"><option value="participants">The AIs themselves</option><option value="moderator">The moderator AI</option><option value="synthesizer">The AI writing the final answer</option><option value="supervisor">The work manager</option></select><i>Whoever decides, the length limit below is still a hard stop.</i></label>
+        </div>
+        <div class="policy-h">Counting &amp; fairness</div>
+        <div class="policy-grid">
           <label>How the length is counted<select id="budgetUnitSel"><option value="laps">Laps — everyone speaks once per lap</option><option value="turns">Turns — one reply each</option><option value="phases">Phases — draft, critique, final</option><option value="waves">Waves — plan, build, review</option><option value="ceiling">Ceiling — hard stop only</option></select><i>Sets what the number in the Rounds box counts.</i></label>
           <label>Maximum lead<select id="fairnessLeadSel"><option value="1">1 turn</option><option value="2" selected>2 turns</option><option value="3">3 turns</option></select><i>Only bites when they reply whenever ready: how far the fastest may get ahead.</i></label>
         </div>
         <div id="policyReason"></div>
         <div id="policyChanges"></div>
-      </details>
-    </div>
+      </div>
+    </details>
+    <div class="rail-sub">Pace &amp; limits</div>
     <div class="ctl">
       <label id="roundsLabel">Rounds — each seat speaks once per round</label>
       <div class="rounds">
-        <button id="rMinus">−</button><b id="rVal" class="mono">6</b><button id="rPlus">+</button>
+        <button id="rMinus" title="Lower the count" aria-label="Lower the count">−</button>
+        <input id="rVal" class="mono" type="text" inputmode="numeric"
+               autocomplete="off" spellcheck="false" maxlength="4"
+               value="6" aria-labelledby="roundsLabel">
+        <button id="rPlus" title="Raise the count" aria-label="Raise the count">+</button>
       </div>
-      <label style="display:flex;align-items:center;gap:8px;margin:8px 0 0;font-size:12.5px;color:var(--muted)">
+      <label class="check-row"
+             title="When checked, they decide when to stop — the number becomes a safety ceiling instead of a round count">
         <input type="checkbox" id="untilDone"> Until done — they decide when to stop
       </label>
+      <div id="callEstimate" role="status"></div>
     </div>
+    <div class="rail-sub">Side workers</div>
     <div class="ctl">
-      <label>Helpers — one-shot AIs a seat can spawn</label>
-      <select id="spawnSel" title="Seats end a reply with [[SPAWN: provider | task]] to run a one-shot helper. Each helper is a real CLI call.">
-        <option value="0">Off</option>
-        <option value="3">Up to 3</option>
-        <option value="10">Up to 10</option>
-      </select>
+      <div class="duo-grid">
+        <label>Helpers — one-shot AIs
+          <select id="spawnSel" title="Seats end a reply with [[SPAWN: provider | task]] to run a one-shot helper. Each helper is a real CLI call.">
+            <option value="0">Off</option>
+            <option value="3">Up to 3</option>
+            <option value="10">Up to 10</option>
+          </select>
+        </label>
+        <label>Teams — side chats
+          <select id="teamSel" title="Seats end a reply with [[TEAM: seats | task]] to run a whole side conversation that reports back. A team is MANY real CLI calls.">
+            <option value="0">Off</option>
+            <option value="1">Up to 1</option>
+            <option value="3">Up to 3</option>
+          </select>
+        </label>
+      </div>
     </div>
-    <div class="ctl">
-      <label>Teams — sub-conversations a seat can start</label>
-      <select id="teamSel" title="Seats end a reply with [[TEAM: seats | task]] to run a whole side conversation that reports back. A team is MANY real CLI calls.">
-        <option value="0">Off</option>
-        <option value="1">Up to 1</option>
-        <option value="3">Up to 3</option>
-      </select>
-    </div>
+    <div class="rail-sub">Context &amp; access</div>
     <div class="ctl">
       <label>Working folder — files they read &amp; write</label>
       <div id="folderRow">
         <span id="folderPath">auto (fresh per conversation)</span>
         <button class="btn-sm" id="pickFolder">Choose</button>
       </div>
-      <label style="display:flex;align-items:center;gap:8px;margin:6px 0 0"
+      <label class="check-row"
              title="Each CLI only auto-loads its own doc (Claude reads CLAUDE.md, GPT reads AGENTS.md, Gemini reads AGENTS.md/GEMINI.md), so without this the seats start with very unequal knowledge of the project. Only applies to a chosen folder.">
         <input type="checkbox" id="projBrief" checked> Share the folder's AI docs with every seat
       </label>
-    </div>
-    <div class="ctl">
-      <label>Permissions — what seats may change</label>
-      <select id="permissionMode" title="Locked once the conversation starts">
-        <option value="read_only">Read only — no changes</option>
-        <option value="ask">Ask first — supervised</option>
-        <option value="auto" selected>Workspace — autonomous, sandboxed</option>
-        <option value="full">Full access — no sandbox or approvals</option>
-      </select>
-      <div class="permission-note" id="permissionNote"></div>
-    </div>
-    <div class="ctl">
-      <label style="display:flex;align-items:center;gap:8px;margin:0">
+      <label class="check-row check-div">
         <input type="checkbox" id="connectors"> Connected apps (Gmail, Drive, Calendar…)
       </label>
       <div class="yolo-note" id="connNote">Seats can act in those accounts unattended — including sending mail. Skills, shell and document building work without this.</div>
@@ -1393,6 +1764,9 @@
 
     <button id="skillBtn" title="Write skills once and give them to every seat; manage MCP servers">
       <span>Skills &amp; Connections</span>
+    </button>
+    <button id="soundBtn" title="Sound cues when a conversation needs you or finishes — a question, a check-in, a completed run">
+      <span id="soundLbl">Sound on</span>
     </button>
     <button id="acctBtn" title="Sign in and out of the AI accounts">
       <span>Accounts</span><span id="acctBadge" hidden></span>
@@ -1419,7 +1793,9 @@
         <option value="all">All messages</option>
       </select>
     </div>
+    <div id="contStrip" role="status" aria-label="Keep Improving progress"></div>
     <div class="feed-wrap">
+      <div id="contBanner" role="status"></div>
       <div id="feed" tabindex="0" aria-label="Conversation transcript">
         <div class="empty" id="emptyState">
           <div class="dots"><i></i><i></i><i></i></div>
@@ -1429,11 +1805,22 @@
              and when a run ends, keep typing to continue it. Shift+Enter adds a
              line, ↑ recalls what you last sent. /help lists commands like /clear
              and /compact.</p>
+          <div class="keys"><b>Shift+Enter</b> new line &nbsp;·&nbsp;
+            <b>↑</b> last sent &nbsp;·&nbsp; <b>Ctrl+T</b> another conversation
+            &nbsp;·&nbsp; <b>Ctrl+1–9</b> switch tabs &nbsp;·&nbsp;
+            <b>/help</b> every command</div>
         </div>
       </div>
       <button id="jumpBtn" hidden title="Jump to the newest message">
         <span class="arw">&#8595;</span><span>Newest</span><span class="n" hidden></span>
       </button>
+      <div id="findBar" hidden role="search" aria-label="Find in transcript">
+        <input id="findInput" type="text" placeholder="Find in transcript…" spellcheck="false">
+        <span id="findCount"></span>
+        <button class="find-btn" id="findPrev" title="Previous hit (Shift+Enter)" aria-label="Previous hit">▲</button>
+        <button class="find-btn" id="findNext" title="Next hit (Enter)" aria-label="Next hit">▼</button>
+        <button class="find-btn" id="findClose" title="Close (Escape)" aria-label="Close find">✕</button>
+      </div>
     </div>
     <div id="feedbackCard" aria-live="polite">
       <strong>Was this conversation helpful?</strong>
@@ -1457,14 +1844,36 @@
     <div class="composer">
       <button id="askPill" hidden
         title="A seat is waiting on your answer — click to reopen the question"></button>
-      <div id="sayGrip" title="Drag up or down to resize the message box"></div>
+      <div id="sayGrip" title="Drag up or down to resize the message box (or focus and use ↑/↓)"
+           role="separator" aria-label="Message box height" tabindex="0"></div>
       <div id="attRow" hidden></div>
-      <button id="attachBtn" title="Attach files — saved into the working folder for the AIs to open">📎</button>
+      <button id="attachBtn" title="Attach files — saved into the working folder for the AIs to open"
+              aria-label="Attach files">📎</button>
       <input type="file" id="attachInput" multiple hidden>
       <button id="micBtn" hidden
-        title="Hold to dictate (or Ctrl+Shift+Space) — transcribed on this machine">🎤</button>
+        title="Hold to dictate (or Ctrl+Shift+Space) — transcribed on this machine"
+        aria-label="Dictate">🎤</button>
       <textarea id="say" rows="1" placeholder="Type your opening message — Send starts the conversation" autocomplete="off" spellcheck="false"></textarea>
       <button id="sayBtn" class="display">Send</button>
+      <div id="permPickWrap">
+        <!-- state holder: every engine-facing read (cfgFor, restore, setSeated)
+             goes through this select; the pill and menu below drive it -->
+        <select id="permissionMode" hidden title="Locked once the conversation starts">
+          <option value="read_only">Read only — no changes</option>
+          <option value="ask">Ask first — supervised</option>
+          <option value="auto" selected>Workspace — autonomous, sandboxed</option>
+          <option value="full">Full access — no sandbox or approvals</option>
+        </select>
+        <button id="permPickBtn" aria-haspopup="listbox" aria-expanded="false"
+                title="Permissions — what the seats may change">
+          <span class="perm-dot"></span><span id="permPickLabel">Workspace</span>
+          <span class="perm-caret">⌄</span>
+        </button>
+        <div id="permPickMenu" role="listbox" aria-label="Permission mode" hidden>
+          <div id="permOptList"></div>
+          <div class="permission-note" id="permissionNote"></div>
+        </div>
+      </div>
       <div class="after" id="afterRow">
         <button class="btn-sm" id="openTranscript">Transcript</button>
         <button class="btn-sm" id="openWorkspace">Folder</button>
@@ -1474,18 +1883,19 @@
   </div>
 
   <aside id="fileRail">
-    <div class="rail-reopen" title="Show files">«</div>
+    <div class="rail-reopen" title="Show files" role="button" tabindex="0"
+         aria-label="Show files">«</div>
     <div class="rail-head">
-      <button class="rail-collapse" id="filesCollapse" title="Hide files">»</button>
+      <button class="rail-collapse" id="filesCollapse" title="Hide files" aria-label="Hide files">»</button>
       <div class="rail-label">Files</div>
-      <button class="rail-collapse" id="filesRefresh" title="Refresh the file list">↻</button>
+      <button class="rail-collapse" id="filesRefresh" title="Refresh the file list" aria-label="Refresh the file list">↻</button>
     </div>
     <div id="codePane">
       <div class="code-head">
         <span id="codeTitle" title=""></span>
         <label id="codeFollow" title="Jump to whichever file a seat is editing">
           <input type="checkbox" id="codeFollowChk" checked>follow</label>
-        <button id="codeClose" title="Close the code view">✕</button>
+        <button id="codeClose" title="Close the code view" aria-label="Close the code view">✕</button>
       </div>
       <div id="codeBody"></div>
     </div>
@@ -1502,7 +1912,7 @@
   <div class="modal">
     <div class="modal-head">
       <h2>Accounts</h2>
-      <button class="close" id="acctClose" title="Close">✕</button>
+      <button class="close" id="acctClose" title="Close" aria-label="Close">✕</button>
     </div>
     <div id="acctNote" hidden></div>
     <div id="acctList"></div>
@@ -1517,7 +1927,7 @@
         <button class="sk-tab on" id="skTabSkills">Skills</button>
         <button class="sk-tab" id="skTabConn">Connections</button>
       </div>
-      <button class="close" id="skClose" title="Close">✕</button>
+      <button class="close" id="skClose" title="Close" aria-label="Close">✕</button>
     </div>
     <div id="skNote" hidden></div>
 
@@ -1552,7 +1962,7 @@
   <div class="modal">
     <div class="modal-head">
       <h2 id="roleTitle">Role</h2>
-      <button class="close" id="roleClose" title="Close">✕</button>
+      <button class="close" id="roleClose" title="Close" aria-label="Close">✕</button>
     </div>
     <input id="roleName" type="text" maxlength="40" spellcheck="false"
       placeholder="Role — the public name every seat sees in the roster">
@@ -1568,11 +1978,92 @@
   </div>
 </div>
 
+<div id="contModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Keep Improving — before you start</h2>
+      <button class="close" id="contClose" title="Cancel" aria-label="Cancel">✕</button>
+    </div>
+    <div id="contWarn">
+      <b>This runs unattended and does not finish on its own.</b>
+      The seats will keep editing files in <span id="contFolder" class="mono">your working folder</span>,
+      and when they finish a job the manager invents the next one and starts again.
+      Nobody reviews the work between rounds unless you set the check-in to ask you.
+      Permissions in force: <span id="contPerm"></span>.
+    </div>
+
+    <label class="cont-label" for="contMinutes">Check in every</label>
+    <div class="cont-row">
+      <input id="contMinutes" class="mono" type="text" inputmode="numeric"
+             maxlength="4" autocomplete="off" spellcheck="false" value="30">
+      <span class="cont-unit">minutes</span>
+    </div>
+    <i class="cont-hint">A cheap side call looks at whether turns are still being
+      committed and whether any task is wedged. It is a watchdog, not a critic —
+      it does not review the quality of the work.</i>
+
+    <div class="cont-radios" role="radiogroup" aria-label="What the check-in may do">
+      <label><input type="radio" name="contAction" value="auto">
+        <b>Automatic</b><span>Fix it and keep going. One line in the transcript.</span></label>
+      <label><input type="radio" name="contAction" value="notify" checked>
+        <b>Notify me</b><span>Fix it and keep going, and flash the window so you see it when you are back.</span></label>
+      <label><input type="radio" name="contAction" value="permission">
+        <b>Ask permission</b><span>Change nothing until you approve — <b>the run waits</b>, including overnight.</span></label>
+    </div>
+
+    <label class="cont-label">What is allowed to stop it</label>
+    <div class="cont-limits">
+      <label class="cont-limit">
+        <input type="checkbox" id="contSpendOn">
+        <span>Spend cap</span>
+        <input id="contSpend" class="mono" type="text" inputmode="decimal"
+               maxlength="8" autocomplete="off" spellcheck="false" value="25">
+        <span class="cont-unit">US dollars</span>
+      </label>
+      <label class="cont-limit">
+        <input type="checkbox" id="contHoursOn">
+        <span>Time limit</span>
+        <input id="contHours" class="mono" type="text" inputmode="decimal"
+               maxlength="6" autocomplete="off" spellcheck="false" value="8">
+        <span class="cont-unit">hours of run time</span>
+      </label>
+      <label class="cont-limit wide">
+        <input type="checkbox" id="contWatchdogStop" checked>
+        <span>Let the check-in stop the run when it judges the work is
+          finished or cannot be recovered</span>
+      </label>
+    </div>
+    <i class="cont-hint">Only the CLIs that report cost are counted, so Gemini
+      and OpenCode seats never show up in the spend figure.</i>
+
+    <label class="cont-label">Verify each round of work</label>
+    <div class="cont-row">
+      <input id="contGate" type="text" spellcheck="false" autocomplete="off"
+             placeholder="a command to run in the folder, e.g. python tests/run_all.py">
+    </div>
+    <i class="cont-hint" id="contGateHint">It runs after each round of work and
+      before the manager reviews it, so the manager reads a result rather than a
+      claim. A failing command becomes the next job. Leave it empty to skip.</i>
+    <label class="cont-check"><input type="checkbox" id="contCommit">
+      Commit the folder to git after each round that passes</label>
+    <label class="cont-check" id="contDirtyRow" hidden><input type="checkbox" id="contAllowDirty">
+      Commit even though the folder already has uncommitted changes of your own</label>
+
+    <div id="contAck"></div>
+    <label class="cont-ack"><input type="checkbox" id="contAgree">
+      <span id="contAgreeText">I understand this runs unattended and keeps spending until I stop it.</span></label>
+    <div id="contFoot">
+      <button class="btn-sm" id="contCancel">Cancel</button>
+      <button id="contOk" disabled>Start Keep Improving</button>
+    </div>
+  </div>
+</div>
+
 <div id="askModal">
   <div class="modal">
     <div class="modal-head">
       <h2 id="askTitle">Question</h2>
-      <button class="close" id="askHide" title="Answer later — the conversation keeps waiting">✕</button>
+      <button class="close" id="askHide" title="Answer later — the conversation keeps waiting" aria-label="Answer later">✕</button>
     </div>
     <div id="askQ"></div>
     <div id="approvalReview" hidden>
@@ -1595,6 +2086,31 @@
         title="Resume without an answer — the seat is told you passed">Skip</button>
       <button id="askSend">Answer</button>
     </div>
+  </div>
+</div>
+
+<div id="kbdModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Keyboard shortcuts</h2>
+      <button class="close" id="kbdClose" title="Close" aria-label="Close">✕</button>
+    </div>
+    <div class="kbd-grid" id="kbdGrid">
+      <kbd>?</kbd><span>Show or hide this cheat sheet</span>
+      <kbd>Enter</kbd><span>Send the message in the composer</span>
+      <kbd>/ …</kbd><span>A message starting with / runs a command instead of chatting</span>
+      <kbd>Ctrl+T</kbd><span>New conversation tab</span>
+      <kbd>Ctrl+1–9</kbd><span>Jump to tab N</span>
+      <kbd>Ctrl+Tab</kbd><span>Cycle open tabs (Shift goes backwards)</span>
+      <kbd>Ctrl+K</kbd><span>Search across chats</span>
+      <kbd>Ctrl+F</kbd><span>Find words in this transcript (Enter / Shift+Enter step)</span>
+      <kbd>Ctrl+Shift+Space</kbd><span>Start / stop dictation — transcribed on this machine</span>
+      <kbd>Escape</kbd><span>Cancel dictation, close a modal, or clear search</span>
+      <kbd>↑ / ↓</kbd><span>Resize the composer from its focused grab bar</span>
+      <kbd>Double-click</kbd><span>Rename a chat in the rail (or a seat's name)</span>
+    </div>
+    <div class="kbd-note">Press ? again or Escape to close. Shortcuts are off while
+    you're typing in a text box.</div>
   </div>
 </div>
 
@@ -2093,6 +2609,30 @@ async function copyText(t, btn) {
 // flicker false while images and typing lines resize the feed underneath him.
 const BOTTOM_SLOP = 80;
 let stick = true, unread = 0;
+// ---- transcript structure (day dividers + speaker grouping) ------------
+// Both are tracked as VALUES, never by walking the DOM backwards: typing
+// indicators and boundary rows interleave with messages in #feed, so "the
+// element before this one" is a lie exactly when it matters.
+let lastDayKey = null;      // date of the last message that carried a ts
+let lastSpeakerKey = null;  // kind+name of the last addMsg row
+const DAY_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function dayLabel(key) {
+  const today = new Date();
+  const iso = d => d.getFullYear() + "-" +
+    String(d.getMonth() + 1).padStart(2, "0") + "-" +
+    String(d.getDate()).padStart(2, "0");
+  if (key === iso(today)) return "Today";
+  const yest = new Date(today.getTime() - 86400000);
+  if (key === iso(yest)) return "Yesterday";
+  const [y, m, day] = key.split("-").map(Number);
+  if (!y || !m || !day) return key;
+  return `${DAY_MONTHS[m - 1]} ${day}${y !== today.getFullYear() ? ", " + y : ""}`;
+}
+function resetTranscriptStructure() {
+  lastDayKey = null;
+  lastSpeakerKey = null;
+}
 function atBottom() {
   const f = $("feed");
   return f.scrollHeight - f.scrollTop - f.clientHeight <= BOTTOM_SLOP;
@@ -2100,7 +2640,7 @@ function atBottom() {
 function renderJump() {
   const b = $("jumpBtn"); if (!b) return;
   b.hidden = stick;
-  const n = b.querySelector(".n");
+  const n = b.querySelector(".n"); if (!n) return;   // same guard as `b`
   n.textContent = unread > 99 ? "99+" : String(unread);
   n.hidden = unread === 0;
 }
@@ -2124,6 +2664,132 @@ function bindFeedScroll() {
   b.addEventListener("click", () => stickBottom(true));
 }
 bindFeedScroll();
+
+/* ---------- in-transcript find (Ctrl+F) ---------- */
+// The rail's cross-chat search finds CHATS; this finds words in the OPEN one.
+// Matches are painted with the CSS Custom Highlight API (Ranges, no DOM
+// mutation — rendered markdown, think blocks and thumbnails are never
+// touched); engines without it get a glow on the message holding the hit.
+// The walker is hand-rolled over childNodes rather than createTreeWalker so
+// the boot harness's stub DOM can drive the same code.
+let findHits = [], findRanges = [], findIdx = -1, findQ = "";
+function findOpen() {
+  const bar = $("findBar"); if (!bar) return;
+  bar.hidden = false;
+  const inp = $("findInput");
+  inp.focus(); inp.select();
+  findRun();
+}
+function findClose() {
+  const bar = $("findBar");
+  if (bar) bar.hidden = true;
+  findHits = []; findRanges = []; findIdx = -1; findQ = "";
+  clearFindPaint();
+}
+function clearFindPaint() {
+  if (window.CSS && CSS.highlights) {
+    CSS.highlights.delete("find-hits");
+    CSS.highlights.delete("find-cur");
+  }
+  for (const el of $("feed").querySelectorAll(".msg.find-cur-msg"))
+    el.classList.remove("find-cur-msg");
+  const c = $("findCount");
+  if (c) c.textContent = "";
+}
+function collectFindHits(q) {
+  const hits = [];
+  const ql = q.toLowerCase();
+  if (!ql) return hits;
+  const walk = (n, hidden) => {
+    for (const c of n.childNodes || []) {
+      const isText = c.nodeType === 3 || c.tag === "#text";
+      const cls = c.classList;
+      const hid = hidden || !!(cls && cls.contains && cls.contains("lens-hidden"));
+      if (isText) {
+        if (hid) continue;             // the history lens hides it; so does find
+        const tl = String(c.textContent || "").toLowerCase();
+        let i = tl.indexOf(ql);
+        while (i > -1) {
+          hits.push({ node: c, start: i, end: i + q.length });
+          i = tl.indexOf(ql, i + 1);
+        }
+      } else walk(c, hid);
+    }
+  };
+  walk($("feed"), false);
+  return hits;
+}
+// the .msg ancestor of a hit — real DOM via parentElement, stub via .parent
+function findMsgEl(node) {
+  let p = node.parentElement && typeof node.parentElement === "object"
+    ? node.parentElement : (node.parent || null);
+  while (p) {
+    if (p.classList && p.classList.contains && p.classList.contains("msg")) return p;
+    p = (p.parentElement && typeof p.parentElement === "object" ? p.parentElement : null)
+        || p.parent || null;
+  }
+  return null;
+}
+function paintFind() {
+  clearFindPaint();
+  const c = $("findCount");
+  if (!findHits.length) {
+    if (c) c.textContent = findQ ? "0/0" : "";
+    return;
+  }
+  if (findIdx < 0) findIdx = 0;
+  if (window.CSS && CSS.highlights && typeof Highlight === "function" && document.createRange) {
+    findRanges = findHits.map(h => {
+      const r = document.createRange();
+      r.setStart(h.node, h.start);
+      r.setEnd(h.node, h.end);
+      return r;
+    });
+    CSS.highlights.set("find-hits",
+      new Highlight(...findRanges.filter((_, i) => i !== findIdx)));
+    CSS.highlights.set("find-cur", new Highlight(findRanges[findIdx]));
+  } else {
+    findRanges = [];
+    const host = findMsgEl(findHits[findIdx].node);
+    if (host) host.classList.add("find-cur-msg");
+  }
+  if (c) c.textContent = (findIdx + 1) + "/" + findHits.length;
+  scrollFindCurrent();
+}
+function scrollFindCurrent() {
+  const f = $("feed");
+  const r = findRanges[findIdx];
+  if (r && r.getBoundingClientRect) {
+    const rect = r.getBoundingClientRect();
+    const fr = f.getBoundingClientRect();
+    if (rect && fr && (rect.top < fr.top + 60 || rect.bottom > fr.bottom - 60))
+      f.scrollTop += rect.top - fr.top - f.clientHeight / 2;
+    return;
+  }
+  const host = findHits[findIdx] && findMsgEl(findHits[findIdx].node);
+  if (host && host.scrollIntoView) host.scrollIntoView({ block: "center" });
+}
+function findRun() {
+  findQ = $("findInput").value;
+  findHits = collectFindHits(findQ);
+  findRanges = []; findIdx = -1;
+  paintFind();
+}
+function findStep(delta) {
+  if (!findHits.length) return;
+  findIdx = (findIdx + delta + findHits.length) % findHits.length;
+  paintFind();
+}
+$("findClose").onclick = findClose;
+$("findPrev").onclick = () => findStep(-1);
+$("findNext").onclick = () => findStep(1);
+$("findInput").oninput = findRun;
+$("findInput").onkeydown = e => {
+  if (e.key === "Enter") { e.preventDefault(); findStep(e.shiftKey ? -1 : 1); }
+  // Escape is NOT handled here on purpose: the keydown bubbles to the shared
+  // document listener, whose Escape branch closes the bar (and that branch
+  // must stay the FIRST Escape check in this file for the bindings test).
+};
 function formatUsage(usage) {
   if (!usage || typeof usage !== "object") return "";
   const parts = [];
@@ -2205,8 +2871,34 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
   cp.className = "copy-btn"; cp.title = "Copy message text"; cp.textContent = "⧉";
   cp.onclick = e => { e.stopPropagation(); copyText(text, cp); };
   d.querySelector(".msg-head").appendChild(cp);
+  // Branch point: any persisted row can start a fork of the conversation up
+  // to and including itself. Live rows without an id (UI-only echoes) and old
+  // replays predate message ids, so they get no button at all.
+  if (d.dataset.messageId) {
+    const fb = document.createElement("button");
+    fb.className = "copy-btn fork-btn";
+    fb.title = "Branch a new conversation from here (fresh AI memory)";
+    fb.textContent = "⑂";
+    fb.onclick = e => { e.stopPropagation(); armFork(fb, d.dataset.messageId); };
+    d.querySelector(".msg-head").appendChild(fb);
+  }
   // an agent mentioning an image it made ⇒ show it right here in the chat
   if (kind !== "system") attachThumbs(d.querySelector(".msg-body"), findImageRefs(text));
+  // a different calendar day opens a divider (live turns and replay both ride
+  // addMsg, so a reopened chat divides itself identically)
+  const dayKey = ts && String(ts).length >= 10 ? String(ts).slice(0, 10) : null;
+  if (dayKey && lastDayKey !== dayKey) {
+    const dd = document.createElement("div");
+    dd.className = "day-divider";
+    dd.textContent = dayLabel(dayKey);
+    $("feed").appendChild(dd);
+    lastDayKey = dayKey;
+    lastSpeakerKey = null;             // a day break always ends any run
+  }
+  // consecutive rows from the same speaker group into one visual run
+  const speakerKey = kind + "\u0000" + (name || "");
+  if (lastSpeakerKey === speakerKey) d.classList.add("cont");
+  lastSpeakerKey = speakerKey;
   $("feed").appendChild(d);
   // parallel modes: keep live typing indicators below the new message
   typingEls.forEach(el => $("feed").appendChild(el));
@@ -2221,6 +2913,23 @@ function addNewBoundary() {
   d.className = "new-boundary";
   d.textContent = "New since you were here";
   $("feed").appendChild(d);
+}
+// Forking copies the chat's whole folder (workspace included) — not free, and
+// unrecoverable only in the sense that it creates work — so the button arms
+// first, exactly like rail-row delete.
+function armFork(btn, messageId) {
+  if (btn.dataset.arm) { delete btn.dataset.arm; btn.textContent = "⑂"; forkFrom(messageId); return; }
+  btn.dataset.arm = "1"; btn.textContent = "Fork?";
+  setTimeout(() => {
+    if (btn.dataset.arm) { delete btn.dataset.arm; btn.textContent = "⑂"; }
+  }, 5000);
+}
+async function forkFrom(messageId) {
+  if (!activeId) return;
+  const r = await pywebview.api.fork_session(activeId, messageId);
+  if (r?.error) { addMsg("system", "relay", r.error, ""); return; }
+  await refreshChats();
+  openChat(r.id);   // the fork opens immediately: fresh AI memory at this point
 }
 // An interjection is rendered TWICE without this: once optimistically when
 // Josh hits send (so he sees it landed while a turn is still running), and
@@ -2239,14 +2948,64 @@ const typingEls = new Map();
 // constant because the `done` handler folds its own notice into that row.
 const WRAP_NOTICE = "Conversation wrapped.";
 let wrapNoticeEl = null;
-function showTyping(speakerId, provider, name) {
+function fmtClock(sec) {
+  sec = Math.max(0, Math.round(sec));
+  return Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0");
+}
+// One shared ticker that stops itself when the last indicator goes. NOT a
+// permanent setInterval: an always-armed timer keeps the node boot harness
+// alive forever, and an idle window has nothing to count.
+let typingTimer = null;
+function tickTyping() {
+  const now = Date.now() / 1000;
+  typingEls.forEach(el => {
+    const clock = el.querySelector(".tclock");
+    if (!clock || !el.dataset.started) return;
+    const elapsed = now - Number(el.dataset.started);
+    const limit = Number(el.dataset.limit || 0);
+    const idle = Number(el.dataset.idle || 0);
+    // A seat with an idle watchdog has NO deadline while it keeps working, so
+    // showing "of 15:00" was the lie that made a healthy 14-minute turn read
+    // as a hung app. Show the age; surface the quiet clock only once silence
+    // is actually heading for the window that can end the turn.
+    const quiet = now - Number(el.dataset.lastact || el.dataset.started);
+    let text = fmtClock(elapsed);
+    let late = false;
+    if (limit > 0) {                       // a real duration bound (agy, or a
+      text += ` of ${fmtClock(limit)}`;    // hard cap Josh set) — count to it
+      late = elapsed > limit * 0.6;
+    } else if (idle > 0 && quiet > idle * 0.5) {
+      text += ` · quiet ${fmtClock(quiet)} of ${fmtClock(idle)}`;
+      late = true;
+    }
+    clock.textContent = text;
+    clock.classList.toggle("late", late);
+  });
+}
+function ensureTypingTimer() {
+  if (typingTimer || !typingEls.size) return;
+  typingTimer = setInterval(() => {
+    if (!typingEls.size) { clearInterval(typingTimer); typingTimer = null; return; }
+    tickTyping();
+  }, 1000);
+}
+function showTyping(speakerId, provider, name, opts = {}) {
   hideTyping(speakerId);
   const el = document.createElement("div");
   el.className = "typing";
   el.style.setProperty("--who", `var(--${provider})`);
-  el.innerHTML = `<span class="trow"><span class="dot"></span> ${esc(name)} is thinking…</span>`;
+  el.innerHTML = `<span class="trow"><span class="dot"></span> ${esc(name)} is thinking…` +
+                 `<span class="tclock"></span></span>`;
+  // started comes from the ENGINE when we are replaying a reopened chat, so
+  // the clock reads the true age of the turn rather than restarting at 0:00.
+  el.dataset.started = Number(opts.started) || (Date.now() / 1000);
+  if (Number(opts.limit) > 0) el.dataset.limit = Number(opts.limit);
+  if (Number(opts.idle) > 0) el.dataset.idle = Number(opts.idle);
+  el.dataset.lastact = el.dataset.started;
   typingEls.set(speakerId, el);
   $("feed").appendChild(el);
+  tickTyping();
+  ensureTypingTimer();
   stickBottom();
 }
 // Live narration under the dots: the last few things the seat is DOING
@@ -2254,6 +3013,10 @@ function showTyping(speakerId, provider, name) {
 function typingActivity(speakerId, payload) {
   const el = typingEls.get(speakerId);
   if (!el) return;
+  // Every activity event is proof this seat is alive, and it is the SAME
+  // evidence the engine's idle watchdog counts — so the quiet clock resets
+  // here and nowhere else.
+  el.dataset.lastact = Date.now() / 1000;
   let log = el.querySelector(".act-log");
   if (!log) {
     log = document.createElement("div");
@@ -2593,7 +3356,8 @@ window.uiEvent = packet => {
       : `round ${payload.round}/${payload.turns}`;
     markFatal(payload.speaker, false);   // it's alive — that's the evidence
     setSeatTelemetry(payload.speaker, "reasoning", "thinking", true);
-    showTyping(payload.speaker, payload.provider, payload.name);
+    showTyping(payload.speaker, payload.provider, payload.name,
+               {limit: payload.limit, idle: payload.idle});
   } else if (event === "thinking_done") {
     clearSeatTelemetry(payload.speaker);
     seatState(payload.speaker, "", seatLabel(payload.speaker));
@@ -2645,6 +3409,27 @@ window.uiEvent = packet => {
     }
   } else if (event === "role_applied") {
     roleApplied(payload);
+  } else if (event === "continuous_probe") {
+    // The modal asked; this is the answer. Only fill a gate command the user
+    // has not typed over — a detection must never overwrite a real choice.
+    contProbe = {command: payload.command || "", dirty: !!payload.dirty,
+                 git: !!payload.git};
+    if (!contCfg.gate && contProbe.command) contCfg.gate = contProbe.command;
+    $("contGateHint").textContent = contProbe.command
+      ? "Detected from the folder — edit it if that is not the right command. "
+        + "It runs after each round of work and before the manager reviews it, "
+        + "so the manager reads a result rather than a claim. A failing "
+        + "command becomes the next job."
+      : "No test command was detected for this folder. Type one, or leave it "
+        + "empty and nothing will be verified between rounds.";
+    $("contCommit").parentElement.hidden = !contProbe.git;
+    if ($("contModal").classList.contains("show")) paintContModal();
+  } else if (event === "continuous") {
+    const strip = $("contStrip");
+    strip.textContent = contStripText(payload);
+    strip.classList.toggle("show", !!strip.textContent);
+  } else if (event === "checkin") {
+    showContBanner(payload.text || "The scheduled check-in ran.");
   } else if (event === "workstreams") {
     renderWorkstreams(payload.tasks || []);
   } else if (event === "plan") {
@@ -2761,6 +3546,193 @@ let seats = [], nextSeatId = 0, uiCfg = null;
 // state on purpose — anything the boot path reads must be initialised before
 // it runs, or the whole one-big-script UI dies on a TDZ ReferenceError.
 let tabs = [];
+
+/* ---------- Keep Improving ----------
+   The mode's whole risk is that it runs while nobody is watching, so the
+   config lives in ONE object that the warning modal edits and every other
+   reader treats as read-only. `on` is the single source of truth for whether
+   this room is a Keep Improving room — the six policy axes cannot answer that
+   question, because Keep Improving and Build Together share all six. */
+const CONT_DEFAULT = Object.freeze({
+  minutes: 30, action: "notify",
+  spendOn: true, spend: 25, hoursOn: false, hours: 8, watchdogStop: true,
+  gate: "", commit: false, allowDirty: false,
+});
+let contOn = false;
+let contCfg = Object.assign({}, CONT_DEFAULT);
+let contProbe = {command: "", dirty: false, git: false};
+let contPrevPreset = "build_execute";   // where Cancel puts the cards back
+let contAccepted = false;               // OK pressed, not just closed
+
+function contNum(id, fallback, min, max, whole) {
+  const raw = parseFloat(String($(id).value).replace(/[^\d.]/g, ""));
+  if (!Number.isFinite(raw)) return fallback;
+  const clamped = Math.min(max, Math.max(min, raw));
+  return whole ? Math.round(clamped) : Math.round(clamped * 100) / 100;
+}
+// What the engine is actually handed. Nulls mean "no limit" and are the only
+// way to say that — 0 would read as "stop immediately".
+function continuousCfg() {
+  if (!contOn) return null;
+  return {
+    on: true,
+    checkin: {minutes: contCfg.minutes, action: contCfg.action},
+    limits: {spend_usd: contCfg.spendOn ? contCfg.spend : null,
+             hours: contCfg.hoursOn ? contCfg.hours : null,
+             watchdog_may_stop: !!contCfg.watchdogStop},
+    gate: {command: contCfg.gate, commit: !!contCfg.commit,
+           allow_dirty: !!contCfg.allowDirty},
+  };
+}
+function contLimitWords() {
+  const bits = [];
+  if (contCfg.spendOn) bits.push(`$${contCfg.spend}`);
+  if (contCfg.hoursOn) bits.push(`${contCfg.hours} h`);
+  if (contCfg.watchdogStop) bits.push("the check-in may stop it");
+  return bits.length ? bits.join(" · ") : "nothing but Stop";
+}
+function renderContSummary() {
+  const box = $("contSummary");
+  if (!box) return;
+  box.hidden = !contOn;
+  if (!contOn) return;
+  box.replaceChildren();
+  const text = document.createElement("span");
+  text.append("Runs until stopped · check-in every ");
+  const every = document.createElement("b");
+  every.textContent = `${contCfg.minutes} min`;
+  text.append(every, ` (${contCfg.action}) · stops on `);
+  const stops = document.createElement("b");
+  stops.textContent = contLimitWords();
+  text.append(stops, contCfg.gate ? " · verifies each round " : " · no verification ");
+  const edit = document.createElement("button");
+  edit.type = "button"; edit.textContent = "change";
+  edit.onclick = () => openContinuous(false);
+  box.append(text, edit);
+}
+// The acknowledgement has to describe the configuration the user actually
+// built. A run with every limit off is a different promise from a capped one,
+// and the checkbox must not say the same sentence for both.
+function renderContAck() {
+  const naked = !contCfg.spendOn && !contCfg.hoursOn && !contCfg.watchdogStop;
+  const ack = $("contAck");
+  ack.classList.toggle("nolimit", naked);
+  ack.textContent = naked
+    ? "Nothing will end this run. It will keep working and keep spending until "
+      + "you press Stop — including while you are asleep or away from the machine."
+    : "This run stops on: " + contLimitWords()
+      + ". Until then it keeps choosing its own next job and working on it.";
+  $("contAgreeText").textContent = naked
+    ? "I understand nothing but the Stop button will end this run."
+    : "I understand this runs unattended and keeps spending until it stops.";
+  $("contOk").disabled = !$("contAgree").checked;
+}
+function readContModal() {
+  contCfg.minutes = contNum("contMinutes", 30, 5, 1440, true);
+  contCfg.spend = contNum("contSpend", 25, 0.01, 100000, false);
+  contCfg.hours = contNum("contHours", 8, 0.1, 720, false);
+  contCfg.spendOn = $("contSpendOn").checked;
+  contCfg.hoursOn = $("contHoursOn").checked;
+  contCfg.watchdogStop = $("contWatchdogStop").checked;
+  contCfg.gate = String($("contGate").value || "").trim();
+  contCfg.commit = $("contCommit").checked;
+  contCfg.allowDirty = $("contAllowDirty").checked;
+  const picked = document.querySelector("input[name=contAction]:checked");
+  contCfg.action = picked ? picked.value : "notify";
+  // repaint the clamped numbers, so a refused value is visible not silent
+  $("contMinutes").value = contCfg.minutes;
+  $("contSpend").value = contCfg.spend;
+  $("contHours").value = contCfg.hours;
+  $("contSpend").disabled = !contCfg.spendOn;
+  $("contHours").disabled = !contCfg.hoursOn;
+  $("contDirtyRow").hidden = !(contCfg.commit && contProbe.dirty);
+  renderContAck();
+}
+function paintContModal() {
+  $("contMinutes").value = contCfg.minutes;
+  $("contSpend").value = contCfg.spend;
+  $("contHours").value = contCfg.hours;
+  $("contSpendOn").checked = contCfg.spendOn;
+  $("contHoursOn").checked = contCfg.hoursOn;
+  $("contWatchdogStop").checked = contCfg.watchdogStop;
+  $("contGate").value = contCfg.gate;
+  $("contCommit").checked = contCfg.commit;
+  $("contAllowDirty").checked = contCfg.allowDirty;
+  document.querySelectorAll("input[name=contAction]").forEach(r => {
+    r.checked = r.value === contCfg.action;
+  });
+  $("contFolder").textContent = customFolder || "a fresh folder for this chat";
+  const perm = $("permissionMode");
+  $("contPerm").textContent =
+    perm.options[perm.selectedIndex] ? perm.options[perm.selectedIndex].text : "";
+  readContModal();
+}
+function openContinuous(fromCard) {
+  if (seated) return;                 // baked in once the conversation exists
+  // contPrevPreset is captured in applyPreset, BEFORE the cards move — see
+  // the comment there. Reading it here would always say "keep_improving".
+  contAccepted = false;
+  $("contAgree").checked = false;
+  // The gate command and the dirty flag need a subprocess, which cannot run on
+  // the bridge thread — ask now, paint when the answer arrives.
+  try { pywebview.api.continuous_probe(customFolder || ""); } catch (e) {}
+  paintContModal();
+  $("contModal").classList.add("show");
+}
+function closeContinuous() {
+  if (!$("contModal").classList.contains("show")) return;
+  $("contModal").classList.remove("show");
+  // Backing out of the warning is a refusal, not a silent yes: put the cards
+  // back where they were rather than leaving Keep Improving selected.
+  if (!contAccepted && !contOn) applyPreset(contPrevPreset);
+}
+// A reopened chat must show what it ACTUALLY ran with, not what the last new
+// chat was configured for. Called from restoreOrchestration, which is the one
+// place a saved session's conversation-level settings land.
+function restoreContinuous(saved) {
+  const strip = $("contStrip");
+  if (strip) { strip.textContent = ""; strip.classList.remove("show"); }
+  if (!saved || !saved.on) {
+    contOn = false;
+    contCfg = Object.assign({}, CONT_DEFAULT);
+    renderContSummary();
+    return;
+  }
+  const limits = saved.limits || {}, checkin = saved.checkin || {},
+        gate = saved.gate || {};
+  contOn = true;
+  contCfg = {
+    minutes: Number(checkin.minutes) || CONT_DEFAULT.minutes,
+    action: checkin.action || CONT_DEFAULT.action,
+    spendOn: limits.spend_usd != null, spend: Number(limits.spend_usd) || CONT_DEFAULT.spend,
+    hoursOn: limits.hours != null, hours: Number(limits.hours) || CONT_DEFAULT.hours,
+    watchdogStop: limits.watchdog_may_stop !== false,
+    gate: gate.command || "", commit: !!gate.commit, allowDirty: !!gate.allow_dirty,
+  };
+  setSelectedPreset("keep_improving");
+  renderContSummary();
+}
+function contStripText(p) {
+  const bits = [];
+  if (p.objective) bits.push(`objective ${p.objective}`);
+  if (p.wave) bits.push(`wave ${p.wave}`);
+  if (typeof p.spend === "number") bits.push(`$${p.spend.toFixed(2)}`);
+  if (typeof p.next_checkin_min === "number")
+    bits.push(`next check-in ${Math.max(0, Math.round(p.next_checkin_min))}m`);
+  return bits.join(" · ");
+}
+function showContBanner(text) {
+  const box = $("contBanner");
+  box.replaceChildren();
+  const body = document.createElement("div");
+  body.textContent = text;
+  const close = document.createElement("button");
+  close.type = "button"; close.title = "Dismiss";
+  close.textContent = "✕";
+  close.onclick = () => box.classList.remove("show");
+  box.append(body, close);
+  box.classList.add("show");
+}
 const TAB_COLOR_HEX = {
   slate: "#8D8798", amber: "#F4B942", rose: "#E0607E", violet: "#A78BFA",
   teal: "#2DD4BF", green: "#4ADE80", blue: "#60A5FA", orange: "#FB923C",
@@ -2775,12 +3747,19 @@ const PRESET_RECIPES = Object.freeze({
     workflow: "supervisor", routing: "isolated", completion: "supervisor", unit: "waves"},
   live_room: {mode: "free", concurrency: "reactive", floor: "fair",
     workflow: "conversation", routing: "addressed", completion: "participants", unit: "turns"},
+  // Same six axes as Build Together on purpose — Keep Improving IS that
+  // workflow with the brakes off. `continuous` is the only thing that tells
+  // them apart, which is why presetForCurrentRecipe has to compare it too.
+  keep_improving: {mode: "supervisor", concurrency: "barrier", floor: "manager",
+    workflow: "supervisor", routing: "isolated", completion: "supervisor",
+    unit: "waves", continuous: true},
 });
 const PRESET_NOTES = Object.freeze({
   open_discussion: "Best for a quick exchange. Advanced can enable nominations, moderation, or a parallel lap.",
   panel_review: "Every seat drafts and critiques; one named seat synthesizes the final answer.",
   build_execute: "A rolling Supervisor assigns isolated workstreams and verifies their artifacts.",
   live_room: "Experimental: seats react independently; addressed messages synchronize through relay digests.",
+  keep_improving: "Runs unattended: the manager picks its own next objective when one is met, verifies each round, and keeps going until you stop it.",
 });
 
 function selectedPreset() { return $("presetSel").value || "open_discussion"; }
@@ -2798,7 +3777,11 @@ function setSelectedPreset(value) {
 // Turns" is the same silent relabelling we just removed everywhere else.
 function presetForCurrentRecipe() {
   for (const [name, recipe] of Object.entries(PRESET_RECIPES))
-    if (recipe.workflow === $("workflowSel").value
+    // !! on both sides: Keep Improving and Build Together are identical on the
+    // six policy axes, so without this one comparison the Advanced drawer
+    // would silently relabel a running Keep Improving room "Build Together".
+    if (!!recipe.continuous === contOn
+        && recipe.workflow === $("workflowSel").value
         && recipe.concurrency === $("concurrencySel").value
         && recipe.floor === $("floorSel").value
         && recipe.routing === $("routingSel").value
@@ -3000,6 +3983,15 @@ function normalizePolicyControls(anchor) {
 }
 function applyPreset(name) {
   const recipe = PRESET_RECIPES[name] || PRESET_RECIPES.open_discussion;
+  // Capture where we came FROM before the cards move. Reading it inside
+  // openContinuous would read "keep_improving" — already selected by the line
+  // below — so Cancel would re-apply Keep Improving and re-open the warning,
+  // forever.
+  if (recipe.continuous && !contOn && selectedPreset() !== "keep_improving")
+    contPrevPreset = selectedPreset();
+  // Turning continuous OFF is free; turning it ON goes through the warning,
+  // and only the modal's OK sets contOn (see contOk.onclick).
+  if (!recipe.continuous && contOn) { contOn = false; renderContSummary(); }
   setSelectedPreset(PRESET_RECIPES[name] ? name : "open_discussion");
   $("modeSel").value = recipe.mode;
   $("workflowSel").value = recipe.workflow;
@@ -3009,6 +4001,7 @@ function applyPreset(name) {
   $("completionSel").value = recipe.completion;
   $("budgetUnitSel").value = recipe.unit;
   normalizePolicyControls();
+  if (recipe.continuous && !contOn) openContinuous(true);
 }
 function applyLegacyMode(mode, restoring=false) {
   const legacy = {
@@ -3094,8 +4087,11 @@ function restoreOrchestration(session={}) {
   if (savedLimit > 0) {
     if (session.until_done || recipe?.budget?.until_done) ceiling = savedLimit;
     else rounds = savedLimit;
-    syncRoundsCtl();
   }
+  // ALWAYS repaint: this is the one place the restored numbers reach the box,
+  // so a session that recorded no limit must still get the right label.
+  syncRoundsCtl();
+  restoreContinuous(session.continuous);
   updateSynthOptions(session.panel?.synthesizer ?? session.synthesizer);
 }
 
@@ -3169,6 +4165,18 @@ function applyHistoryLens() {
     }
     message.classList.toggle("lens-hidden", !visible);
   }
+  // a divider survives the lens only while some message under it survives —
+  // a labelled rule floating in hidden history is noise, not structure
+  let divider = null, dividerAlive = false;
+  for (const node of $("feed").children) {
+    if (node.classList?.contains("day-divider")) {
+      divider?.classList.toggle("lens-hidden", !dividerAlive);
+      divider = node; dividerAlive = false;
+    } else if (node.classList?.contains("msg") && !node.classList.contains("lens-hidden")) {
+      dividerAlive = true;
+    }
+  }
+  divider?.classList.toggle("lens-hidden", !dividerAlive);
 }
 $("historyLens").onchange = () => { applyHistoryLens(); stickBottom(true); };
 // The LIVE roster cluster on the empty state: one circle per enabled seat in
@@ -3176,10 +4184,24 @@ $("historyLens").onchange = () => { applyHistoryLens(); stickBottom(true); };
 // is the logo and never encodes a seat count (BRANDING.md).
 function renderEmptyRoster() {
   const el = document.querySelector(".empty .dots");
-  if (!el) return;                   // a conversation is on stage
+  if (!el) {
+    // normal once a conversation replaces the empty state — warn only on
+    // real drift, where the empty state is visible but its cluster is gone
+    if ($("emptyState")) console.warn("renderEmptyRoster: .empty .dots anchor missing");
+    return;
+  }
   const on = seats.filter(s => s.el.querySelector(".switch").checked);
   el.innerHTML = (on.length ? on : seats)
     .map(s => `<i style="--rc:var(--${s.provider})"></i>`).join("");
+  // the cluster is dots-only visually; give it a spoken/hovered meaning so
+  // the empty state explains itself instead of decorating
+  const names = (on.length ? on : seats).map(seatDisplayName).join(", ");
+  const what = on.length
+    ? "In the room: " + names
+    : "Default lineup (toggle seats to change): " + names;
+  el.title = what;
+  el.setAttribute("aria-label", what);
+  el.setAttribute("role", "img");
 }
 function addSeat(provider, forceId) {
   // forceId: reopening a saved chat rebuilds its seats with their ORIGINAL ids,
@@ -3195,18 +4217,19 @@ function addSeat(provider, forceId) {
     `<div class="seat-head">
       <span class="dot"></span><input class="name" type="text" maxlength="24"
         spellcheck="false" autocomplete="off"
-        title="Seat name — click to rename (blank = automatic)">
-      <button class="rn" title="Rename this seat">✎</button>
+        title="Name — typed text becomes this seat's label; blank = automatic">
+      <button class="rn" title="Rename — focus the name box to edit this seat's label" aria-label="Rename this seat">✎</button>
       <span class="state">ready</span>
-      <button class="floor-btn" title="Give this participant the next eligible turn">Speak</button>
-      <button class="seat-stop" title="Stop only this agent">■</button>
-      <input type="checkbox" class="switch" checked>
-      <button class="rm" title="Remove seat">✕</button>
+      <button class="floor-btn" title="Speak — hand this seat the next eligible turn">Speak</button>
+      <button class="seat-stop" title="Stop — bench only this agent; the conversation continues" aria-label="Stop only this agent">■</button>
+      <input type="checkbox" class="switch" checked
+             title="Include — untick to bench this seat without removing it" aria-label="Include this seat">
+      <button class="rm" title="Remove — take this seat out of the room entirely" aria-label="Remove seat">✕</button>
     </div>
     <div class="seat-workstream"></div>
-    <select class="model"></select>
-    <select class="effort"></select>
-    <button class="role-btn" title="Give this seat a role — a public name plus private instructions"></button>`;
+    <select class="model" title="Model — what this seat runs on; options come from its provider"></select>
+    <select class="effort" title="Thinking effort — options come from each model"></select>
+    <button class="role-btn" title="Role — give this seat a public name plus private instructions only it sees"></button>`;
   seat.el = d;
   refreshRoleBtn(seat);
   d.querySelector(".role-btn").onclick = () => openRole(seat);
@@ -3463,6 +4486,11 @@ function setSeated(on) {
   $("modName").disabled = seated;
   $("modEffort").disabled = seated;
   $("untilDone").disabled = seated;
+  // Keep Improving's own settings are baked into the running conversation the
+  // same way the turn order is. The summary line stays readable; only the
+  // "change" button that would reopen the warning modal goes away.
+  const contEdit = $("contSummary") && $("contSummary").querySelector("button");
+  if (contEdit) contEdit.disabled = seated;
   $("spawnSel").disabled = seated;
   $("teamSel").disabled = seated;
   // the project context is injected in each seat's FIRST preamble, so it is
@@ -3471,6 +4499,10 @@ function setSeated(on) {
   // permissions are baked into every seat's argv when the chat starts, so
   // flipping them mid-conversation would be a lie until the next /clear
   $("permissionMode").disabled = seated;
+  // the composer pill drives that select — it locks with it, and an open
+  // menu would offer choices the select just refused
+  $("permPickBtn").disabled = seated;
+  if (seated) closePermMenu(); else renderPermPick();
   $("connectors").disabled = seated;
   if (!seated) normalizePolicyControls();
 }
@@ -3620,7 +4652,24 @@ function showSkTab(which) {
   $("skPane").hidden = !on;
   $("connPane").hidden = on;
 }
-$("skillBtn").onclick = openSkills;
+  $("skillBtn").onclick = openSkills;
+
+// Sound cues: ON by default because every chimed event (question, check-in,
+// done) is one that waits on Josh or tells him work ended. localStorage keeps
+// the choice; set_sound mirrors it engine-side so the emitter thread can
+// honor it without asking the page.
+let soundOn;
+try { soundOn = localStorage.getItem("soundCues") !== "0"; } catch (e) { soundOn = true; }
+function paintSound() {
+  $("soundLbl").textContent = soundOn ? "Sound on" : "Sound off";
+  $("soundBtn").classList.toggle("off", !soundOn);
+}
+$("soundBtn").onclick = () => {
+  soundOn = !soundOn;
+  try { localStorage.setItem("soundCues", soundOn ? "1" : "0"); } catch (e) {}
+  paintSound();
+  pywebview.api.set_sound(soundOn);
+};
 $("skClose").onclick = closeSkills;
 $("skTabSkills").onclick = () => showSkTab("skills");
 $("skTabConn").onclick = () => showSkTab("conn");
@@ -3950,10 +4999,29 @@ function closeAccounts() { $("acctModal").classList.remove("show"); }
 $("acctBtn").onclick = () => { setAcctNote(""); openAccounts(); };
 $("acctClose").onclick = closeAccounts;
 $("acctModal").onclick = e => { if (e.target === $("acctModal")) closeAccounts(); };
+function toggleKbd() {
+  const m = $("kbdModal");
+  m.classList.contains("show") ? m.classList.remove("show")
+                               : m.classList.add("show");
+}
+function closeKbd() { $("kbdModal").classList.remove("show"); }
+$("kbdClose").onclick = closeKbd;
+$("kbdModal").onclick = e => { if (e.target === $("kbdModal")) closeKbd(); };
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
-    closeAccounts(); closeRole(); hideAsk(); closeLightbox(); closeSkills();
+    closeAccounts(); closeRole(); hideAsk(); closeSkills();
+    closeContinuous(); closeKbd();
+    if ($("findBar") && !$("findBar").hidden) findClose();
     if (micOn) micStop(true);          // a live mic is the one thing Escape must kill
+  }
+  // "?" (Shift+/) toggles the cheat sheet — but never while Josh is typing:
+  // a question mark typed into any text box is prose, not a shortcut.
+  if (e.key === "?" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    const t = e.target;
+    if (!(t && (t.closest?.("input, textarea, select") || t.isContentEditable))) {
+      e.preventDefault();
+      toggleKbd();
+    }
   }
   if (e.key === "Tab" && e.ctrlKey) {
     e.preventDefault(); cycleTab(e.shiftKey ? -1 : 1); return;
@@ -3966,6 +5034,17 @@ document.addEventListener("keydown", e => {
   if (e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === "t" || e.key === "T")) {
     e.preventDefault(); newChat(); return;
   }
+  // Ctrl+K jumps straight to cross-chat search — works even mid-typing in the
+  // composer, like every chat app Josh has used
+  if (e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === "k" || e.key === "K")) {
+    e.preventDefault(); $("chatSearch").focus(); return;
+  }
+  // Ctrl+F / F3: find inside the OPEN transcript (rail search finds chats,
+  // this finds words). Works mid-typing too — the bar takes over from there.
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === "f" || e.key === "F")) {
+    e.preventDefault(); findOpen(); return;
+  }
+  if (e.key === "F3") { e.preventDefault(); findStep(e.shiftKey ? -1 : 1); return; }
   // Hands-free dictation: a pure toggle, so it works while typing mid-sentence.
   if (e.code === "Space" && e.ctrlKey && e.shiftKey && !e.altKey) {
     e.preventDefault();
@@ -4350,6 +5429,11 @@ async function sendSay() {
     const r = await pywebview.api.interject(t, att, activeId);
     if (r?.error) {                // put the chips back — nothing was saved
       pendingAtt.push(...att); renderAtt();
+      // ...and the WORDS back, for the same reason. A refused interjection was
+      // clearSay()'d a moment ago, so an error left Josh with a relay excuse
+      // and no message; retyping it is the last thing he should have to do.
+      // Only when the box is still empty — never clobber a fresh draft.
+      if (!$("say").value) { $("say").value = t; autoGrow(); }
       addMsg("system", "relay", r.error, ""); return;
     }
     // r.text carries the attachment lines Python appended — show what was sent
@@ -4362,6 +5446,7 @@ async function sendSay() {
     starting = true;
     const r = await pywebview.api.continue_chat(
       {opener: t, turns: rounds, ceiling: ceiling, attachments: pendingAtt,
+       continuous: continuousCfg(),
        session_id: activeId});
     starting = false;
     if (r.error) { addMsg("system", "relay", r.error, ""); return; }
@@ -4405,6 +5490,7 @@ async function sendSay() {
     moderator: orchestration.floor === "moderated" ? moderatorCfg() : null,
     supervisor: orchestration.workflow === "supervisor" ? moderatorCfg() : null,
     until_done: untilDoneOn(), ceiling: ceiling,
+    continuous: continuousCfg(),
     plan: {enabled: false},
     spawn: {tier1: true, max_helpers: parseInt($("spawnSel").value, 10) || 0,
             max_teams: parseInt($("teamSel").value, 10) || 0},
@@ -4723,24 +5809,48 @@ bindRail("no-files", "hideFileRail", "filesCollapse", "#fileRail");
 
 let ceiling = 60;               // until-done safety ceiling (total turns)
 function untilDoneOn() { return $("untilDone").checked; }
+// The box is BOTH a display and an input, so the repaint must never fight a
+// half-typed number: skip the write while the field has focus, and let
+// commitRounds() do the painting when the user is done.
+const ROUNDS_MIN = 1, ROUNDS_MAX = 50, CEIL_MIN = 5, CEIL_MAX = 500;
 function syncRoundsCtl() {
+  const box = $("rVal");
   if (untilDoneOn()) {
     $("roundsLabel").textContent = "Safety ceiling — hard stop after N turns";
-    $("rVal").textContent = ceiling;
+    if (document.activeElement !== box) box.value = ceiling;
   } else {
     $("roundsLabel").textContent = "Rounds — each seat speaks once per round";
-    $("rVal").textContent = rounds;
+    if (document.activeElement !== box) box.value = rounds;
   }
   if ($("callEstimate")) updateCallEstimate();
 }
+// Clamp on COMMIT and repaint the clamped number, so a refused value is
+// visible rather than silently corrected. Garbage keeps the last good one.
+function commitRounds() {
+  const raw = parseInt(String($("rVal").value).replace(/[^\d]/g, ""), 10);
+  if (Number.isFinite(raw)) {
+    if (untilDoneOn()) ceiling = Math.min(CEIL_MAX, Math.max(CEIL_MIN, raw));
+    else rounds = Math.min(ROUNDS_MAX, Math.max(ROUNDS_MIN, raw));
+  }
+  const box = $("rVal");
+  box.value = untilDoneOn() ? ceiling : rounds;   // paint past the focus guard
+  syncRoundsCtl();
+}
+$("rVal").onchange = commitRounds;
+$("rVal").onblur = commitRounds;
+$("rVal").onkeydown = e => {
+  if (e.key === "Enter") { e.preventDefault(); commitRounds(); $("rVal").blur(); }
+};
 $("rMinus").onclick = () => {
-  if (untilDoneOn()) ceiling = Math.max(5, ceiling - 5);
-  else rounds = Math.max(1, rounds - 1);
+  if (untilDoneOn()) ceiling = Math.max(CEIL_MIN, ceiling - 5);
+  else rounds = Math.max(ROUNDS_MIN, rounds - 1);
+  $("rVal").blur();                 // past the focus guard after a click-in
   syncRoundsCtl();
 };
 $("rPlus").onclick = () => {
-  if (untilDoneOn()) ceiling = Math.min(500, ceiling + 5);
-  else rounds = Math.min(50, rounds + 1);
+  if (untilDoneOn()) ceiling = Math.min(CEIL_MAX, ceiling + 5);
+  else rounds = Math.min(ROUNDS_MAX, rounds + 1);
+  $("rVal").blur();
   syncRoundsCtl();
 };
 $("untilDone").onchange = syncRoundsCtl;
@@ -4791,8 +5901,78 @@ function syncPermissionNote() {
   const mode = $("permissionMode").value;
   $("permissionNote").textContent = PERMISSION_NOTES[mode] || "";
   $("permissionNote").classList.toggle("danger", mode === "full");
+  syncPermPickLabel();
   if (!activeId) renderPermissionHud(mode, false);
 }
+/* ---------- permission mode picker (composer bottom bar) ---------- */
+const PERM_MODES = [
+  {v: "read_only", name: "Read only",   desc: "Look, don't touch — no writes or commands", key: "1"},
+  {v: "ask",       name: "Ask first",   desc: "Supervised — changes ask for approval",     key: "2"},
+  {v: "auto",      name: "Workspace",   desc: "Autonomous in the working folder, sandboxed", key: "3"},
+  {v: "full",      name: "Full access", desc: "No sandbox or approvals — trusted work only", key: "4"},
+];
+const PERM_SHORT = {read_only: "Read only", ask: "Ask first",
+                    auto: "Workspace", full: "Full access"};
+function syncPermPickLabel() {
+  const sel = $("permissionMode");
+  $("permPickLabel").textContent = PERM_SHORT[sel.value] || sel.value;
+}
+function renderPermPick() {
+  const sel = $("permissionMode");
+  syncPermPickLabel();
+  const list = $("permOptList");
+  list.innerHTML = "";
+  for (const m of PERM_MODES) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "perm-opt";
+    b.setAttribute("role", "option");
+    b.setAttribute("data-v", m.v);
+    b.setAttribute("aria-selected", String(sel.value === m.v));
+    b.disabled = sel.disabled;
+    const on = sel.value === m.v;
+    b.innerHTML = '<span class="perm-check">' + (on ? "✓" : "") + '</span>' +
+      '<span class="perm-main"><b></b><span class="perm-desc"></span></span>' +
+      '<kbd>' + m.key + '</kbd>';
+    b.querySelector("b").textContent = m.name;
+    b.querySelector(".perm-desc").textContent = m.desc;
+    b.onclick = () => {
+      if ($("permissionMode").disabled) return;
+      $("permissionMode").value = m.v;
+      // a programmatic value change fires no `change` event even in a real
+      // browser — syncPermissionNote is the one listener, call it directly
+      syncPermissionNote();
+      closePermMenu();
+    };
+    list.appendChild(b);
+  }
+}
+function openPermMenu() {
+  renderPermPick();
+  $("permPickMenu").hidden = false;
+  $("permPickBtn").setAttribute("aria-expanded", "true");
+}
+function closePermMenu() {
+  if ($("permPickMenu").hidden) return;
+  $("permPickMenu").hidden = true;
+  $("permPickBtn").setAttribute("aria-expanded", "false");
+}
+$("permPickBtn").onclick = e => {
+  e.stopPropagation();
+  if ($("permPickMenu").hidden) openPermMenu(); else closePermMenu();
+};
+document.addEventListener("click", e => {
+  if (!$("permPickMenu").hidden && !$("permPickWrap").contains(e.target)) closePermMenu();
+});
+document.addEventListener("keydown", e => {
+  if ($("permPickMenu").hidden) return;
+  if (e.key === "Escape") { closePermMenu(); return; }
+  const hit = PERM_MODES.find(m => m.key === e.key);
+  if (!hit || $("permissionMode").disabled) return;
+  $("permissionMode").value = hit.v;
+  syncPermissionNote();
+  closePermMenu();
+});
 $("permissionMode").onchange = syncPermissionNote;
 $("connectors").onchange = () => { $("connNote").style.display = $("connectors").checked ? "block" : "none"; };
 $("openTranscript").onclick = () => pywebview.api.open_path(transcriptPath);
@@ -4815,6 +5995,9 @@ function relTime(iso) {
 async function refreshChats() {
   try { sessions = (await pywebview.api.list_sessions()) || []; }
   catch (e) { sessions = []; }
+  // An open query owns the rail until it is cleared — repainting the normal
+  // groups under a typing hand would make the search flicker away mid-word.
+  if (chatSearchActive()) { runChatSearch(); return; }
   renderChats();
 }
 
@@ -4822,6 +6005,20 @@ async function refreshChats() {
 let closedGroups = {};
 try { closedGroups = JSON.parse(localStorage.getItem("closedChatGroups") || "{}"); }
 catch (e) { closedGroups = {}; }
+
+// Pinned chats — a localStorage id list, same posture as closedGroups. A stale
+// id (chat deleted) simply matches nothing and is pruned on the next toggle.
+function pinnedChats() {
+  try { const v = JSON.parse(localStorage.getItem("pinnedChats") || "[]");
+        return Array.isArray(v) ? v.filter(x => typeof x === "string") : []; }
+  catch (e) { return []; }
+}
+function togglePin(id) {
+  const cur = pinnedChats();
+  const next = cur.includes(id) ? cur.filter(x => x !== id) : cur.concat([id]);
+  try { localStorage.setItem("pinnedChats", JSON.stringify(next)); } catch (e) {}
+  renderChats();
+}
 
 function renderChats() {
   renderTabs();   // titles, unread counts and live dots live in the same data
@@ -4838,20 +6035,30 @@ function renderChats() {
   const groups = new Map();
   const waiting = sessions.filter(s => runFor(s.id, s.run || s).status === "waiting");
   if (waiting.length) groups.set("\u0000needs-input", waiting);
-  sessions.filter(s => !waiting.includes(s)).forEach(s => {
+  // Pinned chats rank just under "Needs input": a question Josh must answer
+  // still outranks a chat he merely likes. Pinned ids live in localStorage —
+  // a UI preference, never engine state, so deleting a pinned chat needs no
+  // cleanup beyond the stale id being ignored.
+  const pinnedIds = new Set(pinnedChats());
+  const pinned = sessions.filter(s => !waiting.includes(s) && pinnedIds.has(s.id));
+  if (pinned.length) groups.set("\u0000pinned", pinned);
+  sessions.filter(s => !waiting.includes(s) && !pinnedIds.has(s.id)).forEach(s => {
     const key = s.project || "";
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(s);
   });
   groups.forEach((rows, name) => {
     const needsInput = name === "\u0000needs-input";
+    const isPinnedGroup = name === "\u0000pinned";
     const g = document.createElement("div");
-    g.className = "chat-group" + (!needsInput && closedGroups[name || "*"] ? " closed" : "");
+    g.className = "chat-group" + (!needsInput && !isPinnedGroup && closedGroups[name || "*"] ? " closed" : "");
     const h = document.createElement("button");
     h.className = "chat-group-h";
     h.innerHTML = `<span class="chev">▾</span><span class="gname"></span>`;
-    h.querySelector(".gname").textContent = needsInput ? "Needs input" : name || "No project";
+    h.querySelector(".gname").textContent =
+      needsInput ? "Needs input" : isPinnedGroup ? "Pinned" : name || "No project";
     h.title = needsInput ? "Conversations waiting for your answer"
+      : isPinnedGroup ? "Chats you pinned"
       : name ? "Working folder: " + name : "Chats with their own private folder";
     h.onclick = () => {
       if (needsInput) return;
@@ -4877,6 +6084,8 @@ function chatRow(s) {
   const who = (s.participants || []).map(p => p.name).join(" · ");
   const spawnedBy = s.parent
     ? `↳ spawned by ${s.parent.label || "a seat"} in '${s.parent.id}'` : "";
+  const branchedFrom = s.fork_of
+    ? `branched from '${s.fork_of.id}'` : "";
   const stateLabel = {thinking: "An agent is thinking", running: "Conversation is running",
     waiting: "Waiting for your answer", stopping: "Stopping", stopped: "Stopped",
     done: "Completed", failed: "Run failed", error: "Run failed"}[runState];
@@ -4888,7 +6097,7 @@ function chatRow(s) {
        planning: "The Supervisor has not produced a plan yet"}[s.supervisor_status.state]
     : "";
   d.title = [s.title, stateLabel, [relTime(s.updated), who].filter(Boolean).join(" · "),
-             spawnedBy, supTip, s.can_continue_reason].filter(Boolean).join("\r\n");
+             spawnedBy, branchedFrom, supTip, s.can_continue_reason].filter(Boolean).join("\r\n");
   const dots = (s.participants || [])
     .map(p => `<i style="background:var(--${p.provider},#6C6677)"></i>`).join("");
   d.innerHTML =
@@ -4899,6 +6108,8 @@ function chatRow(s) {
      <span class="unread" hidden></span>
      <span class="chat-actions">
        <button class="chat-stop" title="Stop this conversation">■</button>
+       <button class="pin" title="Pin this chat to the top of the rail">★</button>
+       <button class="exp" title="Export this chat as a self-contained web page">⤓</button>
        <button class="x" title="Delete this chat">✕</button>
      </span>`;
   d.querySelector(".t").textContent = (s.parent ? "↳ " : "") + s.title;
@@ -4930,6 +6141,17 @@ function chatRow(s) {
   const stop = d.querySelector(".chat-stop");
   stop.hidden = !LIVE_RUN_STATES.has(runState);
   stop.onclick = e => { e.stopPropagation(); stopChat(s.id); };
+  const pin = d.querySelector(".pin");
+  const isPinned = pinnedChats().includes(s.id);
+  pin.classList.toggle("on", isPinned);
+  pin.title = isPinned ? "Unpin this chat" : "Pin this chat to the top of the rail";
+  pin.onclick = e => { e.stopPropagation(); togglePin(s.id); };
+  d.querySelector(".exp").onclick = async e => {
+    e.stopPropagation();
+    const r = await pywebview.api.export_session(s.id);
+    if (r?.error) addMsg("system", "relay", r.error, "");
+    else pywebview.api.open_path(r.path);   // opens in the default browser
+  };
   d.querySelector(".x").onclick = e => { e.stopPropagation(); armDelete(e.currentTarget, s); };
   return d;
 }
@@ -4977,6 +6199,171 @@ async function deleteChat(s) {
   if (s.id === activeId) { activeId = null; resetStage(); }
   await refreshChats();
 }
+
+/* ---------- cross-chat search ---------- */
+// The rail lists chats; this finds the WORDS inside them. The engine
+// (relay.search_sessions) does the scanning under bridge-thread bounds; the
+// UI debounces, renders hits with a snippet each, and opens the chat scrolled
+// to the first matching message. Two characters minimum — a one-letter query
+// matches half the history and reads as noise.
+let chatSearchTimer = null, chatSearchSeq = 0;
+
+function chatSearchActive() {
+  return $("chatSearch").value.trim().length >= 2;
+}
+
+$("chatSearch").oninput = () => {
+  clearTimeout(chatSearchTimer);
+  chatSearchTimer = setTimeout(runChatSearch, 200);
+};
+$("chatSearch").onkeydown = e => {
+  if (e.key === "Escape") { e.preventDefault(); clearChatSearch(); }
+};
+$("chatSearchClear").onclick = clearChatSearch;
+
+function clearChatSearch() {
+  $("chatSearch").value = "";
+  $("chatSearchClear").hidden = true;
+  renderChats();
+}
+
+async function runChatSearch() {
+  const q = $("chatSearch").value.trim();
+  // below the two-character floor we are not searching, so the ✕ goes away
+  // with the results page
+  $("chatSearchClear").hidden = q.length < 2;
+  if (q.length < 2) { renderChats(); return; }
+  const seq = ++chatSearchSeq;
+  let r;
+  try { r = await pywebview.api.search_sessions(q); }
+  catch (e) { return; }                        // transient — next keystroke retries
+  // A newer keystroke has already superseded this reply, or the box was
+  // cleared while the scan ran: never repaint stale results over either.
+  if (seq !== chatSearchSeq || q !== $("chatSearch").value.trim()) return;
+  renderChatResults(q, r || {});
+}
+
+function renderChatResults(q, r) {
+  renderTabs();
+  const list = $("chatList");
+  list.innerHTML = "";
+  if (r.error) {
+    list.innerHTML = '<div class="chat-empty"></div>';
+    list.firstChild.textContent = "Search failed: " + r.error;
+    return;
+  }
+  const chats = r.chats || [];
+  const h = document.createElement("div");
+  h.className = "chat-search-h";
+  // truncated:true means the engine capped the list (SEARCH_CHATS_MAX) —
+  // "matching" would claim completeness the payload itself denies
+  h.textContent = !chats.length
+    ? `No chats matching “${q}”`
+    : (r.truncated
+        ? `${chats.length} chat${chats.length === 1 ? "" : "s"} shown (more match) — “${q}”`
+        : `${chats.length} chat${chats.length === 1 ? "" : "s"} matching “${q}”`);
+  list.appendChild(h);
+  chats.forEach(c => list.appendChild(searchRow(c)));
+}
+
+function searchRow(c) {
+  const d = document.createElement("div");
+  // parent/legacy don't ride the search payload (the engine returns a small
+  // result on purpose), but the rail's own summaries have them — match how
+  // session_summary feeds chatRow so a spawned team or view-only chat reads
+  // the same in both rail states.
+  const meta = sessions.find(s => s.id === c.id) || {};
+  d.className = "search-row" + (c.id === activeId ? " active" : "") +
+                (meta.legacy ? " legacy" : "");
+  const dots = (c.providers || [])
+    .map(p => `<i style="background:var(--${p},#6C6677)"></i>`).join("");
+  d.innerHTML =
+    `<span class="who">${dots || '<i style="background:#6C6677"></i>'}</span>
+     <div class="twrap" style="min-width:0">
+       <div><span class="t"></span> <span class="s-proj"></span></div>
+       <div class="s-snippet"></div>
+     </div>
+     <span class="s-count"></span>`;
+  // ↳ prefix for spawned children, exactly as chatRow does
+  d.querySelector(".t").textContent = (meta.parent ? "↳ " : "") + c.title;
+  d.querySelector(".s-proj").textContent = c.project ? "· " + c.project : "";
+  const snip = (c.snippets && c.snippets[0]) || null;
+  // A TITLE match arrives with count 0 and no snippets by contract
+  // (relay.search_sessions); never let the best-ranked row read "0 hits"
+  // over an empty line.
+  d.querySelector(".s-snippet").textContent =
+    snip ? snip.excerpt
+         : (c.title_match ? "matched the title, not message text" : "");
+  d.title = [c.title,
+             meta.parent ? `spawned by ${meta.parent.label || "a seat"} in '${meta.parent.id}'` : "",
+             snip ? snip.excerpt : ""].filter(Boolean).join("\r\n") +
+            `\r\n${relTime(c.updated)}` +
+            (meta.can_continue_reason ? `\r\n${meta.can_continue_reason}` : "");
+  d.querySelector(".s-count").textContent =
+    c.count ? `${c.count} hit${c.count === 1 ? "" : "s"}`
+            : (c.title_match ? "title match" : "0 hits");
+  // openChat scrolls to and flashes the first matching message, which is the
+  // whole point: the answer, not just the chat it lives in. Already-open
+  // chats are revealed in place rather than rebuilt (open_session refuses a
+  // second live copy anyway).
+  d.onclick = () => {
+    const q = ($("chatSearch").value || "").trim();
+    if (c.id === activeId) { revealInChat(q, snip ? snip.excerpt : ""); return; }
+    openChat(c.id, q, snip ? snip.excerpt : "");
+  };
+  return d;
+}
+
+// After a search-hit open: scroll to the first rendered message containing
+// the query and flash it. textContent, not innerHTML — markdown rendering
+// may have wrapped the words in anything.
+//
+// Three passes, cheapest first (the d2 fix). The engine matches with
+// Unicode CASEFOLD; JS has no casefold, so exact parity is not cheaply
+// reachable. Instead:
+//   1. plain toLowerCase() — the historical behaviour, right for ASCII;
+//   2. a small explicit fold (ß→ss, œ/æ→oe/ae, ø→o, NFD diacritic strip)
+//      covering the equivalences casefold is actually exercised by in this
+//      app's titles and bodies — folded forms like "ss" flashing where "ß"
+//      was written are accepted display-only artifacts;
+//   3. the hit's own snippet excerpt as the needle — the engine found THIS
+//      message, so its excerpt text (whitespace-collapsed, ellipsis
+//      stripped) locates it even when the query itself was folded away.
+// A miss on all three just keeps normal scroll behaviour, as before.
+function _foldForFlash(s) {
+  return (s || "").toLowerCase()
+    .replace(/ß/g, "ss").replace(/œ/g, "oe").replace(/æ/g, "ae")
+    .replace(/ø/g, "o")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function revealInChat(q, excerpt) {
+  // scan(needle, foldBoth): find + flash the first message whose rendered
+  // text contains `needle` — both sides through the SAME transform.
+  const scan = (needle, foldBoth) => {
+    if (!needle) return false;
+    for (const el of document.querySelectorAll("#feed .msg")) {
+      const hay = foldBoth ? _foldForFlash(el.textContent)
+                           : (el.textContent || "").toLowerCase();
+      if (hay.includes(needle)) {
+        el.scrollIntoView({block: "center"});
+        el.classList.remove("hit-flash");
+        void el.offsetWidth;                 // restart the animation on re-find
+        el.classList.add("hit-flash");
+        setTimeout(() => el.classList.remove("hit-flash"), 2500);
+        return true;
+      }
+    }
+    return false;
+  };
+  if (scan(q.toLowerCase(), false)) return true;
+  if (scan(_foldForFlash(q), true)) return true;
+  // excerpt fallback: strip the window's ellipses, collapse whitespace, and
+  // let pass-2 folding handle whatever the engine folded to find this row.
+  const ex = _foldForFlash((excerpt || "").replace(/[…⋯]/g, " ").trim());
+  return !!ex && scan(ex, true);
+}
+
 
 /* ---------- open-tab strip ---------- */
 // The Chats rail is HISTORY — everything you have ever run, grouped by
@@ -5134,7 +6521,27 @@ async function restoreTabs() {
   renderTabs();
 }
 
-async function openChat(id) {
+// Reopening costs nothing, so the last chat always comes back. RESUMING costs
+// real calls, so it happens only for a chat whose process died mid-run — the
+// engine decides that (relay.was_interrupted), not the UI.
+let activeInterrupted = false;
+async function resumeAfterRestart() {
+  let plan = null;
+  try { plan = await pywebview.api.restart_resume(); } catch (e) { return; }
+  if (!plan || !plan.session_id) return;
+  if (!sessions.some(x => x.id === plan.session_id)) return;
+  await openChat(plan.session_id);
+  if (plan.reason) addMsg("system", "relay", plan.reason, "");
+  if (!plan.resume || !canContinue || running) return;
+  try { await pywebview.api.note_auto_resume(plan.session_id); } catch (e) {}
+  const r = await pywebview.api.continue_chat(
+    {opener: "", turns: rounds, ceiling: ceiling, session_id: plan.session_id});
+  if (r?.error) { addMsg("system", "relay", r.error, ""); return; }
+  running = true;
+  $("stopBtn").hidden = false;
+  setSeated(true);
+}
+async function openChat(id, findQuery, findExcerpt) {
   if (id === activeId) return;
   const r = await pywebview.api.open_session(id);
   if (r?.error) { addMsg("system", "relay", r.error, ""); return; }
@@ -5149,6 +6556,7 @@ async function openChat(id) {
   if (runSeed.status) run.status = canonicalRunState(runSeed.status);
   else if (runSeed.running) run.status = "running";
   canContinue = !!s.can_continue;
+  activeInterrupted = !!s.interrupted;
   workspacePath = s.workspace || null;
   transcriptPath = s.transcript || null;   // absent today — button hides itself
   customFolder = null;
@@ -5169,7 +6577,8 @@ async function openChat(id) {
   $("spawnSel").value = [0, 3, 10].includes(helpers) ? String(helpers) : "10";
   const teams = (s.spawn || {}).max_teams || 0;
   $("teamSel").value = [0, 1, 3].includes(teams) ? String(teams) : "3";
-  syncRoundsCtl();
+  // no syncRoundsCtl() here: it would paint the PREVIOUS chat's numbers, since
+  // restoreOrchestration below is what actually restores them (and repaints).
   clearFatal();
   restoreSeats(s.participants || []);
   restoreOrchestration(s);
@@ -5178,6 +6587,8 @@ async function openChat(id) {
   renderSupervisorOverview(s.goal || "", s.tasks || [], s.mode || "");
   $("feed").innerHTML = "";
   historyHasDelivery = false;
+  resetTranscriptStructure();   // dividers/groups restart with this chat
+  findClose();                  // and no stale find hits from the last one
   syncHistoryLens();
   stickBottom(true);   // a chat you just opened starts at its newest message
   msgs.forEach((m, i) => {
@@ -5188,6 +6599,11 @@ async function openChat(id) {
   run.unread = 0; run.completionUnread = false;
   if (run.plan && Array.isArray(run.plan.tasks)) renderPlan(run.plan);
   stickBottom(true);
+  // A search hit opened this chat: land on the words, not the bottom.
+  // When nothing matches (the snippet came from a message the renderer
+  // skipped), keep normal newest-at-bottom behaviour rather than scrolling
+  // nowhere.
+  if (findQuery) revealInChat(findQuery, findExcerpt);
   const live = LIVE_RUN_STATES.has(run.status);
   setSeated((live || !!s.can_continue) && (s.participants || []).length > 0);
   addMsg("system", "relay", live
@@ -5195,6 +6611,15 @@ async function openChat(id) {
     : canContinue ? "Reopened — the agents still remember this chat. Reply to pick it up."
     : (s.can_continue_reason || "Reopened for reading."), "");
   if (run.question) showQuestion(run.question);
+  // Seats that are mid-turn RIGHT NOW. Typing indicators are live-only, so
+  // without this a reopened chat whose seats are 14 minutes into a 15-minute
+  // window rendered as completely idle — the single reason a working run got
+  // reported as "the conversation won't restart" (2026-08-23).
+  (r.thinking || []).forEach(t => {
+    run.thinkers.add(String(t.speaker));
+    showTyping(t.speaker, t.provider, t.name,
+               {started: t.started, limit: t.limit, idle: t.idle});
+  });
   syncActiveRun(runSeed);
   $("openTranscript").style.display = transcriptPath ? "" : "none";
   $("openWorkspace").style.display = workspacePath ? "" : "none";
@@ -5260,19 +6685,32 @@ function addOption(sel, value, label) {
 }
 
 function resetStage() {
-  canContinue = false; transcriptPath = null; workspacePath = null;
+  // `running` is per-CHAT state and this stage now shows no chat at all, so it
+  // has to be forgotten here with everything else. Leaving it true is what made
+  // every message typed into a fresh tab vanish: sendSay took the interject
+  // branch, the bridge answered "No conversation is running." for the chat this
+  // stage had already walked away from, and the text was silently discarded —
+  // once per send, forever (reported 2026-08-23). The old chat is untouched by
+  // this; it keeps running in its own tab.
+  canContinue = false; running = false;
+  $("stopBtn").hidden = true;
+  transcriptPath = null; workspacePath = null;
   convProviders = []; clearFatal();
   renderWorkstreams([]);
   renderSupervisorOverview("", [], "");
   renderSupervisorTrace([], "");
   renderCompletion(null);
   applyPreset("open_discussion");
+  restoreContinuous(null);           // strip, banner and settings all reset
+  $("contBanner").classList.remove("show");
   hideFeedback();
   $("afterRow").classList.remove("show");
   $("openTranscript").style.display = "";
   $("openWorkspace").style.display = "";
   $("feed").innerHTML = EMPTY_HTML;
   historyHasDelivery = false;
+  resetTranscriptStructure();   // a fresh stage has no transcript structure
+  findClose();                  // and no find bar left open over it
   syncHistoryLens();
   stickBottom(true);
   renderEmptyRoster();               // the restored empty state is static HTML
@@ -5342,8 +6780,87 @@ function fillGptLevels(eSel, modelId, def) {
 // which kills the REST of this one big script — no seats, no pywebviewready
 // listener, every model/thinking menu permanently blank (2026-08-21).
 syncPermissionNote();
+syncRoundsCtl();          // the box is an input now: nothing else paints it
 addSeat("claude"); addSeat("gpt"); addSeat("gemini");
 applyPreset("open_discussion");
+
+/* ---------- Keep Improving: bindings ----------
+   Down here with addSeat(), not beside the functions above: these read
+   top-level `let`s (seated, customFolder), and a call placed above its
+   declaration is a TDZ ReferenceError that silently kills the rest of the
+   one-big-script UI. */
+["contMinutes", "contSpend", "contHours", "contGate"].forEach(id => {
+  $(id).onchange = readContModal;
+  $(id).onblur = readContModal;
+});
+["contSpendOn", "contHoursOn", "contWatchdogStop", "contCommit",
+ "contAllowDirty"].forEach(id => { $(id).onchange = readContModal; });
+// a limit input answers for itself only once its checkbox arms it — until
+// then the typed value was ambiguous (does an unticked cap count?)
+[["contSpendOn", "contSpend"], ["contHoursOn", "contHours"]].forEach(([on, field]) => {
+  const sync = () => { $(field).disabled = !$(on).checked; };
+  $(on).addEventListener("change", sync);
+  sync();
+});
+document.querySelectorAll("input[name=contAction]").forEach(radio => {
+  radio.onchange = readContModal;
+});
+$("contAgree").onchange = renderContAck;
+$("contClose").onclick = closeContinuous;
+$("contCancel").onclick = closeContinuous;
+$("contModal").onclick = e => { if (e.target === $("contModal")) closeContinuous(); };
+$("contOk").onclick = () => {
+  readContModal();
+  if (!$("contAgree").checked) return;   // the checkbox IS the gate
+  contAccepted = true;
+  contOn = true;
+  $("contModal").classList.remove("show");
+  setSelectedPreset("keep_improving");
+  renderContSummary();
+  updateCallEstimate();
+};
+
+/* ---------- keyboard reachability (polish pass) ---------- */
+// The collapsed-rail strips are plain divs whose click path lives on the rail
+// itself; give the keyboard the same door without touching bindRail.
+document.addEventListener("keydown", e => {
+  if ((e.key !== "Enter" && e.key !== " ") || e.target?.closest?.(".rail-reopen") !== e.target)
+    return;
+  e.preventDefault();
+  e.target.click();
+});
+// Tab cycles INSIDE whichever modal is open instead of escaping to the page
+// behind it. Purely a keydown observer — open/close wiring is untouched.
+document.addEventListener("keydown", e => {
+  if (e.key !== "Tab") return;
+  const open = [...document.querySelectorAll('[id$="Modal"].show')];
+  if (!open.length) return;
+  const host = (e.target.closest && e.target.closest('[id$="Modal"].show')) || open[open.length - 1];
+  const els = [...host.querySelectorAll(
+    'button:not([hidden]):not([disabled]), input:not([hidden]):not([type="hidden"]):not([disabled]),'
+    + ' select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )].filter(el => el.offsetParent !== null);
+  if (!els.length) return;
+  const first = els[0], last = els[els.length - 1];
+  const outside = !host.contains(e.target);
+  if ((e.shiftKey && (outside || e.target === first)) ||
+      (!e.shiftKey && (outside || e.target === last))) {
+    e.preventDefault();
+    (e.shiftKey ? last : first).focus?.();
+  }
+});
+// The resize grip answers to ↑/↓ once focused, mirroring the drag math
+// (same 96px floor, same 70%-of-window ceiling).
+$("sayGrip").addEventListener("keydown", e => {
+  if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+  e.preventDefault();
+  const el = $("say");
+  sayMinH = Math.max(96, Math.min(Math.round(innerHeight * 0.7),
+                                  (sayMinH || el.offsetHeight || 96) +
+                                  (e.key === "ArrowUp" ? 28 : -28)));
+  sayAutoH = sayMinH;
+  el.style.height = sayMinH + "px";
+});
 window.addEventListener("pywebviewready", async () => {
   // pull first (cheap cache snapshot) — pushes via auth_status events follow
   renderAccounts(await pywebview.api.get_auth_status());
@@ -5353,9 +6870,14 @@ window.addEventListener("pywebviewready", async () => {
   geminiFamilies = uiCfg.gemini_families;
   seats.forEach(fillSeat);
   fillModerator("claude");
+  paintSound();                       // remember the cue choice engine-side
+  pywebview.api.set_sound(soundOn);
   await restoreFolder();
   await refreshChats();
   await restoreTabs();   // after refreshChats: tabs read their titles from it
+  // LAST, and after both: it opens a chat, which needs the rail loaded and
+  // the tab strip present.
+  await resumeAfterRestart();
   refreshFiles();
   $("say").focus();
 });

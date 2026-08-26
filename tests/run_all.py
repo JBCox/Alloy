@@ -31,6 +31,15 @@ def reported_count(output):
 
 
 def main():
+    # A failing suite's output is printed verbatim, and on a cp1252 Windows
+    # console one non-ASCII byte in it raised UnicodeEncodeError and killed
+    # the RUNNER -- so every suite after the first failure never ran and no
+    # total was ever printed, exactly when you most need both.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     suites = sorted(TEST_DIR.glob("test_*.py"))
     total = 0
     failed = []

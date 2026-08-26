@@ -11,6 +11,38 @@ free models — Ox Alpha and friends, no account at all). No API keys — each a
 authenticates through its official CLI's account login. You start it, they talk;
 you can jump in anytime.
 
+## Getting started
+
+Open the app, pick how the room should work, optionally choose where it works,
+and start typing — everything else has a sensible default.
+
+- **Pick a preset card** (top of the window). Five recipes cover most rooms:
+  **Discuss in Turns** (the default — orderly round-robin conversation),
+  **Talk Live** (everyone replies whenever ready — faster, less orderly),
+  **Compare & Decide** (separate answers and critiques, then one final
+  recommendation), **Build Together** (work is split into parallel tasks whose
+  files are verified on disk), and **Keep Improving** (works on your project
+  non-stop, choosing its own next objective, until you stop it — it asks
+  before starting because it never ends by itself). Any card can be fine-tuned
+  in the Conversation controls below it; cards lock once a chat begins.
+- **Choose a working folder** (optional). By default seats share a private
+  scratch folder created per conversation. Point them at one of your real
+  project folders instead (**Working folder → Choose**) and they read its
+  files, share its AI docs as common context, and (in Build Together / Keep
+  Improving) create and edit real files there. A permission picker right below
+  decides how much they may touch: Read only, Ask first, Workspace, or Full
+  access. Chats sharing a folder group together in the left rail.
+- **Learn the slash commands** (type them in the chat bar anytime):
+  `/stop` ends gracefully; `/turns N` changes the round cap mid-run
+  (`/ceiling N` in until-done chats); `/clear [seat]` wipes a seat's memory;
+  `/compact [seat]` has a seat summarize-and-restart to shrink context;
+  `/retro` aggregates past sessions into the editable playbook; and Keep
+  Improving adds `/limits`, `/checkin` and `/objective <text>`. `/help` lists
+  them. Anything that doesn't start with `/` joins the conversation itself.
+
+That's the whole loop: preset → (optional) folder → first message. The rest of
+this file is depth, not prerequisites.
+
 ## Three ways to start a conversation
 
 1. **Desktop app (Alloy)** — double-click **AI Chat** on the Desktop (the
@@ -99,9 +131,18 @@ Options:
 | `--yolo` | off | Backward-compatible alias for `--permission full` |
 | `--workspace PATH` | fresh scratch dir | Run the conversation inside an existing project folder instead of a private scratch dir. The folder's AI docs then become shared context for every seat (see below) |
 | `--no-brief` | on | Skip that shared context and leave each seat with whatever its own CLI happens to load |
+| `--preset P` | none | Goal-first recipe, overriding `--mode`: `open-discussion`, `panel-review`, `build-execute`, `live-room`, or `keep-improving` (Build Together with the brakes off — pair it with `--continuous`) |
 | `--mode M` | round-robin | Orchestration: `round-robin` (fixed), `speaker` (each reply ends with `[[NEXT: seat]]` naming who goes next), `moderator` (a cheap side call picks each turn), `supervisor` (a stateless planner decomposes the goal into isolated concurrent workstreams with capability gating and filesystem verification), `parallel` (everyone answers at once in simultaneous rounds), `free` (seats reply whenever messages arrive, interleaved live) |
 | `--moderator P` | claude:claude-haiku-4-5:low | Who moderates in `--mode moderator` (`provider[:model[:effort]]`); not a seat — one cheap stateless call per turn, and it can call the conversation DONE |
 | `--until-done` / `--ceiling N` | off / 60 | No round cap: run until a seat wraps (or the moderator says DONE), hard-stopped at N total turns as the spend backstop; `/ceiling N` adjusts mid-run |
+| `--continuous` | off | **Keep Improving.** No round cap and no turn ceiling: when the manager judges the current objective met it chooses the NEXT one itself and keeps going. Only your Stop button and the limits below end it |
+| `--checkin-minutes N` | 30 | How often a cheap watchdog call checks the run is still committing turns and nothing is wedged, and repairs it if not (5–1440) |
+| `--checkin-action A` | notify | What the watchdog may do: `auto` (fix and log), `notify` (fix, log and raise attention), `permission` (change nothing until you approve — **the run waits**) |
+| `--spend-cap USD` | none | Pause once the run has provably cost this much. Only the CLIs that report cost are counted, so Gemini and OpenCode seats never appear in the figure |
+| `--time-cap HOURS` | none | Pause after this many hours of run time, accumulated across resumes |
+| `--no-watchdog-stop` | on | The watchdog may repair the run but never end it |
+| `--gate CMD` / `--no-gate` | detected | Verification command run in the working folder at the end of each round of work, before the manager reviews it, so the manager reads a result rather than a claim. Detected from the folder (`tests/run_all.py`, then pytest, then `npm test`); a folder with none records a SKIP, never a pass |
+| `--gate-commit` | off | `git commit` the working folder after each round whose verification passed. Refused if the tree already had your own uncommitted changes when the run started |
 | `--spawn-helpers N` | 0 | Let seats spawn up to N one-shot helper AIs: a reply ending `[[SPAWN: provider[:model[:effort]] \| task]]` runs a helper in the shared workspace while the conversation continues; the result returns only to the requester |
 | `--spawn-teams N` | 0 | Let seats spawn up to N whole sub-conversations: `[[TEAM: seats \| rounds=N mode=m \| task]]` runs a child chat (its own transcript, reopenable from the app's rail, marked ↳) that reports its outcome back to the requester |
 | `--no-native-subagents` | on | Stop telling seats they may use their CLI's built-in subagent tools (Claude's Task tool, Codex multi-agent) |
@@ -152,12 +193,37 @@ or **Full access** in the app. `--permission full` (and its older `--yolo`
 alias) removes the guardrails entirely, so point it at a git repo you can
 `git diff`.
 
+## When a provider wobbles
+
+Free and preview endpoints drop requests. Alloy treats that as a different
+thing from a bug of its own: a failure that reads as the provider (`network_error`,
+`Endpoint is unavailable`, 429/503/…) gets a short pause and then a **2-minute**
+window for its one retry, instead of an instant re-hit followed by the full
+effort-scaled watchdog — which, on `--effort max`, is fifteen minutes of a
+conversation looking dead. Failures that will never heal on their own (a dead
+CLI session id, a missing CLI, an auth problem) are excluded and still fail
+immediately. While a seat is mid-turn its indicator shows `11:23 of 15:00`, so
+a slow turn is visibly a slow turn; reopening the chat keeps that clock rather
+than resetting it.
+
+## When the app closes unexpectedly
+
+A chat whose PROCESS died mid-run — a force quit, a power cut, the seats
+restarting the app on themselves — is reopened *and* picked up again the next
+time you launch. Every other ending (a wrap, the round cap, your Stop, a spend
+limit) was a decision, so those chats are reopened and left alone. Two
+automatic resumes that produce no turns block the third, so a chat that
+crashes on resume cannot loop.
+
 ## While it's running
 
 - **Type anything + Enter** — injected into the conversation as "Josh (human)"
   at the next turn boundary; every participant sees it.
 - **`/stop`** — graceful end. **`/turns N`** — change the round cap mid-run
   (**`/ceiling N`** instead, in an until-done conversation).
+- In a Keep Improving run: **`/limits`** prints what will actually stop it,
+  **`/checkin`** runs a health check at the next turn boundary, and
+  **`/objective <text>`** steers what it works on next.
 - **`/clear [seat]`** — wipe a seat's context; it rejoins fresh (re-introduced,
   no memory). **`/compact [seat]`** — the seat writes its own summary of the
   conversation, then restarts from just that summary (shrinks a long context
@@ -180,6 +246,36 @@ alias) removes the guardrails entirely, so point it at a git repo you can
   works too). Seats are also told to mark the one key line of a reply with
   `==double equals==` — the app renders it highlighted, and trailing
   directives show as small chips instead of raw brackets.
+
+## Searching your chats
+
+The box at the top of the left chat rail (**Search all chats…**) does
+full-text search across every saved conversation — not just titles:
+
+- **What it searches** — chat titles and message text: the structured
+  `messages.jsonl` rows for app-era chats, falling back to `transcript.md`
+  for legacy transcript-only chats (those open view-only, but they stay
+  findable). A chat whose log was damaged by a crash — intact rows beside
+  lines that no longer parse — is read from its transcript instead, so a
+  half-eaten chat stays findable. A currently-running chat is searchable as
+  far as its files have been written, since both are appended live. A title
+  match lists the chat even when no message body contains the words.
+- **Syntax** — plain case-insensitive substring, nothing fancier: no regex,
+  no quotes, no fuzzy matching. At least two characters (a one-letter query
+  matches half the history), and pasted multi-word text works because
+  surrounding whitespace is collapsed.
+- **Results** — the rail swaps to a results page: title matches first, then
+  most hits, newest among ties. Each row shows provider dots, the chat's
+  project, up to three snippet excerpts, and the hit count; a match on the
+  title alone says "title match" rather than a number, and a spawned team
+  keeps its **↳** marker in results just as it has in the rail. Clicking a
+  row opens that conversation scrolled to and flashing the first matching
+  message (it just opens normally if the match sits in text the renderer
+  skips). **✕ or Escape** brings the normal rail back.
+- **Limits** — hit counting stops at 999 occurrences per chat and at most
+  40 chats are listed (when more than 40 match, the header says so:
+  "40 chats shown (more match)"); only conversation text is searched, never
+  workspace files or attachments.
 
 ## Where things land
 
@@ -213,6 +309,48 @@ decide when the task is finished, bounded by the `--ceiling` turn limit. In
 the app all of these are just a pause — replying continues the same
 conversation until you press **New conversation**. Closing the app is safe:
 reopen the chat from the left rail and reply to continue it.
+
+**Keep Improving does not end.** That is the point of it: when the manager
+judges an objective met it picks the next one instead of stopping, and if the
+conversation falls over anyway — a cap, a fatal seat, a wrap nobody asked for —
+it is restarted (three restarts in a row that commit nothing stop it loudly
+rather than spinning). What ends it is your Stop button, plus whichever of the
+spend cap, the time cap and "the check-in may stop it" you turned on. Turning
+all three off is allowed, and the warning modal says so in those words.
+
+## Self-improvement / restart
+
+The seats can improve Alloy itself: they edit code between turns, prove the
+edit, and the app relaunches on it without losing the conversation.
+
+What a seat runs is `python restart.py` (repo root; standalone, stdlib only).
+It always gates first — `tests/run_all.py` plus an `import app` smoke, all
+token-free — and aborts loudly on any red, so unproven code never takes the
+running app down. It then finds `pythonw.exe <path>\app.py` instances, refuses to
+touch the one hosting the calling session (host guard) or any candidate with
+no visible Alloy window (ownership guard), stops targets gently (`taskkill`
+posts WM_CLOSE), relaunches exactly one detached `pythonw app.py`, verifies
+the new process stays up, and prints the newest `sessions\<id>` to reopen.
+`--dry-run` prints the plan and touches nothing.
+
+Between turns nothing is lost by design: every committed turn atomically
+updates `meta.json`, and the transcript/message files are append-only, so the
+worst case of a stop is "one fewer message", never a forged or half-saved
+one. A stop *mid-turn* is still amputation — the gentle close is only gentle
+while the room is idle; honoring a restart request at a turn boundary, plus
+the handoff marker, single-instance mutex and auto-reopen of the newest
+resumable chat, is the designed next step (see RESTART_DESIGN.md).
+
+Reopening continues the same conversation: open the printed or rail-listed
+session, and the app rebuilds every seat off disk alone — models, roles,
+each CLI's session id, owed reply queues, round state, shared project
+context — then your next message resumes through the normal continue path.
+The continuity contract itself is pinned token-free by `tests/test_restart.py`.
+
+Manual fallback: if the detached child died before coming up, run
+`pythonw app.py` in the repo root and reopen the newest chat from the rail.
+Sessions are crash-safe by construction (a truncated JSONL tail line is
+skipped, never fatal), so even a hard kill costs at most the in-flight turn.
 
 ## Tools the agents get
 

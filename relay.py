@@ -41,15 +41,51 @@ import workstreams
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSIONS_DIR = os.path.join(BASE_DIR, "sessions")
-TURN_TIMEOUT = 300  # seconds per agent turn (base; scaled by effort below)
+# THE TURN WATCHDOG MEASURES SILENCE, NOT DURATION.
+#
+# A turn is one CLI invocation running an agentic loop, and no CLI here caps it:
+# `claude --help` lists no turn timeout and no --max-turns (its only budget knob
+# is --max-budget-usd, API-mode only), and neither does `codex exec`. Every
+# limit a turn ever hit was ours. The first version was a single
+# threading.Timer over the whole child, which killed a seat that had streamed
+# 400 tool calls on exactly the same schedule as one hung on a dead socket at
+# 0:30 — while `on_line` fired for every one of those calls and touched
+# nothing. We held the liveness signal and threw it away.
+#
+# So: a child that keeps talking runs as long as the work takes; a child that
+# goes quiet is hung and dies in IDLE_TIMEOUT — FASTER than the old window.
+IDLE_TIMEOUT = 300  # seconds of silence that mean a hung child (effort-scaled)
+# Adapters that stream nothing (agy prints its JSON at the end) get no
+# liveness signal at all, so silence tells us nothing about them and duration
+# is the only bound available. Generous on purpose: it is a hang backstop, not
+# a work budget, and it is the one place a legitimate long turn can still die.
+NO_STREAM_TIMEOUT = 3600
+# Optional absolute ceiling for every seat (`--turn-cap MINUTES`). None = none.
+# Deliberately opt-in: an unbounded turn is the correct default now that the
+# idle watchdog catches real hangs, and the conversation-level spend/time caps
+# are where "stop eventually" is supposed to be expressed.
+TURN_HARD_CAP = None
+
+
+def _mins(seconds):
+    """A window, in the units a human would say it in."""
+    seconds = int(seconds or 0)
+    if seconds < 60:
+        return f"{seconds} second{'' if seconds == 1 else 's'}"
+    if seconds < 5400:
+        m = round(seconds / 60)
+        return f"{m} minute{'' if m == 1 else 's'}"
+    h = round(seconds / 360) / 10
+    h = int(h) if h == int(h) else h
+    return f"{h} hour{'' if h == 1 else 's'}"
 # Where agy parks everything a conversation produces, including generated
 # images (one folder per conversation id). It writes here regardless of the
 # process cwd — see GeminiAgent.harvest_images.
 HOME = os.path.expanduser("~")
 GEMINI_BRAIN = os.path.join(HOME, ".gemini", "antigravity-cli", "brain")
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
-# High reasoning efforts do real multi-minute work on real repos; give them
-# room instead of killing legitimate turns at the base window.
+# High reasoning efforts legitimately go quiet for longer between stream
+# events, so the SILENCE window scales with effort too.
 TIMEOUT_SCALE = {"high": 2, "xhigh": 3, "max": 3, "ultra": 3}
 WRAP_TOKEN = "[[WRAP]]"
 ERROR_MAX = 200
@@ -101,6 +137,10 @@ PRESET_MODES = {
     "panel-review": "panel",
     "build-execute": "supervisor",
     "live-room": "free",
+    # Keep Improving is Build Together with the brakes off: same barrier,
+    # manager, isolation and verification, but it chooses its own next
+    # objective instead of ending, and only Josh's limits stop it.
+    "keep-improving": "supervisor",
 }
 
 
@@ -651,6 +691,12 @@ class Agent:
     # already have this one" line, so adding a provider stays one entry.
     project_docs = ()
     tool_approval_hook = False
+    # Does this CLI emit progress on stdout/stderr WHILE it works? It decides
+    # which watchdog can be armed: silence only means "hung" for a CLI that
+    # would otherwise be talking. Same hard contract as native_spawn_note() —
+    # claiming a stream this adapter does not have gets legitimate turns
+    # killed at the idle window, which is the exact bug this replaced.
+    streams_progress = True
 
     def native_spawn_note(self):
         """One preamble sentence when THIS seat's config actually allows its
@@ -661,7 +707,7 @@ class Agent:
 
     def __init__(self, workspace, yolo=False, model=None, effort=None, name=None,
                  role=None, role_instructions=None, connectors=False,
-                 permission=None, on_approval=None, lean=False):
+                 permission=None, on_approval=None, lean=False, turn_cap=None):
         self.workspace = workspace
         # PERMISSION LEVEL. The single source of truth for what this seat may
         # do; `yolo` survives only as the legacy way of saying "full" and as a
@@ -693,8 +739,9 @@ class Agent:
         self.uid = uuid.uuid4().hex[:8]
         # Cancellation. `should_stop()` is only consulted at ROUND boundaries,
         # so a Stop pressed mid-fan-out used to wait for every in-flight CLI
-        # child to finish its turn — up to turn_timeout MINUTES, with replies
-        # still landing the whole time. That reads to a human as "Stop did
+        # child to finish its turn — and since a turn now runs as long as the
+        # work takes, that wait has NO upper bound at all, with replies still
+        # landing the whole time. That reads to a human as "Stop did
         # nothing" / "I have to stop each seat" (Josh, 2026-08-18). Stop has
         # to reach the child process. `_proc` is the live Popen (owned by the
         # seat's own thread, mutated under `_proc_lock` because cancel() is
@@ -704,11 +751,18 @@ class Agent:
         self._proc = None
         self._proc_lock = threading.Lock()
         self._cancelled = False
-        # High-effort seats legitimately exceed the base window on a real
-        # repo (a first xhigh turn in C:\ai-chat blew 300s twice, 2026-08-16).
-        # Instance attr on purpose: tests shrink it to seconds.
-        self.turn_timeout = TURN_TIMEOUT * TIMEOUT_SCALE.get(
-            (effort or "").lower(), 1)
+        # The two windows (see the IDLE_TIMEOUT block at the top of the file).
+        # `idle_timeout` is silence; `turn_timeout` is total duration and is
+        # None for anything that streams, because a talking child needs no
+        # duration bound. Instance attrs on purpose: tests shrink them to
+        # seconds and probation shrinks whichever one is armed.
+        scale = TIMEOUT_SCALE.get((effort or "").lower(), 1)
+        if self.streams_progress:
+            self.idle_timeout = IDLE_TIMEOUT * scale
+            self.turn_timeout = TURN_HARD_CAP if turn_cap is None else turn_cap
+        else:
+            self.idle_timeout = None
+            self.turn_timeout = NO_STREAM_TIMEOUT if turn_cap is None else turn_cap
         if name:  # instance attr shadows the class attr (duplicate-provider seats)
             self.name = name
         # Roles live on the agent (like `name`) so preamble() reads them without
@@ -948,10 +1002,12 @@ class Agent:
             rc, stdout, stderr = self._run_streaming(cmd, env, on_line)
         except TurnCancelled:
             raise
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
+            # _run_streaming raises TurnTimeout itself (it knows WHICH window
+            # fired); this stays as the backstop for any other path that
+            # surfaces a TimeoutExpired, and must not assume a window exists.
             raise TurnTimeout(
-                f"{self.name} timed out after "
-                f"{self.turn_timeout // 60} minutes; "
+                f"{self.name} timed out after {_mins(e.timeout)}; "
                 "it may have changed files in the workspace."
             ) from None
         except (OSError, ValueError) as e:
@@ -1010,7 +1066,12 @@ class Agent:
         (the seat's own thread — single-owner contract). stderr is drained by
         a helper thread (unread stderr deadlocks the child on Windows once
         the pipe buffer fills). Returns (returncode, stdout, stderr); raises
-        subprocess.TimeoutExpired when the watchdog killed the child."""
+        TurnTimeout when a watchdog killed the child.
+
+        TWO watchdogs, and the important one is `idle_timeout`: every line on
+        EITHER pipe restarts its clock, so the window measures how long the
+        child has been quiet rather than how long it has been working.
+        `turn_timeout` is the optional absolute ceiling and is normally None."""
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
@@ -1032,30 +1093,56 @@ class Agent:
                 proc.kill()
             except (OSError, ValueError):
                 pass
+        started = time.monotonic()
+        # Last sign of life from EITHER pipe. A CLI that narrates to stderr
+        # while it works (or one whose stdout is buffered upstream) is alive,
+        # and reading only stdout would bench it as hung.
+        last_seen = [started]
         err_parts = []
-        t_err = threading.Thread(
-            target=lambda: err_parts.append(proc.stderr.read()), daemon=True)
-        t_err.start()
-        timed_out = threading.Event()
 
-        def _kill():
-            timed_out.set()
-            try:
-                proc.kill()
-            except OSError:
-                pass
-        watchdog = threading.Timer(self.turn_timeout, _kill)
-        watchdog.daemon = True
-        watchdog.start()
+        def _drain_err():
+            for line in proc.stderr:
+                last_seen[0] = time.monotonic()
+                err_parts.append(line)
+        t_err = threading.Thread(target=_drain_err, daemon=True)
+        t_err.start()
+        timed_out = []                   # [] | ["idle"] | ["cap"]
+        finished = threading.Event()
+        idle, cap = self.idle_timeout, self.turn_timeout
+
+        def _watch():
+            # Polling, not a Timer: the idle deadline moves every time the
+            # child speaks, and rescheduling a Timer per line would churn a
+            # thread for every one of a chatty turn's thousands of events.
+            while not finished.wait(0.25):
+                now = time.monotonic()
+                if idle and now - last_seen[0] >= idle:
+                    timed_out.append("idle")
+                elif cap and now - started >= cap:
+                    timed_out.append("cap")
+                else:
+                    continue
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                return
+        watchdog = None
+        if idle or cap:
+            watchdog = threading.Thread(target=_watch, daemon=True)
+            watchdog.start()
         out = []
         try:
             for line in proc.stdout:
+                last_seen[0] = time.monotonic()
                 out.append(line)
                 if on_line:
                     on_line(line)
             rc = proc.wait()
         finally:
-            watchdog.cancel()
+            finished.set()
+            if watchdog is not None:
+                watchdog.join(timeout=1)
             if proc.poll() is None:      # reader raised mid-stream: reap
                 try:
                     proc.kill()
@@ -1076,9 +1163,20 @@ class Agent:
         # "it timed out" would send Josh looking for a hang that never was.
         if self.cancelled():
             raise TurnCancelled(f"{self.name}: stopped by Josh mid-turn")
-        if timed_out.is_set():
-            raise subprocess.TimeoutExpired(cmd, self.turn_timeout,
-                                            output=stdout, stderr=stderr)
+        if timed_out:
+            # Name which watchdog fired. "Went silent" and "hit the ceiling
+            # you set" send Josh to completely different places, and the old
+            # single sentence ("timed out after 15 minutes") described work
+            # that was still going fine — which is how a working seat came to
+            # read as a broken app.
+            if timed_out[0] == "idle":
+                detail = (f"went silent for {_mins(idle)} — no output at all, "
+                          f"so it is hung rather than working")
+            else:
+                detail = f"hit the {_mins(cap)} limit for a single turn"
+            raise TurnTimeout(
+                f"{self.name} {detail}; it may have changed files in the "
+                f"workspace.")
         return rc, stdout, stderr
 
     def capability_note(self):
@@ -1692,6 +1790,11 @@ class GeminiAgent(Agent):
     # Verified by grepping agy.exe: it references both AGENTS.md and GEMINI.md
     # (plus a contextFileName setting).
     project_docs = ("AGENTS.md", "GEMINI.md")
+    # agy prints one JSON blob when it is finished and nothing before it — it
+    # has no activity() hook for the same reason. So silence carries NO
+    # information here and the idle watchdog cannot be armed; this is the one
+    # seat that still dies on the clock rather than on evidence.
+    streams_progress = False
 
     def build_cmd(self, message):
         cmd = ["agy", "-p", message, "--output-format", "json"]
@@ -2775,8 +2878,12 @@ CLEAR_NOTE = ("(Josh cleared your context: you are rejoining the conversation "
               "fresh. Catch up from the messages that follow.)")
 
 HELP_TEXT = ("Commands: /clear [seat] · /compact [seat] · /next <seat> · "
+             "/stats · "
+             "/files [N] · "
              "/retro · /turns N · "
-             "/ceiling N (until-done chats) · /stop · /help — seat is a name "
+             "/ceiling N (until-done chats) · "
+             "/checkin · /objective <text> · /limits (Keep Improving) · "
+             "/stop · /help — seat is a name "
              "('claude 2') or a provider (claude/gpt/gemini); no seat means "
              "every seat. Roles are edited on the seat cards — Apply role "
              "change compacts that seat so it keeps its memory.")
@@ -3060,6 +3167,12 @@ class SessionStore:
             "supervisor_wave_index": int(
                 state.get("supervisor_wave_index") or 1),
             "supervisor_trace": list(state.get("supervisor_trace") or []),
+            # Keep Improving. Additive like brief/spawn: old code ignoring it
+            # simply reads a supervisor chat, never a wrong one. The clock and
+            # the objective list live here so a reopened run resumes mid-job
+            # instead of being handed a fresh set of hours.
+            "continuous": (continuous_policy(state.get("continuous"))
+                           if state.get("continuous") else None),
             "until_done": bool(state.get("until_done")),
             "turn_ceiling": state.get("turn_ceiling"),
             "spawn": state.get("spawn"),
@@ -3764,6 +3877,24 @@ def brief_preamble_block(brief, agent=None):
             + (brief.get("digest") or "").strip() + "\n\n")
 
 
+def was_interrupted(meta):
+    """True when this chat's PROCESS died mid-run, rather than the run ending.
+
+    `run_rounds` stamps `lifecycle: "active"` on entry and, in its `finally`,
+    `paused` plus a `termination_reason` on every exit path — cap, wrap, stop,
+    fatal, even an exception on the way out. So "active with no reason" can
+    only mean the process itself went away: a force quit, a power cut, or the
+    seats restarting the app on themselves.
+
+    That is the ONE ending nobody chose, which is why it is the only one worth
+    resuming automatically. Every other ending was a decision and reopening
+    should leave it alone.
+    """
+    completion = (meta or {}).get("completion") or {}
+    return (completion.get("lifecycle") == "active"
+            and not completion.get("termination_reason"))
+
+
 def supervisor_status(meta):
     """One-glance supervision state for a rail row, or None.
 
@@ -3935,6 +4066,8 @@ def session_summary(session_dir, meta=None):
         "supervisor_wave_index": int(meta.get("supervisor_wave_index") or 1),
         "supervisor_trace": list(meta.get("supervisor_trace") or []),
         "supervisor_status": supervisor_status(meta),
+        "interrupted": was_interrupted(meta),
+        "continuous": meta.get("continuous") or None,
         "tasks": list(meta.get("workstreams") or []),
         "goal": meta.get("topic", ""),
         "brief": meta.get("brief") or None,
@@ -3947,6 +4080,9 @@ def session_summary(session_dir, meta=None):
         "until_done": bool(meta.get("until_done")),
         "spawn": meta.get("spawn") or {},
         "parent": meta.get("parent"),
+        # provenance for forked chats ("branched from …" in the rail tooltip);
+        # absent on every chat that was never forked
+        "fork_of": meta.get("fork_of"),
         "workspace": meta.get("workspace", ""),
         "project": session_project(session_dir, meta.get("workspace", "")),
         "transcript": os.path.join(session_dir, "transcript.md"),
@@ -3972,6 +4108,183 @@ def list_sessions():
     out.sort(key=lambda s: (s.get("updated") or "", s.get("id") or ""),
              reverse=True)
     return out
+
+
+# ---- cross-chat search (2026-08-23) ----------------------------------------
+# Bridge-thread rules apply wherever this is called from the app: bounded file
+# reads only, never a subprocess. Every bound here exists so a hundred long
+# chats still answer in well under a second.
+SEARCH_SCAN_MAX_CHARS = 262144        # transcript text scanned per chat
+SEARCH_HITS_PER_CHAT = 3              # snippets kept per chat
+SEARCH_CHATS_MAX = 40                 # chats returned, best first
+SEARCH_COUNT_CAP = 999                # occurrences counted per chat, then stop
+SEARCH_SNIPPET_CHARS = 150            # excerpt width around a hit
+
+
+def _search_excerpt(text, pos, width=SEARCH_SNIPPET_CHARS):
+    """A window around pos, whitespace-collapsed and edge-ellipsized."""
+    half = max(0, width // 2)
+    start = max(0, pos - half)
+    end = min(len(text), pos + half)
+    prefix = "…" if start else ""
+    suffix = "…" if end < len(text) else ""
+    return prefix + " ".join(text[start:end].split()) + suffix
+
+
+def _search_plain_text(needle, path):
+    """Occurrences + snippets in one plain-text file, bounded bytes.
+
+    The byte bound charges every line BEFORE it is searched but never
+    skips a line without looking inside it: an oversized line gets its
+    chance, and scanning stops after it. Excerpts are cut from the
+    casefolded text, since match positions come from there.
+    """
+    count, snippets, seen = 0, [], 0
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if count >= SEARCH_COUNT_CAP:
+                    break
+                over = seen + len(line) > SEARCH_SCAN_MAX_CHARS
+                seen += len(line)
+                low = line.casefold()
+                pos = low.find(needle)
+                while pos != -1 and count < SEARCH_COUNT_CAP:
+                    count += 1
+                    if len(snippets) < SEARCH_HITS_PER_CHAT:
+                        snippets.append({"name": "", "ts": "",
+                                         "excerpt": _search_excerpt(low, pos)})
+                    pos = low.find(needle, pos + len(needle))
+                if over:
+                    break
+    except OSError:
+        pass
+    return count, snippets
+
+
+def _search_message_rows(needle, path):
+    """Occurrences + snippets in messages.jsonl.
+
+    Relay service notes (origin "relay") are skipped — "Reopened for
+    reading" is furniture, not content. One snippet per matching row until
+    SEARCH_HITS_PER_CHAT, so three hits in one row don't eat the budget.
+    Returns ``(count, snippets, usable, unusable)``: ``usable`` rows are
+    dicts whose text was searched; ``unusable`` counts non-blank lines
+    that yielded no JSON object — a DEGRADED log, where the transcript
+    can hold words the surviving rows never carried. The byte bound
+    charges every line before it is searched but never skips a line
+    without looking inside it. Excerpts are cut from the casefolded
+    text, since match positions come from there (a fold expansion like
+    ß→ss would otherwise slide the window off its own hit).
+    """
+    count, snippets, seen, usable, unusable = 0, [], 0, 0, 0
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                if count >= SEARCH_COUNT_CAP:
+                    break
+                # charge BEFORE searching, but never skip a line without
+                # looking inside it: the buster itself gets its chance,
+                # and scanning stops after it
+                over = seen + len(raw) > SEARCH_SCAN_MAX_CHARS
+                seen += len(raw)
+                stripped = raw.strip()
+                if stripped:
+                    try:
+                        loaded = json.loads(stripped)
+                    except ValueError:
+                        loaded = None
+                    if not isinstance(loaded, dict):
+                        unusable += 1      # torn write, garbage, wrong shape
+                    else:
+                        usable += 1
+                        if loaded.get("origin") != "relay":
+                            text = loaded.get("text")
+                            if isinstance(text, str) and text:
+                                low = text.casefold()
+                                pos = low.find(needle)
+                                if pos != -1:
+                                    first_at = pos
+                                    while pos != -1 and count < SEARCH_COUNT_CAP:
+                                        count += 1
+                                        pos = low.find(needle,
+                                                       pos + len(needle))
+                                    if len(snippets) < SEARCH_HITS_PER_CHAT:
+                                        snippets.append({
+                                            "name": (loaded.get("name")
+                                                     or loaded.get("speaker")
+                                                     or ""),
+                                            "ts": loaded.get("ts") or "",
+                                            "excerpt": _search_excerpt(
+                                                low, first_at)})
+                if over:
+                    break
+    except OSError:
+        pass
+    return count, snippets, usable, unusable
+
+
+def search_sessions(query):
+    """Full-text search across every saved chat.
+
+    Title matches rank first, then hit count, newest first within ties.
+    Legacy transcript-only chats are searched too (transcript.md fallback),
+    because view-only must not mean unfindable — and a DEGRADED log (rows
+    beside corrupt lines) reads its transcript instead, so a crash can
+    half-eat a chat's findability. Returns a small payload: per chat only
+    id/title/project/providers/updated/count/snippets — never whole
+    messages.
+    """
+    needle = " ".join((query or "").split()).casefold()
+    empty = {"query": query or "", "chats": [], "truncated": False}
+    if not needle:
+        return empty
+    try:
+        names = os.listdir(SESSIONS_DIR)
+    except OSError:
+        return empty
+    chats = []
+    for name in sorted(names):
+        d = os.path.join(SESSIONS_DIR, name)
+        if not os.path.isdir(d):
+            continue
+        summary = session_summary(d)
+        title_match = needle in (summary.get("title") or "").casefold()
+        msgs_path = os.path.join(d, SESSION_MSGS)
+        if os.path.exists(msgs_path):
+            count, snippets, usable, unusable = _search_message_rows(
+                needle, msgs_path)
+            if not usable or unusable:
+                # Zero usable rows is the legacy shape: the words live only
+                # in the transcript. A DEGRADED log (rows beside lines that
+                # no longer parse — a mid-write crash leaves exactly that)
+                # reads its transcript INSTEAD: the transcript mirrors every
+                # recorded message, so replacing keeps counts honest where
+                # merging would double them; the cost is losing per-row
+                # snippet names and letting relay furniture through — both
+                # acceptable for a chat whose log is known-broken. A CLEAN
+                # file never falls back — that would re-find furniture the
+                # rows already filtered out.
+                count, snippets = _search_plain_text(
+                    needle, os.path.join(d, "transcript.md"))
+        else:
+            count, snippets = _search_plain_text(
+                needle, os.path.join(d, "transcript.md"))
+        if not (count or title_match):
+            continue
+        chats.append({
+            "id": summary["id"], "title": summary["title"],
+            "project": summary.get("project") or "",
+            "updated": summary.get("updated") or "",
+            "providers": [p.get("provider")
+                          for p in summary.get("participants") or []],
+            "count": min(count, SEARCH_COUNT_CAP),
+            "title_match": title_match,
+            "snippets": snippets[:SEARCH_HITS_PER_CHAT]})
+    chats.sort(key=lambda c: c.get("updated") or "", reverse=True)
+    chats.sort(key=lambda c: (not c["title_match"], -c["count"]))
+    return {"query": needle, "chats": chats[:SEARCH_CHATS_MAX],
+            "truncated": len(chats) > SEARCH_CHATS_MAX}
 
 
 def rehydrate(meta, workspace=None):
@@ -4041,6 +4354,8 @@ def rehydrate(meta, workspace=None):
         "supervisor_waves": int(meta.get("supervisor_waves") or 0),
         "supervisor_wave_index": int(meta.get("supervisor_wave_index") or 1),
         "supervisor_trace": list(meta.get("supervisor_trace") or []),
+        "continuous": (continuous_policy(meta.get("continuous"))
+                       if meta.get("continuous") else None),
         "until_done": bool(meta.get("until_done")),
         "turn_ceiling": meta.get("turn_ceiling"),
         "spawn": meta.get("spawn"),
@@ -4294,6 +4609,96 @@ def skip_kind(exc):
     """UI label for a no-retry skip. A stop Josh asked for must not be
     reported as a timeout — he would go hunting for a hang that never was."""
     return "stopped" if isinstance(exc, TurnCancelled) else "timeout"
+
+
+# How the automatic second attempt behaves when the PROVIDER wobbled rather
+# than us breaking something. From a real session on 2026-08-23: four `ox`
+# seats whose free endpoint kept answering `finish_reason: network_error`.
+# The retry fired instantly into the identical wall, and then got the full
+# effort-scaled watchdog — so three seats spent 15 minutes each discovering
+# what the provider had already said, and the conversation looked dead.
+RETRY_BACKOFF = 20          # seconds to let a wobbling endpoint settle
+PROBATION_TIMEOUT = 120     # watchdog for that second attempt
+
+_TRANSIENT = re.compile(
+    r"network_error|endpoint is unavailable|temporarily unavailable"
+    r"|\b(?:429|500|502|503|504|529)\b|rate.?limit|overloaded"
+    r"|econnreset|socket hang up|connection reset|bad gateway"
+    r"|upstream request failed", re.I)
+
+
+def transient_error(exc):
+    """True when the failure reads as the provider wobbling, not our bug.
+
+    Deliberately excludes our OWN watchdog (`TurnTimeout`): that already has a
+    no-retry path, and matching it here would hand a genuinely hung seat a
+    second window it must never get. A dead session id, a missing CLI and an
+    auth failure are all excluded too — a backoff only delays a failure that
+    is never going to heal on its own.
+    """
+    if isinstance(exc, (TurnTimeout, TurnCancelled)):
+        return False
+    return bool(_TRANSIENT.search(str(exc or "")))
+
+
+def armed_window(agent):
+    """``(attribute name, seconds)`` for the watchdog this seat actually runs
+    under — silence for a streaming seat, total duration for one that streams
+    nothing. Probation and the retry notice both have to reach the window that
+    is ARMED; shrinking the other one is a no-op that reads like a fix."""
+    idle = getattr(agent, "idle_timeout", None)
+    if idle:
+        return "idle_timeout", idle
+    return "turn_timeout", getattr(agent, "turn_timeout", None) or NO_STREAM_TIMEOUT
+
+
+def retry_plan(agent, exc):
+    """``(seconds to wait, watchdog for the retry)`` for one second attempt.
+
+    A non-transient failure keeps today's behaviour exactly: no wait, full
+    window. Probation never LENGTHENS a window — a cheap seat with a short
+    one must not be given more time because its provider failed.
+    """
+    _, full = armed_window(agent)
+    if not transient_error(exc):
+        return 0, full
+    return RETRY_BACKOFF, min(full, PROBATION_TIMEOUT)
+
+
+def backoff_wait(io, seconds, abort=None):
+    """Pause before a retry without going deaf. True if we were stopped.
+
+    Josh pressing Stop during the wait must not have to sit through it — the
+    whole point of this change is that a bad provider stops costing minutes.
+    """
+    if not seconds:
+        return False
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        try:
+            if io.should_stop() or (abort is not None and abort()):
+                return True
+        except Exception:
+            pass                      # a front end that cannot answer is not
+                                      # a reason to skip the backoff entirely
+        time.sleep(0.25)
+    return False
+
+
+@contextlib.contextmanager
+def retry_window(agent, window):
+    """Run the second attempt under `window`, then put the real one back.
+
+    One thread owns an Agent at a time (the parallel/free contract), so
+    mutating its watchdog here is safe; the finally is what keeps it true for
+    the seat's NEXT turn — probation is per-retry, never sticky.
+    """
+    attr, original = armed_window(agent)
+    setattr(agent, attr, window)
+    try:
+        yield window
+    finally:
+        setattr(agent, attr, original)
 
 
 def cancel_all(state):
@@ -4592,8 +4997,10 @@ def preamble(agent, others, topic, turns, workspace, roster=None,
         if note:
             spawn_lines.append(
                 f"- {note} Keep side-tasks rare and small: each spends real "
-                f"account usage, and your whole turn must finish within "
-                f"{TURN_TIMEOUT // 60} minutes.")
+                f"account usage. Your turn has no time limit — take as long "
+                f"as the work needs — but it is cut off if it produces no "
+                f"output at all for a long stretch, so keep working visibly "
+                f"rather than stalling.")
     if int((spawn or {}).get("max_helpers") or 0) > 0:
         spawn_lines.append(
             f"- You may spawn a one-shot helper AI: END a reply with "
@@ -4887,6 +5294,167 @@ class CLIIO(LoopIO):
             status(p.get("message", ""))
 
 
+def session_stats(state):
+    """The read-only snapshot behind /stats: progress, who spoke how much,
+    what it cost, and which side calls ran.
+
+    Everything derives from state plus the already-persisted rows — no
+    subprocesses, no writes beyond the notice itself, safe on either front
+    end's command path. A seat whose CLI reports no cost stays honestly
+    blank rather than estimated."""
+    agents = state["agents"]
+    spoke = {}
+    for row in read_messages(state["store"].dir):
+        entry = spoke.setdefault(str(row.get("speaker")),
+                                 {"replies": 0, "words": 0, "last": ""})
+        entry["replies"] += 1
+        entry["words"] += len(str(row.get("text") or "").split())
+        stamp = str(row.get("ts") or "")
+        if len(stamp) >= 16:
+            entry["last"] = max(entry["last"], stamp[11:16])
+    usage = state.get("usage") or {}
+    seat_usage = usage.get("by_seat") or {}
+
+    mode = state.get("mode", DEFAULT_MODE)
+    if continuous_on(state):
+        progress = f"turn {state.get('turn', 0)} · no turn cap"
+    elif state.get("until_done"):
+        progress = (f"turn {state.get('turn', 0)} of "
+                    f"{effective_ceiling(state)} ceiling")
+    else:
+        progress = f"round {state.get('rnd', 0)}/{state.get('max', '?')}"
+    title = state.get("title") or state.get("topic") or ""
+    head = (f"Stats — {title} · {mode} · {progress}"
+            if title else f"Stats — {mode} · {progress}")
+
+    lines = [head]
+    for i, agent in enumerate(agents):
+        sid = str(state["slot_ids"][i])
+        s = spoke.get(sid, {})
+        u = seat_usage.get(sid) or {}
+        facts = [f"{s.get('replies', 0)} replies", f"{s.get('words', 0)} words"]
+        cost = u.get("cost_usd")
+        if cost is not None:
+            facts.append(f"${cost:.4f}")
+        tokens = int(u.get("total_tokens") or 0)
+        if tokens:
+            facts.append(f"{tokens:,} tok")
+        last = s.get("last")
+        if last:
+            facts.append(f"last {last}")
+        who = [state.get("providers", [])[i] if i < len(state.get("providers", []))
+               else "", getattr(agent, "model", "") or "",
+               getattr(agent, "role", "") or ""]
+        label = f"{agent.name} ({' · '.join(x for x in who if x)})"
+        lines.append(f"{label}: " + " · ".join(facts))
+
+    totals = []
+    if usage.get("total_cost_usd"):
+        totals.append(f"${usage['total_cost_usd']:.4f}")
+    t_in = int(usage.get("input_tokens") or 0)
+    t_out = int(usage.get("output_tokens") or 0)
+    if t_in or t_out:
+        totals.append(f"{t_in:,} in / {t_out:,} out tok")
+    totals.append(f"Josh {spoke.get('josh', {}).get('replies', 0)} msgs")
+    totals.append(f"{spoke.get('system', {}).get('replies', 0)} relay notes")
+    lines.append("Totals: " + " · ".join(totals))
+
+    sides = sorted(
+        (k, int(v.get("calls") or 0))
+        for k, v in (usage.get("by_kind") or {}).items()
+        if k != "seat" and isinstance(v, dict) and v.get("calls"))
+    if sides:
+        lines.append("Side calls: "
+                     + ", ".join(f"{k} x{c}" for k, c in sides if c))
+    return "\n".join(lines)
+
+
+# ---- /files: workspace artifacts on demand ----------------------------------
+# The app has a Files rail; the CLI has nothing, and "what did you actually
+# make?" was previously answerable only by leaving the terminal. A /files
+# note is also a persisted system row, so an old transcript keeps a dated
+# snapshot of what existed when it was asked. Bounded like every walk in
+# this repo: junk dirs skipped, scan capped, rows capped.
+FILES_DEFAULT_LIMIT = 12            # rows shown without an argument
+FILES_MAX_LIMIT = 50                # /files N clamps here
+FILES_WALK_MAX = 4000               # entries examined before giving up
+_FILES_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+
+
+def _human_size(n):
+    """Compact byte count for one listing row (mirrors the UI's fmtSize)."""
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        if n < 10240:
+            return f"{n / 1024:.1f} KB"
+        return f"{round(n / 1024)} KB"
+    return f"{n / 1048576:.1f} MB"
+
+
+def workspace_files(state, limit=FILES_DEFAULT_LIMIT):
+    """The read-only scan behind /files.
+
+    Pure bounded file IO — no subprocess — so it is safe on either front
+    end's command path. Returns (rows, total, truncated): rows are
+    (relpath, size, mtime) newest-first and already cut to `limit`, total
+    counts every regular file the bounded walk saw, truncated says whether
+    the walk budget ran out (the true count may be higher)."""
+    limit = max(1, min(FILES_MAX_LIMIT, int(limit)))
+    ws = state.get("workspace")
+    rows, total, truncated = [], 0, False
+    if ws and os.path.isdir(ws):
+        root = os.path.realpath(ws)
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames
+                           if d not in _FILES_SKIP_DIRS
+                           and not d.startswith(".")]
+            for fn in filenames:
+                total += 1
+                if total > FILES_WALK_MAX:
+                    truncated = True
+                    dirnames[:] = []
+                    break
+                full = os.path.join(dirpath, fn)
+                try:
+                    st = os.stat(full)
+                except OSError:
+                    continue
+                rows.append((os.path.relpath(full, root),
+                             st.st_size, st.st_mtime))
+            if truncated:
+                break
+        rows.sort(key=lambda r: r[2], reverse=True)
+        rows = rows[:limit]
+    return rows, total, truncated
+
+
+def format_workspace_files(state, arg=""):
+    """The whole /files note: usage error, empty folder, or the listing."""
+    arg = (arg or "").strip()
+    if arg and not arg.isdigit():
+        return (f"Usage: /files [N] — newest N files "
+                f"(default {FILES_DEFAULT_LIMIT}, max {FILES_MAX_LIMIT}).")
+    limit = int(arg) if arg else FILES_DEFAULT_LIMIT
+    if not os.path.isdir(state.get("workspace") or ""):
+        return "No working folder to list."
+    rows, total, truncated = workspace_files(state, limit)
+    if not total:
+        return "The working folder is empty so far."
+    today = datetime.date.today()
+    lines = []
+    for rel, size, mtime in rows:
+        when = datetime.datetime.fromtimestamp(mtime)
+        stamp = (when.strftime("%H:%M") if when.date() == today
+                 else when.strftime("%Y-%m-%d %H:%M"))
+        lines.append(f"  {rel} · {_human_size(size)} · {stamp}")
+    scope = f"{len(rows)} of {total}" if len(rows) < total else str(total)
+    if truncated:
+        scope += "+ (walk budget hit)"
+    lines.insert(0, f"Workspace files ({scope}, newest first):")
+    return "\n".join(lines)
+
+
 def dispatch_command(state, text, io):
     """Handle a /command from Josh. Returns True if the run should stop.
 
@@ -4941,12 +5509,50 @@ def dispatch_command(state, text, io):
         io.emit("status", {"text": note})
         state["store"].system(note, round=state["rnd"])
         state["store"].save(state)
+    elif cmd in ("checkin", "objective", "limits"):
+        if not continuous_on(state):
+            note = ("/%s only means something in a Keep Improving "
+                    "conversation." % cmd)
+        elif cmd == "limits":
+            note = describe_limits(state)
+        elif cmd == "objective":
+            if not arg:
+                note = "Usage: /objective <what to work on next>"
+            else:
+                # Steering, not an override: the objective the manager is on
+                # right now keeps its wave; this lands as the seats' next
+                # instruction and as the manager's stated next goal.
+                state["continuous"].setdefault("objectives", []).append(arg)
+                state["supervisor_goal"] = arg
+                for j in range(len(state.get("agents") or ())):
+                    state["pending"][j].append(
+                        "Josh (human) set the next objective: " + arg)
+                note = "Next objective set: " + arg
+        else:
+            # A check-in on demand is the same call the schedule makes, so it
+            # also resets the clock — asking now and being asked again in two
+            # minutes would be its own kind of broken.
+            state["continuous"]["checkin_now"] = True
+            note = "Check-in armed — it runs at the next turn boundary."
+        io.emit("status", {"text": note})
+        state["store"].system(note, round=state["rnd"])
+        state["store"].save(state)
     elif cmd == "retro":
         try:
             _playbook, note, path = retro.run_retro(SESSIONS_DIR)
             note += f"\nPlaybook: {path}"
         except OSError as e:
             note = f"Retro could not update the playbook: {e}"
+        io.emit("status", {"text": note})
+        state["store"].system(note, round=state["rnd"])
+        state["store"].save(state)
+    elif cmd == "stats":
+        note = session_stats(state)
+        io.emit("status", {"text": note})
+        state["store"].system(note, round=state["rnd"])
+        state["store"].save(state)
+    elif cmd == "files":
+        note = format_workspace_files(state, arg)
         io.emit("status", {"text": note})
         state["store"].system(note, round=state["rnd"])
         state["store"].save(state)
@@ -5567,6 +6173,13 @@ def supervisor_trace(state, io, phase, title, detail="", **facts):
         "wave": "plan_created",
         "accepted": "goal_accepted",
         "error": "supervisor_error",
+        # Keep Improving. These render through the same generic row (type,
+        # title, detail), so no UI work is needed for them to be legible.
+        "objective": "objective_set",
+        "checkin": "health_check",
+        "gate": "gate_result",
+        "revived": "run_revived",
+        "limit": "limit_reached",
     }.get(str(phase or ""), "supervisor_activity")
     entry = {
         "id": uuid.uuid4().hex[:12],
@@ -5610,7 +6223,13 @@ SUPERVISOR_PROMPT = (
     "5. Write one or two sentences of rationale, then END your reply with "
     "the task directives, one per line, nothing after them:\n"
     "[[TASK: <id> | owner=<seat id> | files=<a,b> | deps=<id,id> | "
-    "brief]]\n\n"
+    "brief]]\n"
+    "6. Do NOT ask clarifying questions, and do NOT run a brainstorming or "
+    "planning skill. Nobody is going to answer you: this is ONE stateless "
+    "call whose only output that matters is the task directives. Where the "
+    "goal is open-ended, pick a reasonable reading, say which one you picked "
+    "in the rationale, and plan against it. A reply with no directives is a "
+    "wasted call and the session then runs with no plan at all.\n\n"
     "{playbook}"
     "Goal:\n{goal}"
 )
@@ -6088,11 +6707,22 @@ def supervise_next_wave(state, io):
     body = (body or "").strip()
     if done is not None:
         verdict = (done or "").strip() or "the goal is met"
-        supervisor_trace(state, io, "accepted", "Goal accepted as met",
-                         body or verdict, status="done")
-        io.emit("message", state["log"](
-            "relay", "Supervisor closed the job: " + verdict
-                     + (("\n\n" + body) if body else "")))
+        # In Keep Improving this closes the OBJECTIVE, not the job — and the
+        # UI lifts `goal_accepted` out of the stream into a "Supervisor closed
+        # the job" verdict card. Rendering that for a run about to pick its
+        # next objective would say the opposite of what happens next.
+        if continuous_on(state):
+            supervisor_trace(state, io, "objective", "Objective met",
+                             body or verdict, status="done")
+            io.emit("message", state["log"](
+                "relay", "Objective met: " + verdict
+                         + (("\n\n" + body) if body else "")))
+        else:
+            supervisor_trace(state, io, "accepted", "Goal accepted as met",
+                             body or verdict, status="done")
+            io.emit("message", state["log"](
+                "relay", "Supervisor closed the job: " + verdict
+                         + (("\n\n" + body) if body else "")))
         state["store"].save(state)
         return "done"
     known_ids = {t["id"] for t in tasks}
@@ -6138,6 +6768,990 @@ def supervise_next_wave(state, io):
     assign_workstreams(state, io)
     state["store"].save(state)
     return "assigned"
+
+
+# ---------------------------------------------------------------------------
+# Continuous improvement — the "Keep Improving" mode
+# ---------------------------------------------------------------------------
+# The Supervisor is already a rolling manager: plan -> isolated workstreams ->
+# filesystem verification -> repair -> review -> re-plan. It stops for exactly
+# three reasons, and continuous mode removes all three:
+#
+#   1. `[[DONE]]` ends the run          -> here it starts the NEXT objective
+#   2. SUPERVISOR_MAX_WAVES is global   -> here it is per objective
+#   3. the turn ceiling                 -> here it is absent (see
+#                                          `effective_ceiling`); the only
+#                                          brakes are the ones Josh set
+#
+# Everything below obeys the rules of the machinery it extends: nothing is
+# forged on a failure, every new directive is opted into rather than added to
+# KNOWN_DIRECTIVES, every side call happens at the barrier where no seat
+# thread is alive, and every decision becomes a visible trace entry.
+
+CHECKIN_MIN_MINUTES = 5
+CHECKIN_MAX_MINUTES = 1440
+CHECKIN_ACTIONS = ("auto", "notify", "permission")
+CHECKIN_DEFAULT_MINUTES = 30
+GATE_TIMEOUT = 900              # a whole suite, not a unit test
+GATE_TAIL = 2000
+MAX_BARREN_REVIVALS = 3         # restarts that committed nothing at all
+OBJECTIVE_HISTORY_MAX = 40
+
+
+def _opt_number(value, cast=float):
+    """A limit is a real positive number, or None.
+
+    Garbage is None, never 0 — a limit of zero would read as "stop
+    immediately", which is the opposite of what an unset field means.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = cast(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out > 0 else None
+
+
+def continuous_policy(value=None):
+    """One complete, JSON-safe continuous-mode recipe.
+
+    Same discipline as `normalize_orchestration`: an unknown value falls back
+    to a documented default rather than being half-honored, and the result is
+    always the full shape so no reader needs a `.get` chain. Every limit is
+    nullable, and ALL of them being null is a legal, deliberate choice — the
+    run then ends only on Josh's Stop button, which the warning modal says in
+    exactly those words.
+    """
+    base = {
+        "on": False,
+        "objectives": [],
+        "checkin": {"minutes": CHECKIN_DEFAULT_MINUTES, "action": "notify"},
+        "limits": {"spend_usd": None, "hours": None, "watchdog_may_stop": True},
+        "gate": {"command": "", "commit": False, "allow_dirty": False,
+                 "dirty_at_start": False, "last": None},
+        "elapsed_s": 0.0,
+        "last_checkin_s": 0.0,
+        "turn_at_checkin": 0,
+        "stuck": {},
+        "barren_revivals": 0,
+        "history": [],
+    }
+    if not isinstance(value, dict):
+        return base
+    out = json.loads(json.dumps(base))
+    out["on"] = bool(value.get("on"))
+
+    objectives = value.get("objectives")
+    if isinstance(objectives, list):
+        out["objectives"] = [str(g)[:400] for g in objectives
+                             if str(g or "").strip()][-OBJECTIVE_HISTORY_MAX:]
+
+    checkin = value.get("checkin")
+    if isinstance(checkin, dict):
+        minutes = _opt_number(checkin.get("minutes"))
+        if minutes is not None:
+            out["checkin"]["minutes"] = int(min(CHECKIN_MAX_MINUTES,
+                                                max(CHECKIN_MIN_MINUTES,
+                                                    round(minutes))))
+        if checkin.get("action") in CHECKIN_ACTIONS:
+            out["checkin"]["action"] = checkin["action"]
+
+    limits = value.get("limits")
+    if isinstance(limits, dict):
+        out["limits"]["spend_usd"] = _opt_number(limits.get("spend_usd"))
+        out["limits"]["hours"] = _opt_number(limits.get("hours"))
+        if isinstance(limits.get("watchdog_may_stop"), bool):
+            out["limits"]["watchdog_may_stop"] = limits["watchdog_may_stop"]
+
+    gate = value.get("gate")
+    if isinstance(gate, dict):
+        out["gate"]["command"] = str(gate.get("command") or "").strip()[:500]
+        out["gate"]["commit"] = bool(gate.get("commit"))
+        out["gate"]["allow_dirty"] = bool(gate.get("allow_dirty"))
+        out["gate"]["dirty_at_start"] = bool(gate.get("dirty_at_start"))
+        if isinstance(gate.get("last"), dict):
+            out["gate"]["last"] = gate["last"]
+
+    for key, cast in (("elapsed_s", float), ("last_checkin_s", float),
+                      ("turn_at_checkin", int), ("barren_revivals", int)):
+        try:
+            out[key] = max(cast(0), cast(value.get(key, 0)))
+        except (TypeError, ValueError):
+            pass
+    if value.get("checkin_now"):
+        out["checkin_now"] = True
+    if isinstance(value.get("stuck"), dict):
+        out["stuck"] = {str(k): int(v) for k, v in value["stuck"].items()
+                        if isinstance(v, int) and not isinstance(v, bool)}
+    if isinstance(value.get("history"), list):
+        out["history"] = value["history"][-OBJECTIVE_HISTORY_MAX:]
+    return out
+
+
+def continuous_on(state):
+    """True when this conversation is a Keep Improving run."""
+    pol = state.get("continuous")
+    return bool(isinstance(pol, dict) and pol.get("on"))
+
+
+def effective_ceiling(state):
+    """The until-done turn ceiling, or None when the run is unbounded.
+
+    NEVER inline `state.get("turn_ceiling") or DEFAULT_CEILING` again: 0 is
+    falsy, so that idiom silently turns "no ceiling" into 60 — exactly the bug
+    a continuous run cannot survive.
+    """
+    if continuous_on(state):
+        return None                 # bounded by the limits Josh set, not turns
+    value = state.get("turn_ceiling")
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_CEILING
+    return value if value > 0 else DEFAULT_CEILING
+
+
+def continuous_tick(state):
+    """Accumulate run time onto the persisted clock. Called at every barrier.
+
+    `time.monotonic` is run-local, so the MARK resets on resume while the
+    TOTAL does not: a chat continued tomorrow keeps yesterday's hours instead
+    of quietly being granted a fresh eight of them.
+    """
+    if not continuous_on(state):
+        return 0.0
+    pol = state["continuous"]
+    now = time.monotonic()
+    mark = state.get("_cont_mark")
+    state["_cont_mark"] = now
+    if mark is not None:
+        pol["elapsed_s"] = round(float(pol.get("elapsed_s") or 0.0)
+                                 + max(0.0, now - mark), 3)
+    return float(pol.get("elapsed_s") or 0.0)
+
+
+def current_objective(state):
+    """What this run is working on right now.
+
+    `plan_workstreams` only sets `supervisor_goal` when it SUCCEEDS, so a
+    planner that returned no tasks (a live haiku planner did exactly that on
+    2026-08-22, having loaded a brainstorming skill and asked clarifying
+    questions instead) leaves the goal unset — and then the watchdog's own
+    repairs have nothing to anchor on. The topic is always there.
+    """
+    return (state.get("supervisor_goal") or state.get("topic") or "").strip()
+
+
+def continuous_status(state):
+    """The live strip's payload: objective, wave, spend, next check-in."""
+    pol = state.get("continuous") or {}
+    every = int((pol.get("checkin") or {}).get("minutes")
+                or CHECKIN_DEFAULT_MINUTES)
+    due_in = (float(pol.get("last_checkin_s") or 0.0) + every * 60
+              - float(pol.get("elapsed_s") or 0.0)) / 60.0
+    return {"objective": max(1, len(pol.get("objectives") or []) or 1),
+            "wave": max(1, int(state.get("supervisor_wave_index") or 1)),
+            "spend": round(continuous_spend(state), 2),
+            "elapsed_min": round(float(pol.get("elapsed_s") or 0.0) / 60.0, 1),
+            "next_checkin_min": round(due_in, 1)}
+
+
+def continuous_spend(state):
+    """Dollars this conversation has provably cost. Never an estimate."""
+    return float((state.get("usage") or {}).get("total_cost_usd") or 0.0)
+
+
+def continuous_backstop(state):
+    """Which user-set limit, if any, says this run must pause now."""
+    if not continuous_on(state):
+        return None
+    limits = state["continuous"].get("limits") or {}
+    cap = limits.get("spend_usd")
+    if cap is not None:
+        spent = continuous_spend(state)
+        if spent >= float(cap):
+            return ("Spend cap reached: ${:.2f} of ${:.2f}. Only the CLIs that "
+                    "report cost are counted, so any Gemini or OpenCode seats "
+                    "are not in that figure.".format(spent, float(cap)))
+    hours = limits.get("hours")
+    if hours is not None:
+        elapsed = float(state["continuous"].get("elapsed_s") or 0.0)
+        if elapsed >= float(hours) * 3600.0:
+            return ("Time limit reached: {:.1f} of {:g} hours of run time."
+                    .format(elapsed / 3600.0, float(hours)))
+    return None
+
+
+def describe_limits(state):
+    """Plain English for what will actually stop this run. Never reassuring.
+
+    "Nothing but Stop" is a legal configuration, so it has to be SAID rather
+    than implied by an empty list — a run with no limits reading as a run with
+    limits is the one misunderstanding this mode cannot afford.
+    """
+    if not continuous_on(state):
+        return "This is not a Keep Improving conversation."
+    pol = state["continuous"]
+    limits = pol.get("limits") or {}
+    bits = []
+    if limits.get("spend_usd") is not None:
+        bits.append("spend cap $%.2f (spent $%.2f so far, counting only the "
+                    "CLIs that report cost)"
+                    % (float(limits["spend_usd"]), continuous_spend(state)))
+    if limits.get("hours") is not None:
+        bits.append("time limit %g h (%.1f h of run time so far)"
+                    % (float(limits["hours"]),
+                       float(pol.get("elapsed_s") or 0.0) / 3600.0))
+    if limits.get("watchdog_may_stop"):
+        bits.append("the scheduled check-in may stop it")
+    every = int((pol.get("checkin") or {}).get("minutes")
+                or CHECKIN_DEFAULT_MINUTES)
+    action = (pol.get("checkin") or {}).get("action") or "notify"
+    head = ("Nothing will stop this run except the Stop button."
+            if not bits else "This run stops on: " + "; ".join(bits) + ".")
+    return "%s Check-in every %d min (%s)." % (head, every, action)
+
+
+def announce_backstop(state, io, reason):
+    """Pause on a limit, once, naming which limit and what it was set to."""
+    pol = state["continuous"]
+    if pol.get("announced_limit") == reason:
+        return
+    pol["announced_limit"] = reason
+    state["termination_reason"] = "limit"
+    note = (reason + " Pausing. Continue the chat to raise or clear the limit, "
+            "or leave it stopped.")
+    supervisor_trace(state, io, "limit", "Stopped on a limit you set", reason,
+                     status="limit")
+    io.emit("status", {"text": note})
+    io.emit("message", state["log"]("relay", note))
+    try:
+        state["store"].save(state)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------- objectives
+
+NEXT_OBJECTIVE_PROMPT = (
+    "You are the Supervisor of a continuous improvement session. The current "
+    "objective is finished. Choose the NEXT one yourself - nobody is going to "
+    "hand you a list.\n\n"
+    "The project lives in the working folder you and the seats share.\n\n"
+    "Objectives already done in this session:\n{history}\n\n"
+    "The objective just closed:\n{goal}\n\n"
+    "What was actually delivered - verified against the filesystem, not "
+    "against what anyone claimed:\n{report}\n\n"
+    "{gate}"
+    "Roster - plan against these capabilities, not the model names:\n"
+    "{roster}\n\n"
+    "Pick ONE next objective. Rules:\n"
+    "1. It must be a real improvement to THIS project, small enough for this "
+    "roster to finish in a handful of parallel tasks.\n"
+    "2. Do not repeat anything in the list above, and do not restate the "
+    "objective just closed in different words.\n"
+    "3. Prefer what the delivered work exposed as missing, broken, untested or "
+    "half-finished, over inventing something unrelated.\n"
+    "4. If the last verification gate FAILED, the next objective is fixing "
+    "that. Nothing else.\n"
+    "5. Never propose editing the conversation's own session files.\n\n"
+    "Write one or two sentences saying why, then END your reply with nothing "
+    "after it:\n"
+    "[[OBJECTIVE: one line, imperative and specific]]\n"
+    "or, only if there is genuinely nothing left worth doing:\n"
+    "[[IDLE: why]]"
+)
+
+
+def parse_next_objective(reply):
+    """Return ``(body, objective, idle_reason)``.
+
+    OBJECTIVE is opted into exactly the way TASK and DONE are, and for the
+    same reason: an ordinary seat playing it must stay visibly unknown rather
+    than quietly acquiring the authority to redirect the whole project.
+    """
+    known = KNOWN_DIRECTIVES + ("OBJECTIVE", "IDLE")
+    body, hits, _unknown = peel_directives(reply, known=known, max_peel=4)
+    goal = next((arg for name, arg in hits if name == "OBJECTIVE"), None)
+    idle = next((arg for name, arg in hits if name == "IDLE"), None)
+    return ((body or "").strip(),
+            (goal or "").strip() or None,
+            (idle or "").strip() or None)
+
+
+def _gate_block(state):
+    """The last gate result, phrased for a prompt. '' when there is none."""
+    last = ((state.get("continuous") or {}).get("gate") or {}).get("last")
+    if not isinstance(last, dict):
+        return ""
+    if last.get("skipped"):
+        return ("Verification gate: NOT RUN ({}). Nothing has been proven "
+                "about this code.\n\n".format(last.get("skipped")))
+    head = "PASSED" if last.get("ok") else "FAILED"
+    return "Verification gate ({}): {}\n{}\n\n".format(
+        last.get("command", "?"), head, (last.get("tail") or "")[-1200:])
+
+
+def archive_objective(state):
+    """Retire the settled board so the next objective plans onto a clean one.
+
+    Keeping every task forever would make the UI's task map unreadable after a
+    dozen objectives and force each new plan to dodge a growing list of used
+    ids. The trace keeps the full history; this keeps a compact summary.
+    """
+    pol = state["continuous"]
+    tasks = state.get("workstreams") or []
+    if tasks:
+        delivered = sorted({f for t in tasks
+                            for f in ((t.get("verified") or {}).get("delivered")
+                                      or [])})
+        pol.setdefault("history", []).append({
+            "goal": state.get("supervisor_goal") or "",
+            "tasks": len(tasks),
+            "failed": sum(1 for t in tasks if t.get("status") == "failed"),
+            "delivered": delivered[:40],
+            "gate": (pol.get("gate") or {}).get("last"),
+        })
+        del pol["history"][:-OBJECTIVE_HISTORY_MAX]
+    state["workstreams"] = None
+    pol["stuck"] = {}
+
+
+def next_objective(state, io):
+    """Continuous mode's answer to a finished objective: pick the next one.
+
+    Returns "assigned" or "idle". Never forges an objective — a dead side
+    call, an unparseable reply and a bare ``[[IDLE]]`` all leave the plan
+    alone and say so out loud, and the watchdog takes it from there.
+    """
+    if not continuous_on(state):
+        return "idle"
+    pol = state["continuous"]
+    closed = current_objective(state)
+    history = pol.get("objectives") or ([closed] if closed else [])
+    wave_index = max(1, int(state.get("supervisor_wave_index") or 1))
+    supervisor_trace(state, io, "objective",
+                     "Objective met — choosing the next", closed,
+                     status="reviewing")
+    io.emit("status", {"text": "Choosing the next improvement…"})
+    prompt = NEXT_OBJECTIVE_PROMPT.format(
+        history="\n".join("- " + g for g in history) or "- (none yet)",
+        goal=closed or "(not recorded)", report=wave_report(state),
+        gate=_gate_block(state), roster=supervisor_roster_block(state))
+    sup = build_supervisor(state)
+    try:
+        reply = sup.turn(prompt)
+    except Exception as e:
+        record_usage(state, getattr(sup, "last_usage", None), kind="objective")
+        supervisor_trace(state, io, "error", "Next-objective call failed",
+                         str(e)[:500], status="failed")
+        return "idle"
+    record_usage(state, getattr(sup, "last_usage", None), kind="objective")
+    try:
+        body, goal, idle = parse_next_objective(reply or "")
+    except Exception as e:
+        supervisor_trace(state, io, "error",
+                         "Next objective could not be parsed", str(e)[:500],
+                         status="failed")
+        return "idle"
+    if not goal:
+        supervisor_trace(state, io, "error", "No next objective returned",
+                         idle or (reply or "")[:1000], status="idle")
+        io.emit("message", state["log"](
+            "relay", "No next objective was chosen"
+                     + (": " + idle if idle else
+                        " — the reply named neither an objective nor a reason.")))
+        return "idle"
+
+    archive_objective(state)
+    pol.setdefault("objectives", [])
+    if closed and closed not in pol["objectives"]:
+        pol["objectives"].append(closed)
+    pol["objectives"].append(goal)
+    del pol["objectives"][:-OBJECTIVE_HISTORY_MAX]
+    # The wave CAP measures "can this manager converge on ONE goal", so it
+    # resets with the goal. The wave INDEX keeps climbing, because the UI cuts
+    # its collapsible wave boxes on it and restarting at 1 would fold the new
+    # objective into the old one's box.
+    state["supervisor_waves"] = 0
+    state.pop("supervisor_capped", None)
+    state["supervisor_goal"] = goal
+    number = len(pol["objectives"])
+    supervisor_trace(state, io, "objective",
+                     "Objective %d: %s" % (number, goal),
+                     body or "The Supervisor named the next objective without "
+                             "a separate rationale.",
+                     status="ready", goal=goal)
+    io.emit("message", state["log"](
+        "relay", "Next objective (%d): %s%s"
+                 % (number, goal, ("\n\n" + body) if body else "")))
+    tasks = plan_workstreams(state, io, goal=goal)
+    # plan_workstreams restarts the wave index at 1 for a fresh plan; a
+    # continuous run has to keep counting or the UI merges the objectives.
+    state["supervisor_wave_index"] = wave_index + 1
+    try:
+        state["store"].save(state)
+    except Exception:
+        pass
+    return "assigned" if tasks else "idle"
+
+
+# -------------------------------------------------------------- the watchdog
+
+CHECKIN_PROMPT = (
+    "You are the watchdog of an unattended, continuously running multi-AI "
+    "working session. You are NOT here to critique the work. You are here to "
+    "answer one question: is this session still actually running and making "
+    "progress, and if not, what single action gets it going again?\n\n"
+    "Health report - every number below is measured, not claimed:\n{health}\n\n"
+    "Answer with exactly ONE directive at the very end of your reply, nothing "
+    "after it:\n"
+    "[[HEALTHY: what you observed]]   - it is running and progressing\n"
+    "[[FIX: <remedy> | why]]          - it is stalled or broken\n"
+    "{stop_line}\n"
+    "The ONLY remedies that exist. Anything else is ignored:\n"
+    "  requeue           - re-dispatch tasks stuck active or blocked\n"
+    "  replan            - throw away the unfinished plan and re-plan this "
+    "same objective\n"
+    "  next_objective    - abandon this objective and choose a new one\n"
+    "  clear_seat:<seat> - give one seat a fresh CLI session (for a seat that "
+    "keeps failing; it keeps the messages it is owed but loses its earlier "
+    "context)\n"
+    "  nudge:<text>      - put one message in every seat's queue\n\n"
+    "Judgement rules:\n"
+    "1. Committed turns not moving since the last check is the single "
+    "strongest sign that nothing is running.\n"
+    "2. A task stuck active or blocked across several checks is wedged, not "
+    "slow.\n"
+    "3. Do not fix what is not broken. Steady progress is HEALTHY even if you "
+    "would have done the work differently.\n"
+    "4. Prefer the smallest remedy that could work."
+)
+
+CHECKIN_STOP_LINE = ("[[STOP: reason]]                 - stop the run for good "
+                     "(only when it cannot be recovered, or the project is "
+                     "genuinely finished)")
+
+CHECKIN_REMEDIES = ("requeue", "replan", "next_objective", "clear_seat",
+                    "nudge")
+
+
+def parse_checkin_verdict(reply):
+    """Return ``(body, verdict, argument)``.
+
+    ``verdict`` is "healthy" | "fix" | "stop" | None. HEALTHY/FIX/STOP are
+    opted into here, not added to KNOWN_DIRECTIVES — a seat playing one stays
+    visibly unknown instead of gaining watchdog authority.
+    """
+    known = KNOWN_DIRECTIVES + ("HEALTHY", "FIX", "STOP")
+    body, hits, _unknown = peel_directives(reply, known=known, max_peel=4)
+    for name in ("STOP", "FIX", "HEALTHY"):
+        arg = next((a for n, a in hits if n == name), None)
+        if arg is not None:
+            return (body or "").strip(), name.lower(), (arg or "").strip()
+    return (body or "").strip(), None, ""
+
+
+def split_remedy(argument):
+    """``"clear_seat:GPT | it keeps dying"`` -> ``("clear_seat", "GPT", "it…")``.
+
+    An unrecognized remedy comes back with a None name, which every caller
+    turns into a visible note and no action at all.
+    """
+    head, _sep, why = (argument or "").partition("|")
+    name, _colon, detail = head.strip().partition(":")
+    name = name.strip().lower()
+    return (name if name in CHECKIN_REMEDIES else None), detail.strip(), why.strip()
+
+
+def continuous_health(state):
+    """A measured snapshot of whether this session is still running.
+
+    Built only from state the engine already maintains — the committed-turn
+    counter, the task board, the seats, the gate. No filesystem walk and no
+    new bookkeeping, so there is nothing here that can itself go stale.
+    """
+    pol = state.get("continuous") or {}
+    tasks = state.get("workstreams") or []
+    turn = int(state.get("turn") or 0)
+    since = turn - int(pol.get("turn_at_checkin") or 0)
+    stuck = pol.get("stuck") or {}
+    lines = [
+        "Objective: " + (current_objective(state) or "(none set)"),
+        "Objectives completed this session: %d"
+        % max(0, len(pol.get("objectives") or []) - 1),
+        "Committed turns since the last check: %d (total %d)" % (since, turn),
+        "Review waves spent on this objective: %d of %d%s"
+        % (int(state.get("supervisor_waves") or 0), SUPERVISOR_MAX_WAVES,
+           "  <-- EXHAUSTED" if state.get("supervisor_capped") else ""),
+        "Run time: %.1f h   Spend so far: $%.2f"
+        % (float(pol.get("elapsed_s") or 0.0) / 3600.0, continuous_spend(state)),
+    ]
+    if not tasks:
+        lines.append("Task board: EMPTY — no plan is running right now.")
+    else:
+        lines.append("Task board:")
+        for t in tasks:
+            v = t.get("verified") or {}
+            if v.get("missing"):
+                note = "  never created: " + ", ".join(v["missing"])
+            elif v.get("delivered"):
+                note = "  on disk: " + ", ".join(v["delivered"])
+            else:
+                note = ""
+            held = int(stuck.get(t["id"], 0))
+            lines.append("  [%s] %s - %s%s%s"
+                         % (t["id"], _seat_name(state, t.get("owner")),
+                            str(t.get("status") or "unknown").upper(),
+                            "  (unchanged across %d checks)" % held if held
+                            else "", note))
+    lines.append("Seats:")
+    unavailable = state.get("_floor_unavailable") or set()
+    for i, agent in enumerate(state.get("agents") or ()):
+        bits = []
+        if not getattr(agent, "session_id", None):
+            bits.append("no CLI session yet")
+        if state["slot_ids"][i] in unavailable:
+            bits.append("failed twice this run")
+        lines.append("  %s (%s)%s" % (agent.name, state["providers"][i],
+                                      " - " + "; ".join(bits) if bits else ""))
+    gate = _gate_block(state)
+    if gate:
+        lines.append(gate.strip())
+    return "\n".join(lines)
+
+
+def apply_remedy(state, io, remedy, detail):
+    """Perform one watchdog remedy. Returns a human sentence, or '' for none.
+
+    The remedy set is CLOSED on purpose. A free-text instruction the engine
+    cannot execute would read like a repair in the transcript while changing
+    nothing at all, which is worse than declining out loud.
+    """
+    if remedy == "requeue":
+        tasks = state.get("workstreams") or []
+        moved = [t["id"] for t in tasks
+                 if t.get("status") in ("active", "blocked")]
+        if not moved:
+            return "Nothing was stuck, so no task was re-dispatched."
+        for t in tasks:
+            if t.get("status") in ("active", "blocked"):
+                t["status"] = "pending"
+        rearm_seats(state)
+        assign_workstreams(state, io)
+        return "Re-dispatched stuck task%s %s." % (
+            "" if len(moved) == 1 else "s", ", ".join(moved))
+    if remedy == "replan":
+        goal = current_objective(state)
+        if not goal:
+            return "There is no objective to re-plan."
+        archive_objective(state)
+        rearm_seats(state)
+        wave_index = max(1, int(state.get("supervisor_wave_index") or 1))
+        tasks = plan_workstreams(state, io, goal=goal)
+        state["supervisor_wave_index"] = wave_index + 1
+        return ("Re-planned the objective into %d task%s."
+                % (len(tasks), "" if len(tasks) == 1 else "s") if tasks
+                else "Re-planning produced no tasks.")
+    if remedy == "next_objective":
+        return ("Moved on to a new objective."
+                if next_objective(state, io) == "assigned"
+                else "Could not choose a new objective.")
+    if remedy == "clear_seat":
+        if not detail:
+            return "No seat was named, so nothing was cleared."
+        try:
+            seat_command(state, "clear", detail, io)
+        except Exception as e:
+            return "Could not clear %r: %s" % (detail, error_excerpt(e))
+        return "Gave %s a fresh CLI session." % detail
+    if remedy == "nudge":
+        text = (detail or "").strip()
+        if not text:
+            return "The nudge had no text, so nothing was sent."
+        for j in range(len(state.get("agents") or ())):
+            state["pending"][j].append("Watchdog note: " + text)
+        return "Sent every seat: " + text
+    return ""
+
+
+def _track_stuck(state):
+    """Count how many consecutive checks each task has sat unsettled."""
+    pol = state["continuous"]
+    previous = pol.get("stuck") or {}
+    pol["stuck"] = {t["id"]: int(previous.get(t["id"], 0)) + 1
+                    for t in (state.get("workstreams") or [])
+                    if t.get("status") in ("active", "blocked")}
+
+
+def checkin_due(state):
+    """True when the interval has elapsed, or Josh asked for one with /checkin.
+
+    The explicit flag is not decoration: a run whose clock is still near zero
+    would otherwise ignore /checkin entirely, and "I asked and nothing
+    happened" is the worst possible answer from a watchdog.
+    """
+    if not continuous_on(state):
+        return False
+    pol = state["continuous"]
+    if pol.get("checkin_now"):
+        return True
+    every = int((pol.get("checkin") or {}).get("minutes")
+                or CHECKIN_DEFAULT_MINUTES) * 60
+    return (float(pol.get("elapsed_s") or 0.0)
+            - float(pol.get("last_checkin_s") or 0.0)) >= every
+
+
+def run_checkin(state, io):
+    """One scheduled health check. Returns "healthy"|"fixed"|"stop"|"idle".
+
+    Barrier-only, like every other side call here: no seat thread is alive, so
+    a remedy cannot mutate a task beneath its owner. Every failure path returns
+    "idle" and leaves the session exactly as it was.
+    """
+    if not continuous_on(state):
+        return "idle"
+    pol = state["continuous"]
+    _track_stuck(state)
+    health = continuous_health(state)
+    action = (pol.get("checkin") or {}).get("action") or "notify"
+    may_stop = bool((pol.get("limits") or {}).get("watchdog_may_stop"))
+    # Mark the check as taken BEFORE the call: a side call that dies must not
+    # re-fire on every barrier for the rest of the run.
+    pol.pop("checkin_now", None)
+    pol["last_checkin_s"] = float(pol.get("elapsed_s") or 0.0)
+    pol["turn_at_checkin"] = int(state.get("turn") or 0)
+    supervisor_trace(state, io, "checkin", "Scheduled check-in", health,
+                     status="reviewing")
+    io.emit("status", {"text": "Check-in: is this still running?"})
+    prompt = CHECKIN_PROMPT.format(
+        health=health, stop_line=CHECKIN_STOP_LINE if may_stop else "")
+    sup = build_supervisor(state)
+    try:
+        reply = sup.turn(prompt)
+    except Exception as e:
+        record_usage(state, getattr(sup, "last_usage", None), kind="checkin")
+        supervisor_trace(state, io, "error", "Check-in call failed",
+                         str(e)[:500], status="failed")
+        return "idle"
+    record_usage(state, getattr(sup, "last_usage", None), kind="checkin")
+    try:
+        body, verdict, argument = parse_checkin_verdict(reply or "")
+    except Exception as e:
+        supervisor_trace(state, io, "error", "Check-in could not be parsed",
+                         str(e)[:500], status="failed")
+        return "idle"
+
+    if verdict == "healthy":
+        supervisor_trace(state, io, "checkin", "Still running",
+                         argument or body, status="healthy")
+        if action == "notify":
+            io.emit("checkin", {"kind": "healthy",
+                                "text": argument or body or "Still running."})
+        try:
+            state["store"].save(state)
+        except Exception:
+            pass
+        return "healthy"
+
+    if verdict == "stop":
+        if not may_stop:
+            note = ("The check-in asked to stop the run, but you did not give "
+                    "it that authority. Continuing. Its reason: "
+                    + (argument or "none given"))
+            supervisor_trace(state, io, "checkin", "Stop request declined",
+                             note, status="declined")
+            io.emit("message", state["log"]("relay", note))
+            return "idle"
+        note = "Check-in stopped the run: " + (argument or "no reason given")
+        supervisor_trace(state, io, "checkin", "Run stopped by the check-in",
+                         note, status="stopped")
+        io.emit("message", state["log"]("relay", note))
+        state["termination_reason"] = "stop"
+        return "stop"
+
+    if verdict != "fix":
+        supervisor_trace(state, io, "error", "Check-in returned no verdict",
+                         (reply or "")[:1000], status="failed")
+        return "idle"
+
+    remedy, detail, why = split_remedy(argument)
+    label = ((remedy + (":" + detail if detail else "")) if remedy
+             else (argument or "").strip()[:120])
+    if not remedy:
+        note = ("The check-in proposed something that is not one of the "
+                "remedies this app can perform (%r), so nothing was changed."
+                % label)
+        supervisor_trace(state, io, "checkin", "Unknown remedy ignored", note,
+                         status="ignored")
+        io.emit("message", state["log"]("relay", note))
+        return "idle"
+
+    if action == "permission":
+        answer = io.ask_human({
+            "qid": "checkin-" + uuid.uuid4().hex[:8],
+            "kind": "checkin",
+            "speaker": None,
+            "provider": (state.get("supervisor") or {}).get("provider")
+                        or "claude",
+            "asker": room_helper_name(state, "supervisor"),
+            "question": "Check-in: %s\n\nProposed fix: %s"
+                        % (why or body or "the session looks stalled", label),
+            "options": ["Apply the fix", "Skip it", "Stop the run"],
+        })
+        choice = (answer or "").strip().lower()
+        if not choice or choice.startswith("skip"):
+            note = ("Check-in wanted to %s (%s). %s"
+                    % (label, why or "no reason given",
+                       "Skipped." if choice else
+                       "Nobody answered, so nothing was changed."))
+            supervisor_trace(state, io, "checkin", "Fix not applied", note,
+                             status="skipped")
+            io.emit("message", state["log"]("relay", note))
+            return "idle"
+        if choice.startswith("stop"):
+            note = "Josh stopped the run at a check-in."
+            supervisor_trace(state, io, "checkin", "Stopped by Josh", note,
+                             status="stopped")
+            io.emit("message", state["log"]("relay", note))
+            state["termination_reason"] = "stop"
+            return "stop"
+
+    outcome = apply_remedy(state, io, remedy, detail)
+    note = "Check-in fix — %s: %s%s" % (label, why or "no reason given",
+                                        ("  " + outcome) if outcome else "")
+    supervisor_trace(state, io, "checkin", "Applied %s" % label, note,
+                     status="fixed")
+    io.emit("message", state["log"]("relay", note))
+    if action == "notify":
+        io.emit("checkin", {"kind": "fixed", "text": note})
+    try:
+        state["store"].save(state)
+    except Exception:
+        pass
+    return "fixed"
+
+
+# --------------------------------------------------------- verification gate
+
+def detect_test_command(workspace):
+    """The project's own verification command, or "" when it has none.
+
+    Detection only. A project with no test command must record a SKIP, never a
+    pass — "nothing proved this" and "this is proven good" are different facts,
+    and the manager reads both.
+    """
+    if not workspace:
+        return ""       # NOT abspath("") — that is the CWD, and this process
+                        # runs in the Alloy repo, whose own tests/run_all.py
+                        # would then be "detected" for somebody else's folder
+    try:
+        root = os.path.abspath(workspace)
+    except Exception:
+        return ""
+    if not os.path.isdir(root):
+        return ""
+    if os.path.isfile(os.path.join(root, "tests", "run_all.py")):
+        return "python tests/run_all.py"    # a repo that ships a runner means it
+    pkg = os.path.join(root, "package.json")
+    if os.path.isfile(pkg):
+        try:
+            with open(pkg, encoding="utf-8") as fh:
+                if ((json.load(fh) or {}).get("scripts") or {}).get("test"):
+                    return "npm test"
+        except Exception:
+            pass
+    for marker in ("pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml"):
+        if os.path.isfile(os.path.join(root, marker)):
+            return "python -m pytest -q"
+    if os.path.isdir(os.path.join(root, "tests")):
+        return "python -m pytest -q"
+    return ""
+
+
+def _gate_run(command, workspace, timeout=GATE_TIMEOUT):
+    """Run the project's test command. Seam: tests replace this wholesale.
+
+    `shell=True` on purpose — this is a command Josh typed into the warning
+    modal, and quoting it ourselves would break the ordinary "python x.py" and
+    "npm test" forms it is meant to hold.
+    """
+    started = time.monotonic()
+    try:
+        done = subprocess.run(
+            command, cwd=workspace, shell=True, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "seconds": timeout,
+                "tail": "timed out after %ds" % timeout}
+    except Exception as e:
+        return {"ok": False, "seconds": round(time.monotonic() - started, 1),
+                "tail": "could not run: " + str(e)[:300]}
+    return {"ok": done.returncode == 0, "code": done.returncode,
+            "seconds": round(time.monotonic() - started, 1),
+            "tail": (done.stdout or "")[-GATE_TAIL:]}
+
+
+def _git(args, workspace, timeout=120):
+    """One git call in the workspace. Seam: tests replace this wholesale."""
+    return subprocess.run(
+        ["git"] + list(args), cwd=workspace, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        encoding="utf-8", errors="replace", timeout=timeout,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def git_dirty(workspace):
+    """True/False inside a repo, None when it is not one (or git is absent)."""
+    try:
+        done = _git(["status", "--porcelain"], workspace)
+    except Exception:
+        return None
+    if done.returncode != 0:
+        return None
+    return bool((done.stdout or "").strip())
+
+
+def gate_commit(state, message):
+    """Checkpoint a green wave. Returns a human sentence, never raises."""
+    workspace = state.get("workspace")
+    gate = (state.get("continuous") or {}).get("gate") or {}
+    if git_dirty(workspace) is None:
+        return "not a git repository, so nothing was committed"
+    if gate.get("dirty_at_start") and not gate.get("allow_dirty"):
+        return ("the working tree already had uncommitted changes when this "
+                "run started, so nothing was committed — committing Josh's own "
+                "edits under a wave label would destroy the rollback story")
+    try:
+        add = _git(["add", "-A"], workspace)
+        if add.returncode != 0:
+            return "git add failed: " + (add.stdout or "")[-200:]
+        done = _git(["commit", "-m", message], workspace)
+        if done.returncode != 0:
+            out = done.stdout or ""
+            if "nothing to commit" in out.lower():
+                return "nothing had changed, so there was nothing to commit"
+            return "git commit failed: " + out[-200:]
+        sha = _git(["rev-parse", "--short", "HEAD"], workspace)
+        return "committed as " + (sha.stdout or "").strip()
+    except Exception as e:
+        return "could not commit: " + error_excerpt(e)
+
+
+def wave_gate(state, io):
+    """Verify the wave before the manager reviews it. Returns the result dict.
+
+    Runs BEFORE `supervise_next_wave` so the review reads proof rather than
+    claims, and before any commit so only green code is ever checkpointed.
+    """
+    if not continuous_on(state):
+        return None
+    gate = state["continuous"].setdefault("gate", {})
+    command = (gate.get("command") or "").strip()
+    if not command:
+        gate["last"] = {"skipped": "no test command is configured for this "
+                                   "folder", "command": "", "ok": None}
+        return gate["last"]
+    supervisor_trace(state, io, "gate", "Running the verification gate",
+                     command, status="running")
+    io.emit("status", {"text": "Verifying: " + command})
+    result = _gate_run(command, state.get("workspace"))
+    result["command"] = command
+    gate["last"] = result
+    if result.get("ok"):
+        detail = "passed in %ss" % result.get("seconds", "?")
+        if gate.get("commit"):
+            goal = (state.get("supervisor_goal") or "improvement wave")[:70]
+            detail += " — " + gate_commit(state, "alloy: " + goal)
+        supervisor_trace(state, io, "gate", "Gate passed", detail,
+                         status="passed")
+        io.emit("message", state["log"](
+            "relay", "Verification passed (%s) %s" % (command, detail)))
+    else:
+        supervisor_trace(state, io, "gate", "Gate FAILED",
+                         (result.get("tail") or "")[-2000:], status="failed")
+        io.emit("message", state["log"](
+            "relay", "Verification FAILED (%s). The next wave's first job is "
+                     "fixing this:\n%s"
+                     % (command, (result.get("tail") or "")[-1200:])))
+    try:
+        state["store"].save(state)
+    except Exception:
+        pass
+    return result
+
+
+# ------------------------------------------------------------------- revival
+
+ASK_WAIT_MAX = 600      # seconds a seat's [[ASK]] may hold an unattended run
+
+
+def ask_abort(state, abort=None):
+    """Compose the caller's abort with a deadline — continuous mode only.
+
+    Josh opted into `permission` check-ins waiting for him. He did NOT opt into
+    a seat's spontaneous ``[[ASK]]`` holding an unattended run open forever,
+    and that is not a theoretical worry: live on 2026-08-22, two haiku seats
+    ended round 4 with a clarifying question, the parallel barrier never
+    completed, and every later brake — the accumulated clock, the spend cap,
+    the scheduled watchdog — is checked AT that barrier. Nothing could fire.
+    The wait now expires and takes the documented unanswered path: a relay
+    note in the requester's queue, never a forged answer.
+
+    Both front ends already poll `abort` and return None from it, so this
+    needs no change in CLIIO or _AppIO.
+    """
+    if not continuous_on(state):
+        return abort
+    every = int((state["continuous"].get("checkin") or {}).get("minutes")
+                or CHECKIN_DEFAULT_MINUTES) * 60
+    deadline = time.monotonic() + min(ASK_WAIT_MAX, every)
+
+    def expired():
+        if abort is not None and abort():
+            return True
+        return time.monotonic() >= deadline
+    return expired
+
+
+def continuous_revive(state, io, ended):
+    """Announce and prepare a restart of a run that fell over.
+
+    A barrier check cannot fire if the loop has EXITED, so "keep it running"
+    needs this second layer. Josh's own Stop and the limits he set are handled
+    by the caller; everything else — a cap, a fatal seat, a wrap nobody asked
+    for — is a loop that stopped doing its job.
+    """
+    pol = state["continuous"]
+    barren = int(pol.get("barren_revivals") or 0)
+    why = {"cap": "it ran out of turns",
+           "fatal": "a seat failed fatally",
+           "wrapped": "the seats wrapped it up"}.get(
+               ended, "it ended (%s)" % ended)
+    note = ("The conversation stopped because %s — Keep Improving is "
+            "restarting it." % why)
+    if barren:
+        note += " (%d restart%s so far with nothing committed.)" % (
+            barren, "" if barren == 1 else "s")
+    state["closing"] = None
+    state["next_speaker"] = None
+    state["deferred_wrap"] = None
+    state["forced_next"] = None
+    rearm_seats(state)
+    # Extend the mechanical cap too: a run that ended on it would otherwise
+    # come straight back to the same wall without committing anything.
+    state["max"] = int(state.get("rnd") or 0) + max(1, int(state.get("turns") or 1))
+    supervisor_trace(state, io, "revived", "Restarting the run", note,
+                     status="revived")
+    io.emit("status", {"text": note})
+    io.emit("message", state["log"]("relay", note))
+    try:
+        state["store"].save(state)
+    except Exception:
+        pass
 
 
 def assign_workstreams(state, io):
@@ -6217,11 +7831,21 @@ def commit_skip(state, i, note, io, fatal=False, kind=None, retried=None):
     state["store"].save(state)
 
 
-def note_retry(state, io, agent, exc):
+def note_retry(state, io, agent, exc, delay=0, window=None):
     """First-failure notice: emit AND persist. Emit-only retry notices left
     no trace in the session folder, so a chat's errors could only be
-    diagnosed from screenshots of the live window."""
-    note = f"{agent.name} error ({error_excerpt(exc)}) — retrying once…"
+    diagnosed from screenshots of the live window.
+
+    It names the wait and the shorter limit because the old wording — an
+    unqualified "retrying once…" — was followed by fifteen minutes of nothing,
+    which is indistinguishable from a hang to the person watching.
+    """
+    plan = ""
+    if delay:
+        plan = f" in {int(delay)}s"
+    if window and window < armed_window(agent)[1]:
+        plan += f", with a {max(1, round(window / 60))} min limit this time"
+    note = f"{agent.name} error ({error_excerpt(exc)}) — retrying once{plan}…"
     io.emit("status", {"text": note})
     state["store"].system(note, round=state["rnd"])
 
@@ -6877,13 +8501,17 @@ def handle_ask_directive(state, i, reply, io, lock=None, abort=None):
                            "speaker": state["slot_ids"][i],
                            "provider": state["providers"][i],
                            "asker": name, "question": question,
-                           "options": options}, abort=abort)
+                           "options": options},
+                          abort=ask_abort(state, abort))
     if answer is None or not answer.strip():
         with guard:
             state["ask_pending"] = None
             state["pending"][i].append(
                 "(Relay: Josh was unavailable / gave no answer — continue "
-                "without his input.)")
+                "without his input.)" if not continuous_on(state) else
+                "(Relay: nobody answered within the wait this Keep Improving "
+                "run allows, so it moved on. Decide it yourself and say which "
+                "way you went.)")
             io.emit("status", {"text": f"{name}'s question went unanswered — "
                                        f"continuing."})
             state["store"].save(state)
@@ -7163,6 +8791,33 @@ def run_rounds(state, io):
     state.pop("termination_reason", None)
     try:
         ended = _run_rounds(state, io)
+        # Keep Improving, second layer. The scheduled check-in rides the turn
+        # boundary, so it can never fire on a loop that has already EXITED —
+        # and "it stopped" is precisely the failure this mode has to survive.
+        # Josh's own Stop and the limits he set are respected; a cap, a fatal
+        # seat or a wrap nobody asked for is a loop that quit its job.
+        while continuous_on(state) and ended != "stopped" and not io.should_stop():
+            limit = continuous_backstop(state)
+            if limit:
+                announce_backstop(state, io, limit)
+                break
+            pol = state["continuous"]
+            if int(pol.get("barren_revivals") or 0) >= MAX_BARREN_REVIVALS:
+                note = ("Keep Improving restarted this conversation %d times "
+                        "and not one turn was committed, so it has stopped "
+                        "rather than spin. Something is wrong with the seats "
+                        "or the folder — the last messages above say what."
+                        % MAX_BARREN_REVIVALS)
+                io.emit("status", {"text": note})
+                io.emit("message", state["log"]("relay", note))
+                state["termination_reason"] = "fatal"
+                break
+            turn_before = int(state.get("turn") or 0)
+            continuous_revive(state, io, ended)
+            ended = _run_rounds(state, io)
+            pol["barren_revivals"] = (
+                int(pol.get("barren_revivals") or 0) + 1
+                if int(state.get("turn") or 0) == turn_before else 0)
         return ended
     finally:
         if ended is not None:
@@ -7259,6 +8914,19 @@ def _run_rounds(state, io):
         # to speak gets a fresh preamble with the new role rather than
         # switching identity halfway through a turn.
         io.on_turn_boundary(state)
+        # Keep Improving rides the boundary, never a background timer: no
+        # seat thread is alive here, which is the only place the one-owner-
+        # thread-per-Agent rule permits a side call to touch a seat or a task.
+        if continuous_on(state):
+            continuous_tick(state)
+            io.emit("continuous", continuous_status(state))
+            limit = continuous_backstop(state)
+            if limit:
+                announce_backstop(state, io, limit)
+                break                   # outcome stays "cap"; reason is "limit"
+            if checkin_due(state) and run_checkin(state, io) == "stop":
+                outcome = "stopped"
+                break
 
         # A pre-opening [[WRAP]] survives a crash as a deferred slot id. Once
         # the last seat has opened, activate the normal persisted closing list
@@ -7283,8 +8951,8 @@ def _run_rounds(state, io):
         # bounded by seat count anyway).
         if (state.get("until_done") and state["closing"] is None
                 and state.get("deferred_wrap") is None):
-            ceiling = state.get("turn_ceiling") or DEFAULT_CEILING
-            if state["turn"] >= ceiling:
+            ceiling = effective_ceiling(state)
+            if ceiling is not None and state["turn"] >= ceiling:
                 state["termination_reason"] = "ceiling"
                 note = (f"Safety ceiling reached ({ceiling} turns) without a "
                         f"wrap — pausing. Continue the chat to extend the "
@@ -7349,7 +9017,10 @@ def _run_rounds(state, io):
         message, consumed, first_turn = compose_prompt(state, i)
         key = slot_ids[i]
         io.emit("thinking", {"speaker": key, "provider": providers[i],
-                             "name": agent.name, "round": rnd,
+                             "name": agent.name,
+                             "limit": getattr(agent, "turn_timeout", None),
+                             "idle": getattr(agent, "idle_timeout", None),
+                             "round": rnd,
                              "turns": state["max"],
                              "turn": state["turn"] + 1,
                              "until_done": bool(state.get("until_done")),
@@ -7378,12 +9049,17 @@ def _run_rounds(state, io):
                 continue
             record_usage(state, getattr(agent, "last_usage", None),
                          seat_key=key, kind="retry")
-            note_retry(state, io, agent, e1)
+            # A provider that just failed is not working: pause,
+            # then retry on a SHORT window (see retry_plan).
+            delay, window = retry_plan(agent, e1)
+            note_retry(state, io, agent, e1, delay, window)
+            backoff_wait(io, delay)
             # fresh sink: the failed attempt's narration must not double up
             on_act, acts = make_activity_sink(io, key, providers[i],
                                               agent.name, state["workspace"])
             try:
-                reply = agent.turn(message, on_activity=on_act)
+                with retry_window(agent, window):
+                    reply = agent.turn(message, on_activity=on_act)
             except Exception as e2:
                 mark_floor_unavailable(state, i)
                 if source != "closing":
@@ -7681,6 +9357,8 @@ def run_panel(state, io):
             io.emit("thinking", {"speaker": slot_ids[i],
                                  "provider": providers[i],
                                  "name": agents[i].name,
+                                 "limit": getattr(agents[i], "turn_timeout", None),
+                                 "idle": getattr(agents[i], "idle_timeout", None),
                                  "round": state["rnd"], "turns": 3,
                                  "turn": state["turn"] + 1,
                                  "panel_phase": phase})
@@ -7723,11 +9401,16 @@ def run_panel(state, io):
                     with lock:
                         record_usage(state, getattr(agent, "last_usage", None),
                                      seat_key=key, kind="retry")
-                    note_retry(state, io, agent, e1)
+                    # A provider that just failed is not working: pause,
+                    # then retry on a SHORT window (see retry_plan).
+                    delay, window = retry_plan(agent, e1)
+                    note_retry(state, io, agent, e1, delay, window)
+                    backoff_wait(io, delay)
                     on_act, acts = make_activity_sink(
                         io, key, providers[i], agent.name, state["workspace"])
                     try:
-                        reply = agent.turn(message, on_activity=on_act)
+                        with retry_window(agent, window):
+                            reply = agent.turn(message, on_activity=on_act)
                     except Exception as e2:
                         with lock:
                             mark_failed(
@@ -7874,6 +9557,19 @@ def run_parallel(state, io):
             outcome = "stopped"
             break
         io.on_turn_boundary(state)
+        # Keep Improving rides the boundary, never a background timer: no
+        # seat thread is alive here, which is the only place the one-owner-
+        # thread-per-Agent rule permits a side call to touch a seat or a task.
+        if continuous_on(state):
+            continuous_tick(state)
+            io.emit("continuous", continuous_status(state))
+            limit = continuous_backstop(state)
+            if limit:
+                announce_backstop(state, io, limit)
+                break                   # outcome stays "cap"; reason is "limit"
+            if checkin_due(state) and run_checkin(state, io) == "stop":
+                outcome = "stopped"
+                break
 
         closing_round = state["closing"] is not None
         if closing_round and not state["closing"]:
@@ -7882,8 +9578,8 @@ def run_parallel(state, io):
             break
         if not closing_round:
             if state.get("until_done"):
-                ceiling = state.get("turn_ceiling") or DEFAULT_CEILING
-                if state["turn"] >= ceiling:
+                ceiling = effective_ceiling(state)
+                if ceiling is not None and state["turn"] >= ceiling:
                     state["termination_reason"] = "ceiling"
                     note = (f"Safety ceiling reached ({ceiling} turns) "
                             f"without a wrap — pausing. Continue the chat to "
@@ -7914,7 +9610,9 @@ def run_parallel(state, io):
         for i in roster:
             io.emit("thinking", {"speaker": slot_ids[i],
                                  "provider": providers[i],
-                                 "name": agents[i].name, "round": rnd,
+                                 "name": agents[i].name,
+                                 "limit": getattr(agents[i], "turn_timeout", None),
+                                 "idle": getattr(agents[i], "idle_timeout", None), "round": rnd,
                                  "turns": state["max"],
                                  "turn": state["turn"] + 1,
                                  "until_done": bool(state.get("until_done")),
@@ -7956,12 +9654,17 @@ def run_parallel(state, io):
                     with lock:
                         record_usage(state, getattr(agent, "last_usage", None),
                                      seat_key=key, kind="retry")
-                    note_retry(state, io, agent, e1)
+                    # A provider that just failed is not working: pause,
+                    # then retry on a SHORT window (see retry_plan).
+                    delay, window = retry_plan(agent, e1)
+                    note_retry(state, io, agent, e1, delay, window)
+                    backoff_wait(io, delay)
                     on_act, acts = make_activity_sink(io, key, providers[i],
                                                       agent.name,
                                                       state["workspace"])
                     try:
-                        reply = agent.turn(message, on_activity=on_act)
+                        with retry_window(agent, window):
+                            reply = agent.turn(message, on_activity=on_act)
                     except Exception as e2:
                         with lock:
                             consume_closing_slot()
@@ -8027,11 +9730,21 @@ def run_parallel(state, io):
         if (not closing_round and not stopped and not io.should_stop()
                 and not any(r == "fatal" for r in results.values())):
             replan_failed_workstreams(state, io)
+            # Verify BEFORE the manager reviews: its wave report should carry
+            # proof, not claims, and only green code should ever be committed.
+            if continuous_on(state) and plan_drained(state):
+                wave_gate(state, io)
             # The manager only gets the floor once every task has settled,
             # which is also the only moment its own repair pass can have
             # finished. Ordering matters: repair first, then review, so a
             # wave is decided on the final state of the plan.
             supervised_done = supervise_next_wave(state, io) == "done"
+            if supervised_done and continuous_on(state):
+                # In Keep Improving, "the goal is met" is not "the work is
+                # over" — it is the cue to choose the next objective. A failure
+                # to choose one leaves the run alive for the watchdog to catch.
+                next_objective(state, io)
+                supervised_done = False
         if supervised_done:
             state["termination_reason"] = "supervisor_done"
             state.setdefault("completion", {}).update({
@@ -8115,8 +9828,8 @@ def run_free(state, io):
 
     def budget_left():
         if state.get("until_done"):
-            return state["turn"] < (state.get("turn_ceiling")
-                                    or DEFAULT_CEILING)
+            ceiling = effective_ceiling(state)
+            return ceiling is None or state["turn"] < ceiling
         return state["turn"] < state["max"] * n
 
     def throttled(i):
@@ -8221,6 +9934,8 @@ def run_free(state, io):
 
             io.emit("thinking", {"speaker": key, "provider": providers[i],
                                  "name": agent.name, "round": lap,
+                                 "limit": getattr(agent, "turn_timeout", None),
+                                 "idle": getattr(agent, "idle_timeout", None),
                                  "turns": state["max"], "turn": turn_no,
                                  "until_done": bool(state.get("until_done")),
                                  "ceiling": state.get("turn_ceiling")})
@@ -8251,12 +9966,17 @@ def run_free(state, io):
                         with cond:
                             record_usage(state, getattr(agent, "last_usage", None),
                                          seat_key=key, kind="retry")
-                        note_retry(state, io, agent, e1)
+                        # A provider that just failed is not working: pause,
+                        # then retry on a SHORT window (see retry_plan).
+                        delay, window = retry_plan(agent, e1)
+                        note_retry(state, io, agent, e1, delay, window)
+                        backoff_wait(io, delay)
                         on_act, acts = make_activity_sink(
                             io, key, providers[i], agent.name,
                             state["workspace"])
                         try:
-                            reply = agent.turn(message, on_activity=on_act)
+                            with retry_window(agent, window):
+                                reply = agent.turn(message, on_activity=on_act)
                         except Exception as e2:
                             with cond:
                                 if no_retry(e2):
@@ -8405,8 +10125,8 @@ def run_free(state, io):
             if (state["closing"] is None and not flow["stop"]
                     and not budget_left() and not any(busy)
                     and not any(inbox[k] for k in range(n))):
-                if state.get("until_done"):
-                    ceiling = (state.get("turn_ceiling") or DEFAULT_CEILING)
+                if state.get("until_done") and effective_ceiling(state):
+                    ceiling = effective_ceiling(state)
                     state["termination_reason"] = "ceiling"
                     note = (f"Safety ceiling reached ({ceiling} turns) "
                             f"without a wrap — pausing. Continue the chat "
@@ -8445,6 +10165,10 @@ def main():
     ap.add_argument("--permission", choices=PERMISSION_ORDER, default=None,
                     help="agent permissions: read_only, ask, auto (workspace "
                          "sandbox; default), or full (no sandbox/approvals)")
+    ap.add_argument("--turn-cap", type=float, default=None, metavar="MINUTES",
+                    help="absolute ceiling on ONE seat's turn (default: none — "
+                         "a turn runs until the work is done, and is cut off "
+                         "only if the CLI goes silent)")
     ap.add_argument("--connectors", action="store_true",
                     help="let seats use your connected apps over MCP (Gmail, "
                          "Drive, Calendar, M365, ERP…). They can then act in "
@@ -8491,6 +10215,42 @@ def main():
     ap.add_argument("--ceiling", type=int, default=DEFAULT_CEILING,
                     help=f"until-done safety ceiling: hard stop after N "
                          f"total turns (default {DEFAULT_CEILING})")
+    ap.add_argument("--continuous", action="store_true",
+                    help="Keep Improving: no round cap and no turn ceiling. "
+                         "The manager picks its own next objective when one "
+                         "is met and the run keeps going until you stop it or "
+                         "a limit below is reached")
+    ap.add_argument("--checkin-minutes", type=int,
+                    default=CHECKIN_DEFAULT_MINUTES,
+                    help=f"how often the watchdog checks the run is still "
+                         f"running and repairs it if not "
+                         f"(default {CHECKIN_DEFAULT_MINUTES}, "
+                         f"{CHECKIN_MIN_MINUTES}-{CHECKIN_MAX_MINUTES})")
+    ap.add_argument("--checkin-action", choices=CHECKIN_ACTIONS,
+                    default="notify",
+                    help="what the watchdog may do: auto (fix and log), "
+                         "notify (fix, log and raise attention), permission "
+                         "(change nothing until you approve — the run waits)")
+    ap.add_argument("--spend-cap", type=float, default=None,
+                    help="pause once the run has provably cost this many "
+                         "dollars (omit for no cap; only CLIs that report "
+                         "cost are counted)")
+    ap.add_argument("--time-cap", type=float, default=None,
+                    help="pause after this many hours of run time, "
+                         "accumulated across resumes (omit for no cap)")
+    ap.add_argument("--no-watchdog-stop", action="store_true",
+                    help="the scheduled check-in may repair the run but never "
+                         "end it")
+    ap.add_argument("--gate", default=None,
+                    help="verification command run in the working folder at "
+                         "the end of each wave (default: detected from the "
+                         "folder). Its result reaches the manager before it "
+                         "reviews")
+    ap.add_argument("--no-gate", action="store_true",
+                    help="run no verification command between waves")
+    ap.add_argument("--gate-commit", action="store_true",
+                    help="git-commit the working folder after each wave whose "
+                         "verification passed")
     ap.add_argument("--claude-model", default=DEFAULT_CLAUDE_MODEL,
                     help="e.g. claude-fable-5, claude-opus-5, claude-opus-4-8, "
                          "claude-sonnet-5, claude-haiku-4-5, or aliases "
@@ -8621,10 +10381,11 @@ def main():
     transcript = os.path.join(session_dir, "transcript.md")
     say_file = os.path.join(session_dir, "say.txt")
 
+    turn_cap = int(args.turn_cap * 60) if args.turn_cap else None
     agents = [AGENT_TYPES[p](workspace, yolo=permission == "full",
                              permission=permission,
                              model=m, effort=e, name=lb,
-                             connectors=args.connectors)
+                             connectors=args.connectors, turn_cap=turn_cap)
               for p, m, e, lb in seats]
     for a in agents:  # suffixed/custom labels inherit the provider's color
         COLORS.setdefault(a.name, COLORS.get(type(a).name, ""))
@@ -8642,18 +10403,54 @@ def main():
             + ([f"role: {a.role}"] if a.role else [])
         return f"{a.name} ({', '.join(bits)})"
 
+    # Keep Improving: assembled here so the banner below can state, before a
+    # single token is spent, exactly what will end this run.
+    continuous = bool(args.continuous)
+    continuous_cfg = None
+    if continuous:
+        gate_cmd = ("" if args.no_gate else
+                    (args.gate if args.gate is not None
+                     else detect_test_command(workspace)))
+        continuous_cfg = continuous_policy({
+            "on": True,
+            "objectives": [args.topic] if args.topic else [],
+            "checkin": {"minutes": args.checkin_minutes,
+                        "action": args.checkin_action},
+            "limits": {"spend_usd": args.spend_cap, "hours": args.time_cap,
+                       "watchdog_may_stop": not args.no_watchdog_stop},
+            "gate": {"command": gate_cmd, "commit": bool(args.gate_commit),
+                     "dirty_at_start": bool(git_dirty(workspace))},
+        })
+
     print(f"{BOLD}ai-chat{RESET} — {args.topic}")
     print(f"{DIM}participants : {' ↔ '.join(tuning_str(a) for a in agents)}")
-    if args.until_done:
+    if continuous:
+        # NOT .lower() — it turned "CLIs" into "clis"
+        print("rounds       : Keep Improving, no cap. "
+              + describe_limits({"continuous": continuous_cfg}))
+        print("verification : "
+              + ((continuous_cfg["gate"]["command"]
+                  + (" (commit on green)" if continuous_cfg["gate"]["commit"]
+                     else ""))
+                 if continuous_cfg["gate"]["command"]
+                 else "none — no test command for this folder"))
+    elif args.until_done:
         print(f"rounds       : until done (ceiling {max(1, args.ceiling)} turns)")
     else:
         print(f"rounds       : up to {args.turns}")
     if mode != DEFAULT_MODE:
         print(f"turn order   : {mode.replace('_', ' ')}")
-    preview = estimate_calls(normalize_orchestration(
-        mode=mode, turns=args.turns, until_done=args.until_done), len(agents))
-    print(f"call preview : about {preview['seat_calls']} seat + "
-          f"{preview['side_calls']} side calls (estimate)")
+    if continuous:
+        # An estimate implies an end. This mode does not have one, and
+        # printing a number here would be the most misleading line on screen.
+        print("call preview : unbounded — it keeps working until you stop it "
+              "or a limit above is reached")
+    else:
+        preview = estimate_calls(normalize_orchestration(
+            mode=mode, turns=args.turns, until_done=args.until_done),
+            len(agents))
+        print(f"call preview : about {preview['seat_calls']} seat + "
+              f"{preview['side_calls']} side calls (estimate)")
     print(f"permissions  : {PERMISSION_LEVELS[permission]['label']}")
     print(f"transcript   : {transcript}")
     print(f"interject    : type + Enter anytime · /stop ends · /turns N recaps "
@@ -8697,8 +10494,12 @@ def main():
              "supervisor_wave_index": 1,
              "panel": ({"synthesizer": synthesizer} if mode == "panel"
                        else None),
-             "until_done": bool(args.until_done),
-             "turn_ceiling": max(1, args.ceiling) if args.until_done else None,
+             "continuous": continuous_cfg,
+             # Keep Improving has no round cap and no ceiling of its own; the
+             # limits Josh set are the brakes (see `effective_ceiling`).
+             "until_done": bool(args.until_done) or continuous,
+             "turn_ceiling": (None if continuous else
+                              max(1, args.ceiling) if args.until_done else None),
              "spawn": {"tier1": not args.no_native_subagents,
                        "max_helpers": max(0, args.spawn_helpers),
                        "helpers_used": 0,

@@ -16,10 +16,13 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 
 import webview
 
 import dictation
+import export as export_mod
+import fork as fork_mod
 import outcome
 import relay
 from relay import (AGENT_TYPES, PROVIDERS, SESSIONS_DIR, HELP_TEXT,
@@ -136,10 +139,67 @@ FILE_LIST_MAX = 200                  # rows returned to the Files rail
 FILE_SCAN_MAX = 4000                 # walk budget for huge picked folders
 TEXT_MAX_BYTES = 256 * 1024          # live code viewer read cap
 
+# The keyboard-shortcut cheat sheet (? toggles the overlay). Single source of
+# truth: app.py owns it, the UI fetches it via get_shortcuts() and renders it
+# verbatim, so a binding that changes here cannot drift from the sheet. Every
+# entry must describe a binding the UI REALLY has — "?" itself is the toggle,
+# which is why it heads the list.
+KEYBOARD_SHORTCUTS = [
+    {"keys": "?", "action": "Show or hide this cheat sheet"},
+    {"keys": "Enter", "action": "Send the message in the composer"},
+    {"keys": "/ …", "action": "A message starting with / runs a command instead of chatting"},
+    {"keys": "Ctrl+T", "action": "New conversation tab"},
+    {"keys": "Ctrl+1–9", "action": "Jump to tab N"},
+    {"keys": "Ctrl+Tab", "action": "Cycle open tabs (Shift goes backwards)"},
+    {"keys": "Ctrl+Shift+Space", "action": "Start / stop dictation (hold or tap to latch)"},
+    {"keys": "Escape", "action": "Cancel dictation, close a modal, or clear search"},
+    {"keys": "↑ / ↓", "action": "Resize the composer from its focused grab bar"},
+    {"keys": "Double-click", "action": "Rename a chat in the rail (or a seat's name)"},
+]
+
 
 # Moved to relay.py (the activity sink confines CLI-quoted paths engine-side);
 # re-exported here so the bridge methods and tests keep their import.
 from relay import confine_to_workspace
+
+
+# ------------------------------------------------------- session rail data --
+# The rail paints about ten fields per row, but session_summary returns the
+# WHOLE record — supervisor control trace, workstream task records, the
+# orchestration recipe — none of which the rail reads. Those matter only once
+# a chat is OPEN, and open_session keeps serving the full summary that
+# restoreOrchestration / restoreSeats / the control log consume. Measured on
+# the real history (2026-08-23): 42 chats carried 390 KB per refreshChats(),
+# 76% of it supervisor_trace + tasks, and one long Keep Improving chat alone
+# carried 140 KB of trace growing with every wave — hauled across the bridge
+# on boot and at EVERY run end just to paint titles and dots. This is an
+# explicit allowlist rather than a trim-list on purpose: a new summary field
+# stays out of rail rows until the rail actually needs it, so the payload
+# cannot quietly regrow; a genuinely new rail feature edits this tuple and
+# the omission is visible here, not discovered in a profiler.
+RAIL_SUMMARY_FIELDS = (
+    # identity + ordering
+    "id", "title", "created", "updated",
+    # view-only markers and resumability (tooltip)
+    "ended", "legacy", "can_continue", "can_continue_reason",
+    # lineage ("↳ spawned by …", "branched from …") and project grouping headers
+    "parent", "fork_of", "project",
+    # outcome pill + compact manager badge (NOT the trace behind it)
+    "completion", "supervisor_status",
+)
+
+
+def _rail_row(summary):
+    """One sidebar row: exactly what the rail paints, nothing more.
+
+    Participants shrink to what a row shows too — dots paint provider, the
+    tooltip paints name; model/effort/role strings are seat-card material
+    and ride open_session's full summary instead."""
+    row = {k: summary[k] for k in RAIL_SUMMARY_FIELDS if k in summary}
+    row["participants"] = [
+        {k: p[k] for k in ("id", "provider", "name") if k in p}
+        for p in summary.get("participants") or []]
+    return row
 
 
 def _thumb_bytes(path):
@@ -232,6 +292,12 @@ class Run:
         self.status = "idle"         # the RunState vocabulary (see set_status)
         self.pending_ask = None
         self.unread = 0
+        # Seats currently inside a turn: slot id -> {name, provider, started,
+        # limit}. Typing indicators are LIVE-only in the UI, so reopening a
+        # chat mid-turn used to wipe them and never bring them back — a room
+        # with three seats 14 minutes into a 15-minute window looked exactly
+        # like a dead one (2026-08-23). open_session replays this instead.
+        self.thinking = {}
 
     def is_running(self):
         return bool(self.thread and self.thread.is_alive())
@@ -327,6 +393,19 @@ class _AppIO(LoopIO):
     def emit(self, event, payload=None):
         payload = dict(payload or {})
         payload.setdefault("chat_id", self._run.id)
+        # Track in-flight seats here rather than in Api.emit, which must stay
+        # a pure enqueue, and rather than in the loop, which would have to
+        # learn about front-end state it has no business knowing.
+        if event == "thinking":
+            self._run.thinking[str(payload.get("speaker"))] = {
+                "speaker": payload.get("speaker"),
+                "provider": payload.get("provider"),
+                "name": payload.get("name"),
+                "limit": payload.get("limit"),
+                "idle": payload.get("idle"),
+                "started": time.time()}
+        elif event == "thinking_done":
+            self._run.thinking.pop(str(payload.get("speaker")), None)
         self._api.emit(event, payload)
 
     def drain_human(self):
@@ -400,6 +479,10 @@ class Api:
         # parallel modes emit from several seat threads). A single queue also
         # guarantees FIFO ordering across all producers.
         self._emit_q = queue.Queue()
+        # Sound cues for events that wait on Josh (question/checkin/done).
+        # UI toggles it via set_sound and remembers the choice in localStorage;
+        # ON by default because the events that chime are the ones that block.
+        self._sound = True
         threading.Thread(target=self._drain_emits, daemon=True).start()
 
     # ---- focused-run views (the old singular attributes) -----------------
@@ -496,13 +579,24 @@ class Api:
     # ---------------------------------------------------------- to the UI --
     def emit(self, event, payload=None):
         # non-blocking and thread-safe: callers just enqueue
-        self._emit_q.put(json.dumps({"event": event, "payload": payload or {}}))
+        self._emit_q.put((event,
+                          json.dumps({"event": event,
+                                      "payload": payload or {}})))
 
     def _drain_emits(self):
         while True:
-            data = self._emit_q.get()
+            event, data = self._emit_q.get()
             try:
                 self._window.evaluate_js(f"uiEvent({data})")
+                # An unattended Keep Improving run that repaired itself at 3am
+                # is exactly what Josh wants to notice when he comes back. Done
+                # HERE rather than in emit() so the one thread that owns window
+                # interaction keeps owning all of it.
+                if event == "checkin":
+                    _flash_taskbar(self._window)
+                if event in SOUND_CUES and self._sound:
+                    threading.Thread(target=_play_cue, args=(event,),
+                                     daemon=True).start()
             except Exception:
                 pass
             finally:
@@ -959,6 +1053,90 @@ class Api:
         return {"workspace": root, "files": rows[:FILE_LIST_MAX],
                 "truncated": scanned > FILE_SCAN_MAX or len(rows) > FILE_LIST_MAX}
 
+    def restart_resume(self):
+        """What, if anything, this launch should pick back up.
+
+        Read on startup. Reopening a chat is free, so the last active tab is
+        always offered; RESUMING it costs real calls, so that is offered only
+        for a chat whose process died mid-run (`was_interrupted`) — every
+        other ending was somebody's decision.
+
+        The barren guard mirrors Keep Improving's: two auto-resumes that
+        committed no turn means resuming is not working, and a third would
+        just be a crash loop with a bill attached.
+        """
+        try:
+            active = (read_tabs() or {}).get("active")
+        except Exception:
+            return {}
+        if not active:
+            return {}
+        path = session_path(active)
+        if not path:
+            return {}
+        meta = read_meta(path)
+        summary = session_summary(path, meta)
+        out = {"session_id": active, "resume": False, "reason": ""}
+        if not (summary.get("interrupted") and summary.get("can_continue")):
+            return out
+        seen = meta.get("auto_resume") or {}
+        if (int(seen.get("turn", -1)) == int(meta.get("turn") or 0)
+                and int(seen.get("count") or 0) >= 2):
+            out["reason"] = ("This chat was interrupted again, but the last "
+                             "two automatic resumes produced no turns — "
+                             "reply to try it yourself.")
+            return out
+        out["resume"] = True
+        out["reason"] = ("This conversation was still running when the app "
+                         "closed, so it is being picked up where it left off. "
+                         "Press Stop if you would rather it did not.")
+        return out
+
+    def note_auto_resume(self, session_id):
+        """Record the attempt so a crash loop cannot bill itself forever."""
+        path = session_path(session_id)
+        if not path:
+            return {"ok": False}
+        meta = read_meta(path)
+        if not meta:
+            return {"ok": False}
+        turn = int(meta.get("turn") or 0)
+        seen = meta.get("auto_resume") or {}
+        count = int(seen.get("count") or 0) + 1             if int(seen.get("turn", -1)) == turn else 1
+        meta["auto_resume"] = {"turn": turn, "count": count}
+        try:
+            relay._atomic_write(os.path.join(path, "meta.json"),
+                                json.dumps(meta, ensure_ascii=False, indent=1))
+        except Exception:
+            pass                      # bookkeeping must never block a resume
+        return {"ok": True, "count": count}
+
+    # -------------------------------------------------- keep improving --
+    def continuous_probe(self, path=None):
+        """What the Keep Improving warning modal needs to tell the truth.
+
+        `recheck_auth` shape, and for the documented reason: `git status` is a
+        subprocess, and subprocess.run DEADLOCKS on the pywebview bridge
+        thread. Answering with an event costs the modal one repaint and buys
+        it a real answer instead of a guess.
+        """
+        folder = (path or "").strip() or None
+
+        def work():
+            payload = {"workspace": folder, "command": "", "dirty": False,
+                       "git": False}
+            try:
+                if folder and os.path.isdir(folder):
+                    payload["command"] = relay.detect_test_command(folder)
+                    dirty = relay.git_dirty(folder)
+                    payload["git"] = dirty is not None
+                    payload["dirty"] = bool(dirty)
+            except Exception:
+                pass            # a probe that fails must not block the modal
+            self.emit("continuous_probe", payload)
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True}
+
     # ------------------------------------------------------------ accounts --
     # get_auth_status is called on the js-bridge thread: it must stay
     # subprocess-free and non-blocking (cache snapshot only). All probing
@@ -1219,7 +1397,29 @@ class Api:
     # bounded file I/O and object construction: never probe a CLI here.
 
     def list_sessions(self):
-        return stored_sessions()
+        """Sidebar rows under the rail contract (RAIL_SUMMARY_FIELDS) — the
+        full summary stays on open_session, the one call whose consumer
+        actually reads the deep fields."""
+        return [_rail_row(s) for s in stored_sessions()]
+
+    def search_sessions(self, query):
+        """Cross-chat full-text search. Same bridge-thread rules as
+        list_sessions — bounded file reads only, never a subprocess."""
+        try:
+            return relay.search_sessions(query)
+        except Exception as exc:
+            return {"error": error_excerpt(exc)}
+
+    def get_shortcuts(self):
+        """The keyboard-shortcut cheat sheet's data (? toggles the overlay).
+
+        Pure constant return — the safest kind of bridge call there is: no
+        file I/O, no subprocess, cannot raise, safe on the js-bridge thread.
+        The UI renders KEYBOARD_SHORTCUTS verbatim rather than keeping its own
+        hand-written copy, so the sheet can never drift from what the app
+        actually binds.
+        """
+        return {"shortcuts": [dict(s) for s in KEYBOARD_SHORTCUTS]}
 
     def open_session(self, session_id):
         """Show another chat. Opening one no longer stops the running one —
@@ -1241,6 +1441,9 @@ class Api:
             return {"ok": True,
                     "session": session_summary(existing.session_dir),
                     "messages": read_messages(existing.session_dir),
+                    # so the UI can put the typing indicators back rather than
+                    # showing a grinding chat as an idle one
+                    "thinking": list(existing.thinking.values()),
                     "live": existing.is_running()}
         path = session_path(session_id)
         if not path:
@@ -1284,8 +1487,9 @@ class Api:
             # and pinning the run on None crashed every one of them.
             state["_run"] = self._runs.focused()
         self._conv = state
+        # a chat this window has not loaded cannot have a turn in flight
         return {"ok": True, "session": summary, "messages": messages,
-                "live": False}
+                "thinking": [], "live": False}
 
     def get_tabs(self):
         """The open-tab strip, filtered to chats that still exist."""
@@ -1355,6 +1559,54 @@ class Api:
             return {"error": f"Could not delete chat: {e}"}
         self._runs.forget(session_id)
         return {"ok": True, "id": session_id}
+
+    def export_session(self, session_id):
+        """Render one chat as a self-contained HTML file and open it.
+
+        Bridge-thread safe: export.py is bounded local file I/O — no
+        subprocess, no workspace walking. Exporting a RUNNING chat is
+        deliberately allowed: it reads messages.jsonl once and writes a
+        separate file, so the worst case is an export missing a turn that
+        landed mid-render.
+        """
+        path = session_path(session_id)
+        if not path:
+            return {"error": "That chat no longer exists."}
+        res = export_mod.export_session(path)
+        if res.get("error"):
+            return res
+        return {"ok": True, "path": res["path"], "messages": res["messages"]}
+
+    def fork_session(self, session_id, message_id=None):
+        """Branch a NEW conversation from this one, up to `message_id`.
+
+        Refuses while the source is running (the copy would race its writes,
+        exactly like rename/delete). The fork carries fresh AI memory by
+        design — fork.py clears every seat's CLI session id — so opening it
+        and continuing starts new provider threads at the branch point.
+        """
+        path = session_path(session_id)
+        if not path:
+            return {"error": "That chat no longer exists."}
+        run = self._runs.get(session_id)
+        if run is not None and run.is_running():
+            return {"error": "Stop this conversation before branching it."}
+        # Resolve through relay's SESSIONS_DIR, never fork.py's own default:
+        # relay owns where sessions live (tests redirect it; the day it moves,
+        # this stays correct instead of silently splitting in two).
+        res = fork_mod.fork_session(session_id, message_id,
+                                    sessions_dir=SESSIONS_DIR)
+        if res.get("error"):
+            return res
+        # A fork can be large (it copies the workspace), but this still runs
+        # on the bridge thread like delete_session's rmtree: bounded local
+        # I/O, and the UI shows nothing until it answers.
+        return {"ok": True, "id": res["id"],
+                "session": session_summary(res["path"])}
+
+    def set_sound(self, enabled):
+        self._sound = bool(enabled)
+        return {"ok": True, "sound": self._sound}
 
     def new_conversation(self):
         return self.reset_conversation()
@@ -1808,6 +2060,13 @@ class Api:
                               "effort": m.get("effort") or None}
         supervisor_spec = (cfg.get("supervisor")
                            if recipe["workflow"] == "supervisor" else None)
+        # Keep Improving. Only ever paired with the supervisor workflow from
+        # the UI; validated through the engine's own normalizer so a hand-made
+        # cfg cannot smuggle a limit shape the loop would misread.
+        continuous_cfg = None
+        raw_continuous = cfg.get("continuous")
+        if isinstance(raw_continuous, dict) and raw_continuous.get("on"):
+            continuous_cfg = relay.continuous_policy(raw_continuous)
         seats_cfg = cfg.get("seats")
         if seats_cfg is None:  # legacy shape: {"agents": {provider: {...}}}
             seats_cfg = [dict(id=i, provider=k, **cfg["agents"][k])
@@ -1853,6 +2112,15 @@ class Api:
         workspace = cfg.get("workspace") or os.path.join(self._session_dir, "workspace")
         os.makedirs(self._session_dir, exist_ok=True)
         os.makedirs(workspace, exist_ok=True)
+        if continuous_cfg:
+            # Both of these need the real folder, which only exists now. The
+            # dirty flag is snapshotted at the START on purpose: it is what
+            # decides whether a green wave may commit, and asking later would
+            # be asking about the seats' own edits.
+            gate = continuous_cfg["gate"]
+            if not gate["command"]:
+                gate["command"] = relay.detect_test_command(workspace)
+            gate["dirty_at_start"] = bool(relay.git_dirty(workspace))
         # attachment lines join the opener AFTER the title is set — the rail
         # title should stay the words Josh typed, not a wall of file paths
         opener = with_attachments(opener, save_attachments(attachments, workspace))
@@ -1894,8 +2162,11 @@ class Api:
             "supervisor_wave_index": 1,
             "workstreams": None,
             "panel": panel_state,
-            "until_done": until_done,
-            "turn_ceiling": ceiling,
+            "continuous": continuous_cfg,
+            # Keep Improving has no round cap and no ceiling of its own — the
+            # limits Josh acknowledged in the warning modal are the brakes.
+            "until_done": until_done or bool(continuous_cfg),
+            "turn_ceiling": None if continuous_cfg else ceiling,
             "spawn": {"tier1": bool((cfg.get("spawn") or {})
                                     .get("tier1", True)),
                       "max_helpers": max(0, int((cfg.get("spawn") or {})
@@ -1996,6 +2267,28 @@ class Api:
         state["closing"] = None
         state["next_speaker"] = None
         state["deferred_wrap"] = None
+        if relay.continuous_on(state):
+            # Continuing IS the answer to "a limit stopped it": clear the
+            # announcement so the same limit can be reported again if the new
+            # one is also reached, re-arm the clock, and forgive the barren
+            # restart count — Josh looking at it is new information.
+            pol = state["continuous"]
+            pol.pop("announced_limit", None)
+            pol["barren_revivals"] = 0
+            state.pop("_cont_mark", None)
+            limits = pol.get("limits") or {}
+            for key in ("spend_usd", "hours"):
+                raised = ((cfg.get("continuous") or {}).get("limits")
+                          or {}).get(key)
+                if raised is not None:
+                    limits[key] = relay._opt_number(raised)
+            still = relay.continuous_backstop(state)
+            if still:
+                note = (still + " Raise or clear that limit in the Keep "
+                        "Improving settings before continuing, or this run "
+                        "will stop again immediately.")
+                state["store"].system(note, round=state["rnd"])
+                self.emit("status", {"text": note})
         # Project docs may have moved since this chat started. REPORT it, never
         # swap it: the seats already hold the original text, so regenerating
         # here would give a later /clear'd seat different context than its
@@ -2024,6 +2317,8 @@ class Api:
         # another chat mid-run must not redirect this loop's stop flag,
         # human queue or staged roles to the chat he happens to be viewing.
         run = state.get("_run")
+        if run is not None:
+            run.thinking.clear()     # a new run starts with nobody mid-turn
         self._set_status(run, "running")
         try:
             outcome_kind = run_rounds(state, _AppIO(self, run))
@@ -2060,6 +2355,66 @@ class Api:
 
 ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "ai-chat.ico")
+
+
+def _flash_taskbar(window):
+    """Raise attention without stealing focus. Windows-only, best-effort.
+
+    An unattended run that quietly fixed itself is exactly the thing Josh
+    wants to notice when he comes back, and a real toast needs `winrt`, which
+    this project does not have. Same posture as `_apply_window_icon`: an
+    attention-getter must never be able to crash the app.
+    """
+    if sys.platform != "win32" or window is None:
+        return
+    try:
+        u32 = ctypes.windll.user32
+        try:
+            hwnd = int(window.native.Handle.ToInt64())
+        except Exception:
+            hwnd = u32.FindWindowW(None, window.title)
+        if not hwnd:
+            return
+
+        class FLASHWINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("hwnd", ctypes.c_void_p),
+                        ("dwFlags", ctypes.c_uint), ("uCount", ctypes.c_uint),
+                        ("dwTimeout", ctypes.c_uint)]
+        FLASHW_TRAY, FLASHW_TIMERNOFG = 0x2, 0xC
+        info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), ctypes.c_void_p(hwnd),
+                          FLASHW_TRAY | FLASHW_TIMERNOFG, 0, 0)
+        u32.FlashWindowEx(ctypes.byref(info))
+    except Exception:
+        pass
+
+
+def _play_cue(kind):
+    """A short local chime for one event kind, on its own thread, best-effort.
+
+    Sound is the one channel that reaches Josh when the window is minimized or
+    he is in another room — the same reason _flash_taskbar exists. winsound
+    only; non-Windows and every failure stay silent. NEVER blocking: Beep
+    holds its thread for the tone's duration, so the emitter thread must not
+    call this inline.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import winsound
+        for freq, ms in SOUND_CUES.get(kind, ()):
+            winsound.Beep(int(freq), int(ms))
+    except Exception:
+        pass
+
+
+# (frequency Hz, duration ms) per tone. Distinct shapes so a question can be
+# told from a finished run without looking: question = rising pair ("come
+# answer"), checkin = triple tap ("the watchdog spoke"), done = single low.
+SOUND_CUES = {
+    "question": ((740, 130), (988, 200)),
+    "checkin": ((880, 90), (880, 90), (880, 90)),
+    "done": ((587, 160),),
+}
 
 
 def _apply_window_icon(window):

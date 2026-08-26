@@ -18,9 +18,23 @@ they are the whole design:
     model grading a conversation of models is the weakest signal in the file,
     and blending it into one score would launder that weakness invisibly.
 
-Everything is derived from files a finished session already has
-(``messages.jsonl`` + ``meta.json``), so an outcome can be rebuilt for any
+THE RECORD (one per session, at ``sessions/<name>/outcome.json``, versioned by
+``OUTCOME_VERSION``)::
+
+    {"outcome_version": 1,
+     "session": {"id", "workspace", "parent"},   # identity only
+     "hard_facts": {...},      # structural truth — turns, seats+usage, asks,
+                               # interventions, artifacts, termination_reason,
+                               # goal_verdict + verdict_source, lifecycle
+     "human_feedback": {...},  # Josh's end card; survives rebuilds untouched
+     "model_eval": {}}         # reserved for a model's grading; stays separate
+
+Everything in ``hard_facts`` is derived from files a finished session already
+has (``messages.jsonl`` + ``meta.json``), so an outcome can be rebuilt for any
 session ever recorded — including ones that ran before this module existed.
+Rebuilds are additive-only across versions: keys documented here keep their
+meaning forever, because the aggregation side (retro.py, /retro) reads these
+files as its sole input.
 
 This module deliberately imports NOTHING from relay: relay calls into it, and a
 standalone reader keeps the aggregation side (``/retro``) testable without
@@ -201,6 +215,11 @@ ENDED_FROM_LOOP = {"wrapped": "wrap", "stopped": "stop", "cap": "cap",
 # a participant playing [[WRAP]] is only a mechanical ending: it says nothing
 # about whether the user's goal was met.
 TERMINATION_REASONS = ("wrap", "moderator_done", "supervisor_done", "cap",
+                       # "limit" is a Keep Improving run pausing on a spend or
+                       # time cap Josh set. It is NOT "cap" (the round budget)
+                       # and NOT "stop" (he pressed the button) — a run that
+                       # hit the money is a different fact from both.
+                       "limit",
                        "ceiling", "stop", "fatal", "unknown")
 TERMINATION_ALIASES = {"wrapped": "wrap", "stopped": "stop",
                        "done": "wrap", "failed": "fatal"}
