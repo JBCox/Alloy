@@ -3272,6 +3272,12 @@ window.uiEvent = packet => {
     mergeSupervisorTasks(chatId, payload.tasks || []);
   } else if (chatId && event === "supervisor") {
     appendSupervisorTrace(chatId, payload.entry);
+  } else if (chatId && event === "session_title") {
+    // The engine's one-shot auto-title: patch the stored summary and repaint
+    // the rail, so the new name appears live instead of on reopen.
+    const s = sessions.find(x => x.id === chatId);
+    if (s && payload.title) s.title = payload.title;
+    renderChats();
   } else if (chatId && event === "plan") {
     const run = runFor(chatId); run.plan = payload;
     if (planPhase(payload.phase) === "awaiting") setRunStatus(chatId, "waiting");

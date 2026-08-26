@@ -417,6 +417,15 @@ class _AppIO(LoopIO):
     def should_stop(self):
         return self._run.stop_flag.is_set()
 
+    def auto_title(self, state):
+        # The engine's one-shot post-first-round retitle, run at this barrier
+        # (no seat thread alive). emit carries the run's chat_id, so the rail
+        # refreshes even for a background chat. Gated on the production flag:
+        # a side call costs a real CLI invocation, and headless Api instances
+        # in tests must stay token-free structurally, not by vigilance.
+        if self._api._side_calls_enabled:
+            relay.maybe_auto_title(state, self)
+
     def on_turn_boundary(self, state):
         # a staged role lands here, so the seat about to speak gets its fresh
         # preamble with the new role rather than switching identity mid-turn
@@ -483,6 +492,10 @@ class Api:
         # UI toggles it via set_sound and remembers the choice in localStorage;
         # ON by default because the events that chime are the ones that block.
         self._sound = True
+        # Production-only opt-in for side calls that cost real CLI turns
+        # (currently the one-shot auto-title). main() flips this; tests
+        # instantiating Api directly stay token-free by construction.
+        self._side_calls_enabled = False
         threading.Thread(target=self._drain_emits, daemon=True).start()
 
     # ---- focused-run views (the old singular attributes) -----------------
@@ -2452,6 +2465,7 @@ def main():
         except Exception:
             pass
     api = Api()
+    api._side_calls_enabled = True     # real window: side calls may spend
     threading.Thread(target=api.precompute_config, daemon=True).start()
     threading.Thread(target=api.precompute_auth, daemon=True).start()
     ui = os.path.join(os.path.dirname(os.path.abspath(__file__)),
