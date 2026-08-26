@@ -105,6 +105,32 @@ class HeadlessAppTests(unittest.TestCase):
         api._emit_q.join()
         self.assertEqual(api.open_session(run.id)["thinking"], [])
 
+    def test_a_side_call_in_flight_survives_reopening_the_chat(self):
+        """Same rule as the typing indicators, for the relay's OWN work: a
+        chat reopened 90 seconds into a supervisor plan must not render as an
+        idle one just because the indicator is live-only."""
+        api = self._stopped_api()
+        run = api._runs.focused()
+        io = app._AppIO(api, run)
+        with relay.working(io, "plan", "make it better"):
+            api._emit_q.join()
+            payload = api.open_session(run.id)["working"]
+            self.assertEqual(len(payload), 1)
+            self.assertEqual(payload[0]["what"], "Planning the work")
+            self.assertEqual(payload[0]["detail"], "make it better")
+            self.assertGreater(payload[0]["started"], 0,
+                               "the UI needs the true age, not a fresh 0:00")
+        api._emit_q.join()
+        self.assertEqual(api.open_session(run.id)["working"], [])
+
+    def test_a_new_run_starts_with_no_side_call_left_over(self):
+        api = self._stopped_api()
+        run = api._runs.focused()
+        run.working["stale"] = {"id": "stale", "what": "Planning the work"}
+        api._rounds(run.state)
+        api._emit_q.join()
+        self.assertEqual(run.working, {})
+
     def test_a_finished_run_reports_nobody_mid_turn(self):
         """Whatever the last event managed to say before the loop ended."""
         api = self._stopped_api()
@@ -644,18 +670,27 @@ class HeadlessAppTests(unittest.TestCase):
         events = api._window.events()
         names = [e["event"] for e in events]
         # run_status brackets the loop: `running` once the run really starts,
-        # then the terminal state, so the rail never has to infer either.
-        self.assertEqual(names, ["started", "message", "run_status",
+        # then the terminal state, so the rail never has to infer either. The
+        # `working` pair brackets pre-flight setup - the stretch with no seat
+        # in it yet, which is exactly the window that used to read as a dead
+        # app; it closes before `started` because that is when setup is done.
+        self.assertEqual(names, ["working", "working",
+                                 "started", "message", "run_status",
                                  "thinking", "thinking_done", "message",
                                  "thinking", "thinking_done", "message",
                                  "run_status", "done"])
+        setup = [e["payload"] for e in events if e["event"] == "working"]
+        self.assertEqual(setup[0]["phase"], "setup")
+        self.assertEqual(setup[0]["id"], setup[1]["id"])
+        self.assertTrue(setup[1]["done"])
         status = [e for e in events if e["event"] == "run_status"]
         self.assertEqual([e["payload"]["status"] for e in status],
                          ["running", "done"])
         self.assertTrue(all(e["payload"]["chat_id"] for e in status))
-        # opener row
-        self.assertEqual(events[1]["payload"]["speaker"], "josh")
-        self.assertEqual(events[1]["payload"]["text"], "hello agents")
+        # opener row — by type, for the reason spelled out just below
+        opener = next(e["payload"] for e in events if e["event"] == "message"
+                      and e["payload"].get("speaker") == "josh")
+        self.assertEqual(opener["text"], "hello agents")
         # agent rows carry seat id + provider + name (make_log rows).
         # Selected BY TYPE, not by index: positional picks break every time a
         # new event joins the stream, which says nothing about the behaviour.

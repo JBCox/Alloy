@@ -288,12 +288,40 @@
     display: flex; align-items: center; gap: 1px;
   }
   .chat-row .x, .chat-row .chat-stop, .chat-row .pin, .chat-row .exp,
-  .chat-row .arc {
+  .chat-row .arc, .chat-row .lin {
     width: 20px; height: 20px;
     border: 0; border-radius: 6px; background: transparent; color: var(--muted);
     cursor: pointer; font-size: 12px; line-height: 1; opacity: 0;
     transition: opacity .12s;
   }
+  /* Spawn lineage: unlike the other actions this chip is the INDICATOR, not
+     just a control - it stays faintly visible on any row that spawned
+     sub-conversations, and brightens on hover/open. */
+  .chat-row .lin { opacity: .55; color: var(--alloy); font-size: 11px; }
+  .chat-row .lin.open { opacity: 1; background: var(--surface2); }
+  .chat-row .lin:hover { opacity: 1; }
+  .lineage-pop {
+    position: absolute; top: 100%; left: 6px; right: 3px; z-index: 40;
+    background: var(--bg); border: 1px solid rgba(255,255,255,.14);
+    border-radius: 9px; padding: 4px; margin-top: 3px;
+    box-shadow: 0 10px 26px rgba(0,0,0,.5);
+    max-height: 230px; overflow: auto;
+  }
+  .lineage-pop[hidden] { display: none; }
+  .lineage-h {
+    font-size: 10px; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--muted); padding: 3px 6px 5px;
+  }
+  .lineage-item {
+    display: flex; align-items: center; gap: 7px; padding: 4px 6px;
+    border-radius: 7px; cursor: pointer; font-size: 12.5px; color: var(--text);
+    white-space: nowrap; overflow: hidden;
+  }
+  .lineage-item:hover { background: var(--surface2); }
+  .lineage-item .who { display: flex; gap: 2px; flex: 0 0 auto; }
+  .lineage-item .who i { width: 6px; height: 6px; border-radius: 50%; display: block; }
+  .lineage-item .lt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .msg-head .lineage-link { color: var(--alloy); }
   .chat-row .pin.on { opacity: 1; color: var(--alloy); }
   .chat-row:hover .pin, .chat-row:hover .exp, .chat-row:hover .arc,
   .chat-row .pin.on { opacity: 1; }
@@ -1476,6 +1504,33 @@
   }
   .typing .tclock.late { color: var(--alloy); opacity: 1; }
 
+  /* ---------- the relay's own work ----------
+     Seats have typing indicators; everything that is NOT a seat -- the
+     supervisor planning, the brief, the moderator, the gate, setup -- used to
+     run in complete silence, so "before they start" was indistinguishable
+     from a frozen window. Alloy chrome on purpose: this is the APP working,
+     not a participant, and it must never borrow a provider colour. */
+  .working { display: flex; align-items: center; gap: 9px; margin: 0 0 14px 2px;
+    color: var(--muted); font-size: 13px; }
+  .working .wspin {
+    width: 11px; height: 11px; flex: none; border-radius: 50%;
+    border: 2px solid color-mix(in srgb, var(--alloy) 30%, transparent);
+    border-top-color: var(--alloy); animation: wspin .9s linear infinite;
+  }
+  @keyframes wspin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    .working .wspin { animation: none; border-top-color: var(--alloy); }
+  }
+  .working .wwhat { color: var(--fg); }
+  .working .wdetail {
+    color: var(--muted); opacity: .8; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; max-width: 46ch;
+  }
+  .working .tclock {
+    font: 11px "Cascadia Mono", Consolas, monospace; color: var(--muted);
+    opacity: .75;
+  }
+
   /* ---------- live activity narration ---------- */
   .act-log { margin: 2px 0 0 17px; border-left: 2px solid var(--who, var(--line));
     padding-left: 9px; }
@@ -1483,9 +1538,38 @@
     font: 11px "Cascadia Mono", Consolas, monospace; color: var(--muted);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.6;
   }
-  .act-line.k-reasoning { font-style: italic; }
   .act-line.k-progress { color: var(--who, var(--muted)); opacity: .75; }
   .act-line.k-edit { color: var(--text); opacity: .8; }
+  /* The seat's OWN words ("I'll grep for needle, then edit") are prose, not
+     a command line — every CLI streams them and they used to be dropped, so
+     the log read as a list of file names with no story joining them. */
+  .act-line.k-say, .act-line.k-reasoning {
+    /* Longhands, NOT the `font` shorthand: its family slot rejects
+       `inherit`, so `font: italic 12px/1.55 var(--ui, inherit)` was an
+       invalid declaration and the whole rule -- italics included -- was
+       dropped while looking perfectly reasonable in the source. */
+    font-family: inherit; font-style: italic; font-size: 12px;
+    line-height: 1.55; color: var(--text); opacity: .78;
+    white-space: normal;
+  }
+  /* An outcome belongs to the call above it: dimmer, and indented under it,
+     so "searching … / found 3" reads as one step and not two. */
+  .act-line.k-result { opacity: .62; padding-left: 13px; }
+  .act-line.k-result.bad { color: var(--danger, #e06c5c); opacity: .95; }
+  .act-icon {
+    display: inline-block; width: 1.1em; opacity: .7; font-style: normal;
+  }
+  /* A long turn is dozens of steps; keep the newest visible and let the rest
+     scroll rather than silently dropping them out of the live view. */
+  .typing .act-log { max-height: 190px; overflow-y: auto; }
+  .typing .act-log::-webkit-scrollbar { width: 6px; }
+  .typing .act-log::-webkit-scrollbar-thumb {
+    background: var(--line); border-radius: 3px;
+  }
+  .tsteps {
+    font: 11px "Cascadia Mono", Consolas, monospace; color: var(--muted);
+    opacity: .75;
+  }
   .think-block { margin: 0 0 8px; }
   .think-block summary {
     cursor: pointer; color: var(--muted); font-size: 11.5px; user-select: none;
@@ -3104,9 +3188,7 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
   const think = Array.isArray(activity) && activity.length
     ? `<details class="think-block"><summary>${esc(name)} worked through ` +
       `${activity.length} step${activity.length === 1 ? "" : "s"}</summary>` +
-      activity.map(a =>
-        `<div class="act-line k-${esc(String(a.kind || "note"))}">` +
-        `${esc(String(a.text || ""))}</div>`).join("") + `</details>`
+      activity.map(a => actLineHtml(a)).join("") + `</details>`
     : "";
   d.innerHTML = `<div class="msg-head"><span class="who">${esc(name)}</span>` +
     (meta ? `<span class="meta">${esc(meta)}</span>` : "") + costPill + delivery + clock +
@@ -3180,6 +3262,22 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
       head.appendChild(down);
     }
   }
+  // Spawned-team lineage in the feed: a team report row IS the parent→child
+  // edge rendered as a message. The child session id survives only in the
+  // relay's own wording ("Full transcript: sessions/<id>"), so offer the jump
+  // only when that id still resolves to a listed chat — deleted children are
+  // legal hints (meta.children), and a button into the void would be a lie.
+  if (row && /^team-/.test(String(row.speaker || ""))) {
+    const cid = (/sessions\/([A-Za-z0-9._-]+)/.exec(String(text || "")) || [])[1];
+    if (cid && sessions.some(x => x.id === cid)) {
+      const lb = document.createElement("button");
+      lb.className = "copy-btn lineage-link";
+      lb.title = `Open sub-conversation '${cid}'`;
+      lb.textContent = "⌥";
+      lb.onclick = e => { e.stopPropagation(); openChat(cid); };
+      d.querySelector(".msg-head").appendChild(lb);
+    }
+  }
   // an agent mentioning an image it made ⇒ show it right here in the chat
   if (kind !== "system") attachThumbs(d.querySelector(".msg-body"), findImageRefs(text));
   // a different calendar day opens a divider (live turns and replay both ride
@@ -3200,6 +3298,7 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
   $("feed").appendChild(d);
   // parallel modes: keep live typing indicators below the new message
   typingEls.forEach(el => $("feed").appendChild(el));
+  workingEls.forEach(w => { if (w.el) $("feed").appendChild(w.el); });
   if (!stick) unread++;
   syncHistoryLens();
   applyHistoryLens();
@@ -3239,9 +3338,43 @@ function dropQueuedEcho(text) {
     if (el.dataset.queued === (text || "")) { el.remove(); return; }
   }
 }
+// One glyph per kind of step, so a wall of grey lines becomes scannable at a
+// glance. Deliberately text, not images: the log is escaped CLI output and a
+// sprite sheet would be one more thing to keep in sync with the adapters.
+// command has NO glyph on purpose: its text already starts with "$ ",
+// which every adapter emits and the transcript keeps, so a prompt-ish
+// icon in front of it just reads as "> $ pytest".
+const ACT_ICONS = {command: "", edit: "\u270e", read: "\u25a4",
+                   search: "\u2315", tool: "\u2699", result: "\u21b3",
+                   say: "\u201c", reasoning: "\u201c", progress: "\u25cc",
+                   note: "\u00b7"};
+function actLineHtml(a, extra = "") {
+  const kind = String(a.kind || "note");
+  const text = String(a.text || "");
+  // a failed step is the one line in the log nobody may miss
+  const bad = kind === "result" && /^failed\b/.test(text) ? " bad" : "";
+  return `<div class="act-line k-${esc(kind)}${bad}${extra}">` +
+    // `in`, not `||`: an intentionally EMPTY icon is falsy and would fall
+    // back to the generic dot, undoing the line above.
+    `<span class="act-icon">${esc(kind in ACT_ICONS ? ACT_ICONS[kind]
+                                                    : ACT_ICONS.note)}</span> ` +
+    `${esc(text)}</div>`;
+}
 // One indicator PER SEAT (keyed by seat id): in parallel modes several seats
 // think at once, and duplicate-provider seats need their own rows.
 const typingEls = new Map();
+// The relay's OWN work, keyed by the engine's token id so concurrent side
+// calls (parallel seat threads, helper threads) never collide. Value is
+// {payload, el, timer}; `el` stays null until the grace period elapses.
+const workingEls = new Map();
+// A side call that finishes in 40ms should leave the screen alone -- a row
+// that flashes on every moderator pick is noise, and noise is what makes the
+// real 90-second plan easy to miss. Only waits long enough to WONDER about
+// get painted.
+const WORK_GRACE_MS = 450;
+// Live narration keeps this many lines before the oldest scroll out of the
+// DOM. Was 6, which on a 40-step turn showed only the last few seconds of it.
+const ACT_LOG_MAX = 14;
 // Exact text relay emits when every seat played the wrap token. Kept as a
 // constant because the `done` handler folds its own notice into that row.
 const WRAP_NOTICE = "Conversation wrapped.";
@@ -3278,14 +3411,75 @@ function tickTyping() {
     }
     clock.textContent = text;
     clock.classList.toggle("late", late);
+    // How much has actually happened, and how long the CURRENT step has been
+    // going. Total age alone cannot tell a seat grinding through 40 tool
+    // calls from one wedged on its first — which is the whole question.
+    const steps = Number(el.dataset.steps || 0);
+    const badge = el.querySelector(".tsteps");
+    if (badge) {
+      const onStep = Number(el.dataset.stepat || 0);
+      badge.textContent = steps
+        ? ` · ${steps} step${steps === 1 ? "" : "s"}` +
+          (onStep ? ` · on this ${fmtClock(now - onStep)}` : "")
+        : "";
+    }
+  });
+}
+function tickWorking() {
+  const now = Date.now() / 1000;
+  workingEls.forEach(w => {
+    if (!w.el) return;
+    const clock = w.el.querySelector(".tclock");
+    if (clock) clock.textContent = fmtClock(now - w.started);
   });
 }
 function ensureTypingTimer() {
-  if (typingTimer || !typingEls.size) return;
+  if (typingTimer || !(typingEls.size || workingEls.size)) return;
   typingTimer = setInterval(() => {
-    if (!typingEls.size) { clearInterval(typingTimer); typingTimer = null; return; }
-    tickTyping();
+    if (!(typingEls.size || workingEls.size)) {
+      clearInterval(typingTimer); typingTimer = null; return;
+    }
+    tickTyping(); tickWorking();
   }, 1000);
+}
+// The engine opens and closes these in pairs (relay.working), always in a
+// `finally` -- so a row can be trusted to end. Everything here is keyed by
+// that token id and nothing else: an open event emitted before a chat had an
+// id and its close emitted after must still match.
+function showWorking(payload) {
+  const id = String(payload.id || "");
+  if (!id || workingEls.has(id)) return;
+  const row = {payload, el: null, timer: null,
+               started: Number(payload.started) || (Date.now() / 1000)};
+  workingEls.set(id, row);
+  row.timer = setTimeout(() => {
+    row.timer = null;
+    if (!workingEls.has(id)) return;         // closed inside the grace period
+    const el = document.createElement("div");
+    el.className = "working";
+    el.dataset.workId = id;
+    el.innerHTML = `<span class="wspin"></span>` +
+      `<span class="wwhat">${esc(payload.what || "Working")}</span>` +
+      (payload.detail ? `<span class="wdetail">${esc(payload.detail)}</span>` : "") +
+      `<span class="tclock"></span>`;
+    if (payload.detail) el.title = payload.detail;
+    row.el = el;
+    $("feed").appendChild(el);
+    tickWorking();
+    ensureTypingTimer();
+    stickBottom();
+  }, WORK_GRACE_MS);
+}
+function hideWorking(id) {
+  const row = workingEls.get(String(id));
+  if (!row) return;
+  if (row.timer) clearTimeout(row.timer);
+  if (row.el) row.el.remove();
+  workingEls.delete(String(id));
+}
+function hideAllWorking() {
+  workingEls.forEach((row, id) => hideWorking(id));
+  workingEls.clear();
 }
 function showTyping(speakerId, provider, name, opts = {}) {
   hideTyping(speakerId);
@@ -3300,7 +3494,7 @@ function showTyping(speakerId, provider, name, opts = {}) {
   el.className = "typing";
   el.style.setProperty("--who", provider ? `var(--${provider})` : "var(--muted)");
   el.innerHTML = `<span class="trow"><span class="dot"></span> ${esc(name)} is thinking…` +
-                 `<span class="tclock"></span></span>`;
+                 `<span class="tclock"></span><span class="tsteps"></span></span>`;
   // started comes from the ENGINE when we are replaying a reopened chat, so
   // the clock reads the true age of the turn rather than restarting at 0:00.
   el.dataset.started = Number(opts.started) || (Date.now() / 1000);
@@ -3336,19 +3530,29 @@ function typingActivity(speakerId, payload) {
       p.className = "act-line k-progress";
       log.appendChild(p);
     }
-    p.textContent = payload.text || "";
+    p.innerHTML = `<span class="act-icon">${esc(ACT_ICONS.progress)}</span> ` +
+      esc(payload.text || "");
     log.appendChild(p);                  // stays at the bottom
     stickBottom();
     return;
   }
-  const ln = document.createElement("div");
-  ln.className = "act-line k-" + (payload.kind || "note");
-  ln.textContent = payload.text || "";
-  ln.title = payload.text || "";
-  log.appendChild(ln);
+  const holder = document.createElement("div");
+  holder.innerHTML = actLineHtml(payload);
+  const ln = holder.children[0];
+  if (ln) {
+    ln.title = payload.text || "";
+    log.appendChild(ln);
+  }
   const prog = log.querySelector(".k-progress");
   if (prog) log.appendChild(prog);       // counter stays last
-  while (log.children.length > 6) log.firstChild.remove();
+  // A step is only a step if the seat DID something; the running token
+  // counter is a stopwatch and must not inflate the count (same rule the
+  // engine's sink follows when it refuses to persist progress acts).
+  el.dataset.steps = String(Number(el.dataset.steps || 0) + 1);
+  el.dataset.stepat = Date.now() / 1000;
+  while (log.children.length > ACT_LOG_MAX) log.firstChild.remove();
+  log.scrollTop = log.scrollHeight;
+  tickTyping();
   stickBottom();
 }
 function hideTyping(speakerId) {
@@ -3385,6 +3589,7 @@ function activityState(kind) {
 }
 function hideAllTyping() {
   typingEls.forEach(el => el.remove()); typingEls.clear();
+  hideAllWorking();       // the relay is not working either once a run ends
   clearAllSeatTelemetry();
 }
 function seatState(key, cls, label) {
@@ -3570,6 +3775,14 @@ function mergePlanTasks(chatId, updates) {
 window.uiEvent = packet => {
   const event = packet.event, payload = packet.payload || {};
   const chatId = eventChatId(packet);
+  // A `working` CLOSE must always land, whatever chat it claims. The app's
+  // pre-flight row opens before the chat has an id and closes after it has
+  // one, so the chat-routing gate below would drop exactly that close and
+  // strand the spinner forever. Closing an id we never painted is a no-op,
+  // which is why this is safe to do before any routing at all. The OPEN
+  // still respects the gate — a background chat's work is not this
+  // transcript's business.
+  if (event === "working" && payload.done) hideWorking(payload.id);
   // Maintain the rail even when this event belongs to a background chat. The
   // active transcript is updated only below, after the chat-id routing gate.
   if (chatId && event === "workstreams") {
@@ -3692,6 +3905,12 @@ window.uiEvent = packet => {
     clearSeatTelemetry(payload.speaker);
     seatState(payload.speaker, "", seatLabel(payload.speaker));
     hideTyping(payload.speaker);
+  } else if (event === "working") {
+    // The relay itself is busy (planning, briefing, moderating, verifying).
+    // Keyed by the engine's token id, so open/close pair up even across a
+    // `started` that gave the chat its id partway through. Closes were
+    // already handled above, before routing.
+    if (!payload.done) showWorking(payload);
   } else if (event === "dictation") {
     onDictation(payload);
   } else if (event === "activity") {
@@ -6894,6 +7113,14 @@ function renderChats() {
   });
 }
 
+// Spawned sub-conversations of one chat, newest first. Alloy already
+// persists provenance (meta.parent on every child row); the tree is derived
+// entirely client-side from those hints, so a deleted child simply drops out.
+function lineageKids(id) {
+  return sessions.filter(x => x.parent && x.parent.id === id)
+    .sort((a, b) => String(b.updated || "").localeCompare(String(a.updated || "")));
+}
+
 function chatRow(s) {
   const d = document.createElement("div");
   const run = runFor(s.id, s.run || s);
@@ -6902,6 +7129,11 @@ function chatRow(s) {
                 (s.id === activeId ? " active" : "") + " " + runState;
   // single-line row — time, seats and view-only status live in the tooltip
   const who = (s.participants || []).map(p => p.name).join(" · ");
+  const kids = lineageKids(s.id);
+  const spawnsLine = kids.length
+    ? `spawns ${kids.length} sub-conversation${kids.length === 1 ? "" : "s"}: ` +
+      kids.map(k => k.title).join(" · ")
+    : "";
   const spawnedBy = s.parent
     ? `↳ spawned by ${s.parent.label || "a seat"} in '${s.parent.id}'` : "";
   const branchedFrom = s.fork_of
@@ -6917,7 +7149,7 @@ function chatRow(s) {
        planning: "The Supervisor has not produced a plan yet"}[s.supervisor_status.state]
     : "";
   d.title = [s.title, stateLabel, [relTime(s.updated), who].filter(Boolean).join(" · "),
-             spawnedBy, branchedFrom, supTip, s.can_continue_reason].filter(Boolean).join("\r\n");
+             spawnedBy, branchedFrom, spawnsLine, supTip, s.can_continue_reason].filter(Boolean).join("\r\n");
   const dots = (s.participants || [])
     .map(p => `<i style="background:var(--${p.provider},#6C6677)"></i>`).join("");
   d.innerHTML =
@@ -6926,14 +7158,62 @@ function chatRow(s) {
      <div class="twrap"><div class="t"></div><div class="sub" hidden></div></div>
      <span class="chat-outcome" hidden></span>
      <span class="unread" hidden></span>
-     <span class="chat-actions">
-       <button class="chat-stop" title="Stop this conversation">■</button>
-       <button class="pin" title="Pin this chat to the top of the rail">★</button>
-       <button class="arc" title="Archive this chat">🗄</button>
-       <button class="exp" title="Export this chat as a self-contained web page">⤓</button>
-       <button class="x" title="Delete this chat">✕</button>
-     </span>`;
+      <span class="chat-actions">
+        <button class="chat-stop" title="Stop this conversation">■</button>
+        <button class="pin" title="Pin this chat to the top of the rail">★</button>
+        <button class="lin" hidden></button>
+        <button class="arc" title="Archive this chat">🗄</button>
+        <button class="exp" title="Export this chat as a self-contained web page">⤓</button>
+        <button class="x" title="Delete this chat">✕</button>
+      </span>`;
   d.querySelector(".t").textContent = (s.parent ? "↳ " : "") + s.title;
+  // Spawn lineage tree: a read-only popover listing this chat's spawned
+  // sub-conversations (team children are ordinary sessions, so each entry
+  // opens like any rail row). Hidden unless the chat actually has kids.
+  if (kids.length) {
+    const pop = document.createElement("div");
+    pop.className = "lineage-pop";
+    pop.hidden = true;
+    const lh = document.createElement("div");
+    lh.className = "lineage-h";
+    lh.textContent = `Spawned sub-conversations · ${kids.length}`;
+    pop.appendChild(lh);
+    kids.forEach(k => {
+      const it = document.createElement("div");
+      it.className = "lineage-item";
+      const kd = (k.participants || [])
+        .map(p => `<i style="background:var(--${p.provider},#6C6677)"></i>`).join("");
+      it.innerHTML = `<span class="who">${kd || '<i style="background:#6C6677"></i>'}</span><div class="lt"></div>`;
+      it.querySelector(".lt").textContent =
+        (k.parent ? "↳ " : "") + (k.title || k.id);
+      it.title = [relTime(k.updated), k.can_continue_reason]
+        .filter(Boolean).join("\r\n") || `Open '${k.id}'`;
+      it.onclick = e => { e.stopPropagation(); openChat(k.id); };
+      pop.appendChild(it);
+    });
+    d.appendChild(pop);
+    const lin = d.querySelector(".lin");
+    lin.hidden = false;
+    lin.textContent = `⌥ ${kids.length}`;
+    lin.title = `Show ${kids.length} spawned sub-conversation${kids.length === 1 ? "" : "s"}`;
+    lin.onclick = e => {
+      e.stopPropagation();
+      const willOpen = pop.hidden;
+      // one open tree at a time: close the others first. The chip rides on
+      // its own pop (_linChip) rather than being re-found through the DOM —
+      // querySelectorAll sees DETACHED rows from earlier rail repaints too,
+      // and their parents are no place to go looking.
+      document.querySelectorAll(".lineage-pop").forEach(p => {
+        if (p !== pop && !p.hidden) {
+          p.hidden = true;
+          if (p._linChip) p._linChip.classList.remove("open");
+        }
+      });
+      pop.hidden = !willOpen;
+      lin.classList.toggle("open", willOpen);
+    };
+    pop._linChip = lin;
+  }
   renderRailCompletion(d.querySelector(".chat-outcome"), s.completion || run?.completion);
   const sub = d.querySelector(".sub");
   if (runState === "waiting") {
@@ -7109,6 +7389,11 @@ function searchRow(c) {
   // session_summary feeds chatRow so a spawned team or view-only chat reads
   // the same in both rail states.
   const meta = sessions.find(s => s.id === c.id) || {};
+  const kids = lineageKids(c.id);
+  const spawnsLine = kids.length
+    ? `spawns ${kids.length} sub-conversation${kids.length === 1 ? "" : "s"}: ` +
+      kids.map(k => k.title).join(" · ")
+    : "";
   d.className = "search-row" + (c.id === activeId ? " active" : "") +
                 (meta.legacy ? " legacy" : "");
   const dots = (c.providers || [])
@@ -7132,7 +7417,7 @@ function searchRow(c) {
          : (c.title_match ? "matched the title, not message text" : "");
   d.title = [c.title,
              meta.parent ? `spawned by ${meta.parent.label || "a seat"} in '${meta.parent.id}'` : "",
-             snip ? snip.excerpt : ""].filter(Boolean).join("\r\n") +
+             spawnsLine, snip ? snip.excerpt : ""].filter(Boolean).join("\r\n") +
             `\r\n${relTime(c.updated)}` +
             (meta.can_continue_reason ? `\r\n${meta.can_continue_reason}` : "");
   d.querySelector(".s-count").textContent =
@@ -7465,6 +7750,9 @@ async function openChat(id, findQuery, findExcerpt) {
     showTyping(t.speaker, t.provider, t.name,
                {started: t.started, limit: t.limit, idle: t.idle});
   });
+  // Same rule for the relay's own work: a chat reopened while its supervisor
+  // is 90 seconds into planning must not render as an idle one.
+  (r.working || []).forEach(w => showWorking(w));
   syncActiveRun(runSeed);
   $("openTranscript").style.display = transcriptPath ? "" : "none";
   $("openWorkspace").style.display = workspacePath ? "" : "none";

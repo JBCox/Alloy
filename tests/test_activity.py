@@ -175,6 +175,91 @@ class ClaudeMappingTests(unittest.TestCase):
                                            {"file_path": r"C:\ws\new.py"}))
         self.assertEqual(acts[0]["path_raw"], r"C:\ws\new.py")
 
+    # ---- the model's own running commentary (2026-08-26) ---------------
+    # Every CLI streams it and all three used to drop it, which is why the
+    # log read as a list of file names with no story joining them. Opus in
+    # particular streams NO thinking content, so for the seats Josh runs most
+    # these text blocks are the only prose that exists.
+    def test_text_blocks_become_commentary(self):
+        line = claude_line(type="assistant", message={"content": [
+            {"type": "text", "text": "I'll grep for needle, then edit."}]})
+        self.assertEqual(
+            self.a.activity(line),
+            [{"kind": "say", "text": "I'll grep for needle, then edit."}])
+
+    # ---- tool RESULTS ---------------------------------------------------
+    def _result(self, tool, content, is_error=None):
+        self.a.activity(claude_line(type="assistant", message={"content": [
+            {"type": "tool_use", "id": "t1", "name": tool, "input": {}}]}))
+        block = {"type": "tool_result", "tool_use_id": "t1",
+                 "content": content}
+        if is_error is not None:
+            block["is_error"] = is_error
+        acts = self.a.activity(
+            claude_line(type="user", message={"content": [block]}))
+        return acts[0]["text"] if acts else None
+
+    def test_results_are_summarized_in_their_own_tools_terms(self):
+        """"found 3" and "read 40 lines" are different facts; a shared
+        "3 lines" would make the grep look like it returned a file."""
+        self.assertEqual(self._result("Grep", "a.py:1:x\nb.py:9:x"),
+                         "found 2")
+        self.assertEqual(self._result("Read", "1\tone\n2\ttwo"),
+                         "read 2 lines")
+        self.assertEqual(self._result("Edit", "updated ok"), "saved")
+        self.assertEqual(self._result("Bash", "hello"), "hello")
+        self.assertEqual(self._result("Bash", "one\ntwo\nthree"),
+                         "3 lines: one")
+
+    def test_a_failed_tool_says_so(self):
+        note = self._result("Bash", "ENOENT: no such file", is_error=True)
+        self.assertTrue(note.startswith("failed: "), note)
+
+    def test_a_result_block_can_be_a_list_of_blocks(self):
+        """Claude returns either a string or typed blocks; reading only the
+        string shape would silently narrate nothing for half of them."""
+        self.assertEqual(
+            self._result("Grep", [{"type": "text", "text": "a\nb\nc"}]),
+            "found 3")
+
+    def test_an_unpaired_result_still_says_something(self):
+        """A tool_use we never saw (truncated stream, drifted vocabulary)
+        must degrade to the generic summary, not vanish."""
+        acts = self.a.activity(claude_line(type="user", message={"content": [
+            {"type": "tool_result", "tool_use_id": "never-seen",
+             "content": "one line"}]}))
+        self.assertEqual(acts, [{"kind": "result", "text": "one line"}])
+
+    def test_before_run_forgets_the_previous_turns_tool_ids(self):
+        self.a.activity(claude_tool("Grep", {"pattern": "x"}))
+        self.a._tool_names["t1"] = "Grep"
+        self.a.before_run()
+        self.assertEqual(self.a._tool_names, {})
+
+    # ---- richer call detail from arguments we already had ---------------
+    def test_an_edit_reports_its_own_size(self):
+        acts = self.a.activity(claude_tool(
+            "Edit", {"file_path": r"C:\ws\a.py",
+                     "old_string": "one\ntwo", "new_string": "ONE"}))
+        self.assertEqual(acts[0]["text"], "editing a.py (+1/-2)")
+
+    def test_a_write_with_no_old_text_claims_no_size(self):
+        """Write has only content; a made-up +N/-M would be a lie."""
+        acts = self.a.activity(claude_tool("Write",
+                                           {"file_path": r"C:\ws\a.py"}))
+        self.assertEqual(acts[0]["text"], "editing a.py")
+
+    def test_a_search_says_where_it_is_looking(self):
+        acts = self.a.activity(claude_tool(
+            "Grep", {"pattern": "needle", "path": r"C:\ws\sample.txt"}))
+        self.assertEqual(acts[0]["text"], "searching in sample.txt: needle")
+
+    def test_a_partial_read_says_which_lines(self):
+        acts = self.a.activity(claude_tool(
+            "Read", {"file_path": r"C:\ws\a.py", "offset": 200,
+                     "limit": 100}))
+        self.assertEqual(acts[0]["text"], "reading a.py (lines 200-300)")
+
     def test_ignores_non_assistant_and_garbage(self):
         for line in ("", "not json", "{broken",
                      claude_line(type="system", subtype="init"),
@@ -269,8 +354,33 @@ class CodexMappingTests(unittest.TestCase):
         bad = codex_line("item.completed",
                          {"type": "command_execution", "command": "x",
                           "exit_code": 2})
+        # A failure is an OUTCOME, not another call — it reads under the
+        # `$ ...` line as the result of it, and carries the output tail.
         self.assertEqual(self.a.activity(bad),
-                         [{"kind": "command", "text": "command exited 2"}])
+                         [{"kind": "result", "text": "failed (exit 2)"}])
+
+    def test_agent_message_becomes_commentary(self):
+        """Verified live 2026-08-26: "I'll read c.txt from the current
+        directory, then confirm." — dropped entirely until now."""
+        line = codex_line("item.completed",
+                          {"type": "agent_message", "text": "I'll read it."})
+        self.assertEqual(self.a.activity(line),
+                         [{"kind": "say", "text": "I'll read it."}])
+
+    def test_a_successful_command_reports_its_output(self):
+        """`aggregated_output` is the command's real answer and was being
+        thrown away, so a shell step showed its intent and never its result."""
+        line = codex_line("item.completed",
+                          {"type": "command_execution", "command": "x",
+                           "exit_code": 0, "aggregated_output": "alpha\nbeta"})
+        self.assertEqual(self.a.activity(line),
+                         [{"kind": "result", "text": "2 lines: alpha"}])
+
+    def test_a_silent_successful_command_stays_silent(self):
+        line = codex_line("item.completed",
+                          {"type": "command_execution", "command": "x",
+                           "exit_code": 0, "aggregated_output": "  "})
+        self.assertEqual(self.a.activity(line), ())
 
     def test_file_change_yields_edit_per_path(self):
         line = codex_line("item.started", {
@@ -295,10 +405,68 @@ class CodexMappingTests(unittest.TestCase):
         for line in ("", "nope", "{bad",
                      json.dumps({"type": "thread.started", "thread_id": "t"}),
                      json.dumps({"type": "turn.completed", "usage": {}}),
-                     codex_line("item.completed",
-                                {"type": "agent_message", "text": "hi"}),
                      codex_line("item.completed", {"type": "brand_new_kind"})):
             self.assertEqual(self.a.activity(line), ())
+
+
+def ox_line(typ, part):
+    return json.dumps({"type": typ, "part": part})
+
+
+class OxMappingTests(unittest.TestCase):
+    """OpenCode reports a tool call ONCE, already finished, with its output
+    attached — so unlike the other two, the call and its outcome arrive in the
+    same event. Vocabulary verified live 2026-08-26 against opencode 1.18.21."""
+
+    def setUp(self):
+        self.a = relay.OpenCodeAgent(tempfile.gettempdir())
+
+    def test_text_parts_become_commentary(self):
+        self.assertEqual(
+            self.a.activity(ox_line("text", {"type": "text",
+                                             "text": "Reading it now."})),
+            [{"kind": "say", "text": "Reading it now."}])
+
+    def test_a_finished_tool_reports_call_and_outcome(self):
+        line = ox_line("tool_use", {
+            "type": "tool", "tool": "read",
+            "state": {"status": "completed",
+                      "input": {"filePath": "C:\\ws\\a.py"},
+                      "output": "one\ntwo"}})
+        acts = self.a.activity(line)
+        self.assertEqual([(a["kind"], a["text"]) for a in acts],
+                         [("read", "reading a.py"),
+                          ("result", "read 2 lines")])
+
+    def test_a_failed_tool_is_marked_failed(self):
+        line = ox_line("tool_use", {
+            "type": "tool", "tool": "read",
+            "state": {"status": "error",
+                      "input": {"filePath": "C:\\ws\\a.py"},
+                      "error": "no such file"}})
+        acts = self.a.activity(line)
+        self.assertTrue(acts[-1]["text"].startswith("failed: "), acts)
+
+    def test_step_finish_is_a_live_token_counter(self):
+        """Ox had NO progress signal at all, so a long silent step looked
+        exactly like a hung one. kind "progress" = live-only, never persisted
+        (SinkTests pins that half)."""
+        line = ox_line("step_finish", {"type": "step-finish",
+                                       "tokens": {"total": 12806}})
+        self.assertEqual(self.a.activity(line),
+                         [{"kind": "progress", "text": "12,806 tokens used"}])
+
+    def test_a_zero_token_step_says_nothing(self):
+        line = ox_line("step_finish", {"type": "step-finish",
+                                       "tokens": {"total": 0}})
+        self.assertEqual(self.a.activity(line), ())
+
+    def test_ignores_lifecycle_and_garbage(self):
+        for line in ("", "nope", "{bad",
+                     ox_line("step_start", {"type": "step-start"}),
+                     ox_line("tool_use", {"type": "tool"}),
+                     json.dumps({"type": "brand_new_kind"})):
+            self.assertFalse(self.a.activity(line), line)
 
 
 class SinkTests(unittest.TestCase):
@@ -311,6 +479,53 @@ class SinkTests(unittest.TestCase):
 
     def sink(self):
         return make_activity_sink(self.io, 0, "claude", "Claude", self.tmp)
+
+    # ---- the one-slot hold on commentary (2026-08-26) -------------------
+    # Every CLI streams the model's prose, and its LAST piece is the reply
+    # itself. Narrating each one as it arrives would print the whole answer
+    # into the log a moment before the message row shows it. So the newest
+    # `say` is held and released only when something else follows; the final
+    # one, which nothing follows, is simply never emitted. The turn ending IS
+    # the thing that does not follow, so no turn-end hook is needed.
+    def test_commentary_is_released_once_something_follows_it(self):
+        cb, acts = self.sink()
+        cb({"kind": "say", "text": "I will look at the config"})
+        self.assertEqual(acts, [], "released before anything followed it")
+        cb({"kind": "read", "text": "reading app.py"})
+        self.assertEqual([a["text"] for a in acts],
+                         ["I will look at the config", "reading app.py"])
+
+    def test_the_final_commentary_is_never_echoed(self):
+        """It is the reply. The message row prints it a moment later."""
+        cb, acts = self.sink()
+        cb({"kind": "read", "text": "reading app.py"})
+        cb({"kind": "say", "text": "Here is the whole answer."})
+        self.assertEqual([a["text"] for a in acts], ["reading app.py"])
+        self.assertNotIn("Here is the whole answer.",
+                         [p.get("text") for p in self.acts_events()])
+
+    def test_back_to_back_commentary_releases_all_but_the_last(self):
+        cb, acts = self.sink()
+        cb({"kind": "say", "text": "first"})
+        cb({"kind": "say", "text": "second"})
+        cb({"kind": "say", "text": "third"})
+        self.assertEqual([a["text"] for a in acts], ["first", "second"])
+
+    def test_a_progress_tick_counts_as_something_following(self):
+        """A ticking counter is proof the turn is still going, so the
+        commentary before it was interstitial, not the answer."""
+        cb, acts = self.sink()
+        cb({"kind": "say", "text": "thinking about it"})
+        cb({"kind": "progress", "text": "1,000 tokens"})
+        self.assertEqual([a["text"] for a in acts], ["thinking about it"])
+
+    def test_a_turn_that_only_talks_narrates_nothing(self):
+        """No tools, no steps — the reply is the whole content, and echoing
+        it above itself would just print it twice."""
+        cb, acts = self.sink()
+        cb({"kind": "say", "text": "Just my opinion, no tools needed."})
+        self.assertEqual(acts, [])
+        self.assertEqual(self.acts_events(), [])
 
     def acts_events(self):
         return [p for e, p in self.io.events if e == "activity"]

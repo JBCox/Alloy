@@ -14,6 +14,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -724,6 +725,133 @@ class ContinuousTest(unittest.TestCase):
         self.stub_side(StubSide("[[HEALTHY: fine]]"))
         relay.run_checkin(state, RecordingIO())
         self.assertFalse(relay.checkin_due(state), "and it is consumed once")
+
+
+class ExecutionRecordTests(ContinuousTest):
+    """Execution records + severity-graded focused re-verify.
+
+    A settled task durably answers WHO ran it and WHERE the work landed
+    (task -> executed_by -> gate commit), and a repair attempt cites exactly
+    what verification proved missing instead of asking for a full re-analysis.
+    The single-repair rule in replan_failed_workstreams is reused, never
+    duplicated: these tests only pin what its ONE attempt is handed."""
+
+    # ---- grade_findings ---------------------------------------------------
+    def test_findings_grade_from_verified_facts_not_claims(self):
+        t = {"verified": {"missing": ["x.py"], "stale": ["a/b.md"]}}
+        graded = relay.grade_findings(t)
+        self.assertEqual(graded, [
+            {"severity": "critical", "finding": "never created: x.py"},
+            {"severity": "major",
+             "finding": "unchanged since the task started: a/b.md"},
+        ])
+        # nothing verified means nothing cited — an empty report invents no
+        # findings, exactly like record_usage refuses to estimate spend
+        self.assertEqual(relay.grade_findings({"verified": {}}), [])
+        self.assertEqual(relay.grade_findings({}), [])
+
+    # ---- settlement stamps the record -------------------------------------
+    def test_settlement_binds_seat_and_clears_resolved_findings(self):
+        state = self.sup_state(scripts=[["done"], []])
+        ws_dir = state["workspace"]
+        started = time.time() - 5
+        task = {"id": "t1", "owner": 0, "brief": "make out.txt",
+                "files": ["out.txt"], "deps": [], "status": "active",
+                "started_ts": started,
+                "findings": [{"severity": "major", "finding": "old news"}]}
+        state["workstreams"] = [task]
+        with open(os.path.join(ws_dir, "out.txt"), "w") as f:
+            f.write("delivered\n")          # mtime AFTER started_ts
+        relay.settle_workstream(state, 0, RecordingIO(), reply="did it")
+        self.assertEqual(task["status"], "done")
+        rec = task.get("executed_by") or {}
+        self.assertEqual(rec.get("slot"), 0)
+        self.assertEqual(rec.get("seat"), "Cee")
+        self.assertIsNone(task.get("findings"),
+                          "resolved findings must not haunt the next attempt")
+        self.assertIn("did it", task.get("report") or "")
+
+    def test_a_failed_settlement_keeps_the_record_too(self):
+        """executed_by records the ATTEMPT whatever the outcome."""
+        state = self.sup_state(scripts=[["oops"], []])
+        task = {"id": "t1", "owner": 0, "brief": "make out.txt",
+                "files": ["out.txt"], "deps": [], "status": "active",
+                "started_ts": time.time() - 5}
+        state["workstreams"] = [task]
+        relay.settle_workstream(state, 0, RecordingIO(), reply="oops")
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual((task.get("executed_by") or {}).get("seat"), "Cee")
+
+    # ---- the commit binding ------------------------------------------------
+    def test_green_gate_binds_the_sha_into_this_waves_records(self):
+        def fake_git(args, ws, timeout=120):
+            out = "abc1234" if args[0] == "rev-parse" else ""
+            return type("R", (), {"returncode": 0, "stdout": out})()
+
+        self.stub_gate({"ok": True, "seconds": 1, "tail": "green"})
+        self.stub_git(fake_git)
+        state = self.sup_state(cont={"gate": {"command": "pytest",
+                                              "commit": True}})
+        state["workstreams"] = [
+            # this wave's work: ran, settled done, no commit yet -> BOUND
+            {"id": "a", "owner": 0, "brief": "one", "files": [], "deps": [],
+             "status": "done", "verified": {},
+             "executed_by": {"slot": 0, "seat": "Cee"}},
+            # an earlier wave's record: keeps ITS OWN sha, never clobbered
+            {"id": "b", "owner": 1, "brief": "two", "files": [], "deps": [],
+             "status": "done", "verified": {},
+             "executed_by": {"slot": 1, "seat": "Dee"},
+             "commit": "old9999"},
+            # marked done WITHOUT ever running through settlement (e.g. a
+            # hand-edited board): no executed_by, no honest claim to bind
+            {"id": "c", "owner": 0, "brief": "three", "files": [],
+             "deps": [], "status": "done", "verified": {}},
+        ]
+        io = RecordingIO()
+        relay.wave_gate(state, io)
+        self.assertEqual(state["workstreams"][0]["commit"], "abc1234")
+        self.assertEqual(state["workstreams"][1]["commit"], "old9999")
+        self.assertNotIn("commit", state["workstreams"][2])
+
+    # ---- the focused re-verify ---------------------------------------------
+    def test_replan_hands_the_repair_exactly_what_failed(self):
+        state = self.sup_state()
+        state["workstreams"] = [
+            {"id": "a", "owner": 0, "brief": "one", "files": ["x.py"],
+             "deps": [], "status": "failed", "replans": 0,
+             "verified": {"missing": ["x.py"], "stale": ["y.py"]}}]
+        self.stub_side(StubSide(
+            "[[TASK: a | owner=0 | files=x.py | fix it]]"))
+        relay.replan_failed_workstreams(state, RecordingIO())
+        new = state["workstreams"][0]
+        self.assertEqual(new["id"], "a")     # same id: the DAG stays valid
+        self.assertEqual(new["findings"], [
+            {"severity": "critical", "finding": "never created: x.py"},
+            {"severity": "major",
+             "finding": "unchanged since the task started: y.py"},
+        ])
+        self.assertEqual(new["attempts"], 1)
+
+    def test_focused_findings_render_in_the_worker_brief(self):
+        state = self.sup_state()
+        state["workstreams"] = [
+            {"id": "a", "owner": 0, "brief": "one", "files": ["x.py"],
+             "deps": [], "status": "pending",
+             "findings": [{"severity": "critical",
+                           "finding": "never created: x.py"}]}]
+        relay.assign_workstreams(state, RecordingIO())
+        brief = state["pending"][0][0]
+        self.assertIn("FOCUSED RE-VERIFY", brief)
+        self.assertIn("Do NOT redo the whole task", brief)
+        self.assertIn("- CRITICAL: never created: x.py", brief)
+        self.assertIn("Critical, Major, or Minor", brief)
+        # a clean task gets none of this
+        state["workstreams"].append(
+            {"id": "b", "owner": 1, "brief": "two", "files": [], "deps": [],
+             "status": "pending"})
+        state["pending"][1] = []
+        relay.assign_workstreams(state, RecordingIO())
+        self.assertNotIn("FOCUSED RE-VERIFY", state["pending"][1][-1])
 
 
 if __name__ == "__main__":

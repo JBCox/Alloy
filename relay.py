@@ -20,6 +20,7 @@ import argparse
 import contextlib
 import datetime
 import hashlib
+import itertools
 import json
 import mimetypes
 import os
@@ -91,8 +92,8 @@ WRAP_TOKEN = "[[WRAP]]"
 ERROR_MAX = 200
 # Live activity narration: hard per-turn event cap (a chatty turn must not
 # flood the emit queue) and how many entries persist on the message row.
-ACTIVITY_MAX = 200
-ACTIVITY_KEEP = 50
+ACTIVITY_MAX = 400          # per turn; a call and its outcome are 2 now
+ACTIVITY_KEEP = 80          # persisted onto the finished message row
 
 # Conversation modes (ORCHESTRATION_DESIGN.md). One conversation-level value:
 # cfg key `mode`, CLI --mode, meta field `mode`. `round_robin` is the classic
@@ -1247,11 +1248,71 @@ def _clip(text, n=160):
     return text.splitlines()[0].strip()[:n]
 
 
+def _lines(text):
+    return [ln for ln in str(text or "").splitlines() if ln.strip()]
+
+
+def _result_note(tool, text, is_error=False):
+    """One short line describing what a tool call ACHIEVED.
+
+    Every CLI streams its tool output and we used to drop all of it, so
+    "searching: def settle|def summarize" never became "found 3". Shaped per
+    tool because the useful number differs (matches vs lines vs saved), and
+    kept to one clipped line because this is narration, not a log. Unknown
+    tools fall back to the output's own first line, which is the honest
+    answer when we do not know what the number means."""
+    text = str(text or "").strip()
+    if is_error:
+        return "failed: " + (_clip(text, 120) or "no detail")
+    if not text:
+        return ""
+    lines = _lines(text)
+    t = (tool or "").lower()
+    if t in ("grep", "glob", "list", "websearch"):
+        return "found %d" % len(lines)
+    if t == "read":
+        return "read %d line%s" % (len(lines), "" if len(lines) == 1 else "s")
+    if t in ("edit", "write", "patch", "multiedit", "notebookedit"):
+        return "saved"
+    if len(lines) == 1:
+        return _clip(lines[0], 120)
+    return "%d lines: %s" % (len(lines), _clip(lines[0], 90))
+
+
+def _edit_size(inp):
+    """"(+2/-1)" from an Edit's own arguments — no diffing, just the two
+    strings the CLI already handed us. Blank when they are absent (Write has
+    only content), because a made-up number is worse than none."""
+    old = inp.get("old_string")
+    new = inp.get("new_string")
+    if not isinstance(old, str) or not isinstance(new, str):
+        return ""
+    return " (+%d/-%d)" % (len(new.splitlines()), len(old.splitlines()))
+
+
+def _tool_result_text(block):
+    """A tool_result's content is a string OR a list of typed blocks."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [b.get("text") for b in content
+                 if isinstance(b, dict) and isinstance(b.get("text"), str)]
+        return "\n".join(parts)
+    return ""
+
+
 class ClaudeAgent(Agent):
     name = "Claude"
     cli = "claude"
     project_docs = ("CLAUDE.md",)
     tool_approval_hook = True
+    # tool_use id -> tool name, so a tool_result can be summarized in the
+    # terms of the tool that produced it. Per turn; see before_run.
+    _tool_names = {}
+
+    def before_run(self):
+        self._tool_names = {}
 
     def build_cmd(self, message):
         # Claude Code's print-mode resume path requires the prompt to be the
@@ -1390,6 +1451,24 @@ class ClaudeAgent(Agent):
             if isinstance(n, int) and n > 0:
                 return [{"kind": "progress", "text": f"thinking… {n:,} tokens"}]
             return ()
+        if evt.get("type") == "user":
+            # Tool RESULTS. Verified live 2026-08-26: `user` events carry
+            # tool_result blocks whose content is the grep hits, the file the
+            # Read returned, the shell output. Narrating only the call and
+            # never the outcome is why the log read as a list of intentions.
+            acts = []
+            for block in (evt.get("message") or {}).get("content") or []:
+                if not isinstance(block, dict) \
+                        or block.get("type") != "tool_result":
+                    continue
+                tool = self._tool_names.get(block.get("tool_use_id")) or ""
+                note = _result_note(tool, _tool_result_text(block),
+                                    bool(block.get("is_error")))
+                if note:
+                    acts.append({"kind": "result", "text": note})
+            # () not [] when there is nothing to say: the hook's contract is
+            # "unknown shapes return ()", and the suite pins it.
+            return acts or ()
         if evt.get("type") != "assistant":
             return ()
         content = (evt.get("message") or {}).get("content") or []
@@ -1402,13 +1481,29 @@ class ClaudeAgent(Agent):
                 text = _clip(block.get("thinking"))
                 if text:
                     acts.append({"kind": "reasoning", "text": text})
+            elif btype == "text":
+                # The model's own running commentary ("I'll grep for needle,
+                # read the file, then make the edit"). Opus streams no
+                # thinking CONTENT, so for the seats Josh runs most this is
+                # the only prose there is — and it was being thrown away.
+                # The sink holds the newest one back so the FINAL text block,
+                # which is the reply itself, is never echoed into the log.
+                text = _clip(block.get("text"))
+                if text:
+                    acts.append({"kind": "say", "text": text})
             elif btype == "tool_use":
                 acts.extend(self._describe_tool(block))
         return acts
 
-    @staticmethod
-    def _describe_tool(block):
+    def _describe_tool(self, block):
         name = block.get("name") or ""
+        # remember which tool this id belongs to, so its result can be
+        # summarized in that tool's own terms ("found 3" vs "read 40 lines")
+        tid = block.get("id")
+        if isinstance(tid, str) and tid:
+            self._tool_names[tid] = name
+            if len(self._tool_names) > 400:      # a turn cannot run forever
+                self._tool_names.pop(next(iter(self._tool_names)), None)
         inp = block.get("input")
         if not isinstance(inp, dict):
             inp = {}
@@ -1421,18 +1516,33 @@ class ClaudeAgent(Agent):
                 # the tool_use event lands BEFORE the edit executes — a true
                 # "editing now" signal. path_raw is confined by the sink.
                 return [{"kind": "edit",
-                         "text": f"editing {os.path.basename(p)}",
+                         "text": f"editing {os.path.basename(p)}"
+                                 f"{_edit_size(inp)}",
                          "path_raw": p}]
             return []
         if name == "Read":
             p = inp.get("file_path")
             if isinstance(p, str) and p:
+                off, lim = inp.get("offset"), inp.get("limit")
+                where = ""
+                if isinstance(off, int) and isinstance(lim, int):
+                    where = f" (lines {off}-{off + lim})"
+                elif isinstance(off, int):
+                    where = f" (from line {off})"
                 return [{"kind": "read",
-                         "text": f"reading {os.path.basename(p)}"}]
+                         "text": f"reading {os.path.basename(p)}{where}"}]
             return []
         if name in ("Glob", "Grep"):
             pat = _clip(inp.get("pattern"), 80)
-            return [{"kind": "search", "text": "searching: " + pat}] if pat else []
+            # WHERE it is searching is half the information and was dropped
+            scope = inp.get("glob") or inp.get("path")
+            if isinstance(scope, str) and scope:
+                scope = " in " + _clip(os.path.basename(scope.rstrip("/\\"))
+                                       or scope, 40)
+            else:
+                scope = ""
+            return [{"kind": "search",
+                     "text": f"searching{scope}: {pat}"}] if pat else []
         if name == "WebSearch":
             q = _clip(inp.get("query"), 100)
             return [{"kind": "search", "text": "web: " + q}] if q else []
@@ -1653,14 +1763,27 @@ class CodexAgent(Agent):
         if ityp == "reasoning" and typ == "item.completed":
             text = _clip(item.get("text"))
             return [{"kind": "reasoning", "text": text}] if text else ()
+        if ityp == "agent_message" and typ == "item.completed":
+            # GPT's own running commentary, verified live 2026-08-26:
+            # "I'll read c.txt from the current directory, then confirm."
+            # The sink holds the newest one back, so the final agent_message
+            # (which IS the reply) never gets echoed into the log.
+            text = _clip(item.get("text"))
+            return [{"kind": "say", "text": text}] if text else ()
         if ityp == "command_execution":
             if typ == "item.started":
                 c = _clip(item.get("command"), 150)
                 return [{"kind": "command", "text": "$ " + c}] if c else ()
             rc = item.get("exit_code")
-            if rc not in (0, None):     # successes are noise; failures matter
-                return [{"kind": "command", "text": f"command exited {rc}"}]
-            return ()
+            if rc not in (0, None):     # a failure is the whole story
+                tail = _clip(item.get("aggregated_output"), 120)
+                return [{"kind": "result",
+                         "text": f"failed (exit {rc}){': ' + tail if tail else ''}"}]
+            # `aggregated_output` is the command's real output and was being
+            # dropped entirely, so a shell step showed its intent and never
+            # its answer (verified live 2026-08-26).
+            note = _result_note("bash", item.get("aggregated_output"))
+            return [{"kind": "result", "text": note}] if note else ()
         if ityp == "file_change":
             acts = []
             for ch in item.get("changes") or []:
@@ -2145,12 +2268,43 @@ class OpenCodeAgent(Agent):
             evt = json.loads(line)
         except ValueError:
             return ()
-        if not isinstance(evt, dict) or evt.get("type") != "tool_use":
+        if not isinstance(evt, dict):
             return ()
-        part = evt.get("part") or {}
+        etype = evt.get("type")
+        part = evt.get("part") if isinstance(evt.get("part"), dict) else {}
+        if etype == "text":
+            # The model's own prose. Same one-slot hold as the others: the
+            # last `text` part of a turn IS the reply.
+            text = _clip(part.get("text"))
+            return [{"kind": "say", "text": text}] if text else ()
+        if etype == "step_finish":
+            # Ox had NO progress signal at all, so a long silent step looked
+            # identical to a hung one. `step_finish` carries running token
+            # counts (verified live 2026-08-26). kind "progress" = live-only,
+            # never persisted (see the sink).
+            tok = part.get("tokens") if isinstance(part.get("tokens"), dict) else {}
+            total = tok.get("total")
+            if isinstance(total, int) and total > 0:
+                return [{"kind": "progress", "text": f"{total:,} tokens used"}]
+            return ()
+        if etype != "tool_use":
+            return ()
         state = part.get("state") if isinstance(part.get("state"), dict) else {}
         inp = state.get("input") if isinstance(state.get("input"), dict) else {}
-        return self._describe_tool(part.get("tool") or "", inp)
+        tool = part.get("tool") or ""
+        acts = list(self._describe_tool(tool, inp))
+        # opencode reports a tool call ONCE, already completed, with its
+        # output attached — so the call and its outcome arrive together.
+        if state.get("status") == "completed":
+            note = _result_note(tool, state.get("output"))
+            if note:
+                acts.append({"kind": "result", "text": note})
+        elif state.get("status") == "error":
+            note = _result_note(tool, state.get("error") or state.get("output"),
+                                is_error=True)
+            if note:
+                acts.append({"kind": "result", "text": note})
+        return acts
 
     @staticmethod
     def _describe_tool(tool, inp):
@@ -3222,6 +3376,14 @@ class SessionStore:
             # additive: old code ignoring it just means an old chat may earn
             # its auto-title on its next continued run, never a wrong title
             "auto_titled": bool(state.get("auto_titled")),
+            # Per-step model profiles + the standing handoff note. Additive
+            # like brief/spawn: a v2 meta without them rehydrates to None,
+            # which reads as "use the default helper chain / no note" —
+            # never wrong continuity.
+            "step_models": (normalize_step_models(state.get("step_models"))
+                            or None),
+            "handoff_note": (normalize_handoff_note(state.get("handoff_note"))
+                             or None),
             "seats": [{
                 "id": state["slot_ids"][i],
                 "provider": state["providers"][i],
@@ -3660,7 +3822,61 @@ def synthesize_brief(workspace, docs, spec=None):
         agent.session_id = None         # stateless by design
 
 
-def helper_spec(seat_providers, moderator_spec=None, supervisor_spec=None):
+# Per-step model profiles (Traycer-style, adapted): which model runs each of
+# the relay's OWN side calls. "planner" covers build_supervisor's planning and
+# review side call, "moderator" the moderator floor, "title" the auto-title.
+# A compact is deliberately absent: /compact self-summarizes through the
+# SEAT's own session (compact_agent), so there is no separate model to pick.
+STEP_MODEL_KEYS = ("planner", "moderator", "title")
+
+
+def normalize_step_models(raw):
+    """step -> 'provider[:model[:effort]]' map -> validated spec dicts.
+
+    Unknown step names, unknown providers, and non-string values are DROPPED,
+    never sanitized into something else: a typo'd key falls back to the
+    existing helper chain rather than looking configured while doing nothing.
+    Tolerant by design at the engine layer — the same contract as
+    continuous_policy's numbers — because normalization also runs on rehydrate,
+    where raising would kill a resume; the CLI front end rejects loudly at its
+    own boundary instead. Returns {} for anything unusable.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for key, val in raw.items():
+        if key not in STEP_MODEL_KEYS:
+            continue
+        # Accept both the raw CLI shape ("provider[:model[:effort]]") and an
+        # already-normalized spec dict, so save -> rehydrate -> save round
+        # trips idempotently instead of silently dropping on the second pass.
+        if isinstance(val, dict):
+            provider = str(val.get("provider") or "").strip().lower()
+            model = val.get("model")
+            effort = val.get("effort")
+            label = None
+        elif isinstance(val, str) and val.strip():
+            provider, model, effort, label = parse_agent_token(val)
+        else:
+            continue
+        if provider not in AGENT_TYPES or label:
+            continue
+        spec = {"provider": provider}
+        if model:
+            spec["model"] = model
+        if effort:
+            spec["effort"] = effort
+        out[key] = spec
+    return out
+
+
+def step_spec(state, step):
+    """The configured profile for one internal step, or None."""
+    return normalize_step_models(state.get("step_models")).get(step)
+
+
+def helper_spec(seat_providers, moderator_spec=None, supervisor_spec=None,
+                step=None, step_models=None):
     """Which model does the relay's OWN side work (currently the brief).
 
     Not a seat, but a real CLI call against a real account. Defaulting it to
@@ -3674,7 +3890,14 @@ def helper_spec(seat_providers, moderator_spec=None, supervisor_spec=None):
     own cheap default applies (claude -> claude-haiku-4-5, exactly as before);
     inheriting a seat's Opus for a throwaway summarization would be a quiet
     cost regression.
+
+    With `step` + `step_models`, a configured per-step profile wins FIRST:
+    Josh said what runs this step, so a seat's mere presence no longer decides
+    it. Unconfigured steps keep the chain below byte-for-byte.
     """
+    profile = normalize_step_models(step_models)
+    if step and profile.get(step):
+        return dict(profile[step])
     # moderator and supervisor are the same job wearing two labels, and they
     # never coexist (a moderated room has no supervisor and vice versa), so
     # either one is "the model Josh chose to run this room".
@@ -3718,7 +3941,8 @@ def build_title_agent(state):
     token-free."""
     spec = helper_spec(state.get("providers"),
                        moderator_spec=state.get("moderator"),
-                       supervisor_spec=state.get("supervisor"))
+                       supervisor_spec=state.get("supervisor"),
+                       step="title", step_models=state.get("step_models"))
     provider = spec.get("provider") or "claude"
     if provider not in AGENT_TYPES:
         provider = "claude"
@@ -3761,9 +3985,10 @@ def maybe_auto_title(state, io):
     title = ""
     try:
         agent = build_title_agent(state)
-        raw = agent.turn(TITLE_PROMPT.format(
-            opener=opener,
-            reply=str(state.get("_last_reply") or "")[:4000]))
+        with working(io, "title"):
+            raw = agent.turn(TITLE_PROMPT.format(
+                opener=opener,
+                reply=str(state.get("_last_reply") or "")[:4000]))
         record_usage(state, getattr(agent, "last_usage", None), kind="title")
         title = clean_title(raw)
     except Exception:
@@ -3782,7 +4007,7 @@ def maybe_auto_title(state, io):
 
 
 def project_brief(workspace, session_dir, spec=None, enabled=True,
-                  on_status=None):
+                  on_status=None, io=None):
     """Make <workspace>/AI-CHAT.md current and return what preamble() needs:
     {status, digest, path, sources, error}.
 
@@ -3839,7 +4064,8 @@ def project_brief(workspace, session_dir, spec=None, enabled=True,
         if status == "stale" else
         f"Project brief: building from {', '.join(out['sources'])}")
     try:
-        body = synthesize_brief(workspace, docs, spec)
+        with working(io, "brief", ", ".join(out["sources"])):
+            body = synthesize_brief(workspace, docs, spec)
         out["usage"] = getattr(synthesize_brief, "last_usage", None)
     except Exception as e:
         out["usage"] = getattr(synthesize_brief, "last_usage", None)
@@ -4807,6 +5033,8 @@ def rehydrate(meta, workspace=None):
         "supervisor_plan_attempted": bool(
             meta.get("supervisor_plan_attempted")),
         "usage": meta.get("usage"),
+        "step_models": normalize_step_models(meta.get("step_models")) or None,
+        "handoff_note": normalize_handoff_note(meta.get("handoff_note")) or "",
     }
 
 
@@ -5631,6 +5859,74 @@ def preamble(agent, others, topic, turns, workspace, roster=None,
 # only thing that differs between the terminal and the app. Anything
 # loop-shaped goes HERE — the era of writing it twice is over.
 
+# The relay's OWN work is invisible: between Send and the first seat turn the
+# engine can spend minutes on side calls (planning, briefing, moderating,
+# titling) and subprocesses (the verification gate) with nothing on screen but
+# an idle transcript. Seats have `thinking`; this is that indicator for
+# everything that is NOT a seat, so "is anything happening?" always has an
+# answer. Deliberately shaped like activity narration: pure decoration, never
+# load-bearing, and it must NEVER fail the work it wraps.
+_WORK_SEQ = itertools.count(1)
+
+# Phrasing is the whole feature — Josh reads this instead of a frozen window,
+# so every label says what is happening in words, in the present tense.
+WORK_PHASES = {
+    "brief": "Reading the project docs",
+    "plan": "Planning the work",
+    "replan": "Repairing the failed tasks",
+    "review": "Reviewing the delivered work",
+    "objective": "Choosing the next improvement",
+    "checkin": "Checking the run is still healthy",
+    "moderator": "Choosing who speaks next",
+    "digest": "Summarizing messages for a seat",
+    "title": "Naming this chat",
+    "compact": "Compacting a seat's memory",
+    "gate": "Running the verification gate",
+    "helper": "A helper is working",
+    "team": "A spawned team is working",
+    "setup": "Setting up the conversation",
+}
+
+
+@contextlib.contextmanager
+def working(io, phase, detail="", label=""):
+    """Show that the RELAY is busy for as long as this block runs.
+
+    Emits `working` {id, phase, what, detail, started} on entry and
+    {id, phase, done: True, elapsed} on exit — in a `finally`, so the
+    indicator is cleared on every path including an exception, the same
+    discipline run_rounds' lifecycle stamping follows. A UI that only ever
+    saw the open event would show a spinner forever, which is worse than no
+    spinner at all.
+
+    Every id is unique, so concurrent callers (parallel/free seat threads,
+    helper threads) each own their own row instead of racing one flag.
+    `io=None` is a legal no-op for call sites that have no front end.
+    """
+    what = label or WORK_PHASES.get(phase, phase.replace("_", " ").capitalize())
+    token = "w%d" % next(_WORK_SEQ)
+    started = time.time()
+    # Best-effort exactly like the activity hooks: a front end that throws
+    # here must not take down a supervisor plan or a gate run.
+    try:
+        if io is not None:
+            io.emit("working", {"id": token, "phase": phase, "what": what,
+                                "detail": str(detail or "")[:160],
+                                "started": started})
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        try:
+            if io is not None:
+                io.emit("working", {"id": token, "phase": phase, "what": what,
+                                    "done": True,
+                                    "elapsed": round(time.time() - started, 1)})
+        except Exception:
+            pass
+
+
 class LoopIO:
     """Front-end seam for run_rounds. Every hook is a safe no-op so a headless
     test can drive the real loop with `run_rounds(state, LoopIO())` and fake
@@ -5638,10 +5934,13 @@ class LoopIO:
 
     def emit(self, event, payload=None):
         """Semantic events: thinking / thinking_done / activity / message /
-        status / agent_error. `message` payloads are the persisted row from
-        make_log. `activity` = live narration of a seat's in-progress turn
-        ({speaker, provider, name, kind, text[, path]}); emitted from seat
-        threads in parallel/free, so implementations must be thread-safe."""
+        status / agent_error / working. `message` payloads are the persisted
+        row from make_log. `activity` = live narration of a seat's
+        in-progress turn ({speaker, provider, name, kind, text[, path]});
+        emitted from seat threads in parallel/free, so implementations must
+        be thread-safe. `working` = the relay's own non-seat work, opened and
+        closed in pairs by the `working()` context manager (see it for the
+        payload); ids are unique, so several may be open at once."""
 
     def drain_human(self):
         """Return raw human input lines gathered since the last turn."""
@@ -5740,6 +6039,15 @@ class CLIIO(LoopIO):
                        f"{p.get('name')} is thinking…")
         elif event == "activity":
             status(f"  {p.get('name')} · {p.get('text')}")
+        elif event == "working":
+            # The console already streams, so only the open line is needed to
+            # answer "is it stuck?"; the close line is printed only when the
+            # wait was long enough to have been worth wondering about.
+            if not p.get("done"):
+                detail = p.get("detail") or ""
+                status(f"… {p.get('what')}" + (f" — {detail}" if detail else ""))
+            elif float(p.get("elapsed") or 0) >= 3:
+                status(f"… {p.get('what')} — done in {p.get('elapsed')}s")
         elif event == "status":
             status(p.get("text", ""))
         elif event == "agent_error":
@@ -6038,7 +6346,8 @@ def seat_command(state, cmd, arg, io):
             io.emit("status", {"text": note})
             state["store"].system(note, round=state["rnd"])
             try:
-                summary = compact_agent(agent)
+                with working(io, "compact", agent.name):
+                    summary = compact_agent(agent)
             except Exception as e:
                 note = f"{agent.name} compact failed: {error_excerpt(e)}"
                 io.emit("status", {"text": note})
@@ -6518,7 +6827,10 @@ def deliver_hidden_digest(state, i, io, summarizer=None, lock=None):
     try:
         if digest_agent is None:
             digest_agent = build_digest_agent(state)
-        summary = (digest_agent.turn(DIGEST_PROMPT.format(source=source)) or "").strip()
+        with working(io, "digest", "%d message%s" % (
+                len(rows), "" if len(rows) == 1 else "s")):
+            summary = (digest_agent.turn(
+                DIGEST_PROMPT.format(source=source)) or "").strip()
     except Exception as exc:
         io.emit("status", {"text": "Relay digest failed "
                                    f"({error_excerpt(exc)}) — delivering the "
@@ -6673,6 +6985,16 @@ def settle_workstream(state, i, io, reply=None):
         return
     for t in settled:
         workstreams.settle(t, state.get("workspace"))
+        # The durable execution record: WHICH seat ran this, whatever the
+        # outcome. Together with the capped report excerpt below, the verified
+        # result, and the wave's gate commit (bound in wave_gate), a reopened
+        # chat can answer "who did what, when, and where did it land" without
+        # re-reading the transcript.
+        t["executed_by"] = {"slot": owner, "seat": _seat_name(state, owner)}
+        if t.get("status") == "done":
+            # resolved — a later repair attempt must cite CURRENT facts, not
+            # findings its previous attempt already fixed
+            t.pop("findings", None)
         if reply:
             # kept for the Supervisor's review pass: for a task that claims no
             # files this is the ONLY account of what happened, and it is
@@ -6910,8 +7232,12 @@ def room_helper_name(state, role):
 def build_supervisor(state):
     """Stateless planner adapter - same contract as build_moderator: not a
     seat, no roster entry, no queue, invisible to the seats, and its session
-    id is never reused, which keeps the dead-session-id class out of it."""
-    spec = state.get("supervisor") or {}
+    id is never reused, which keeps the dead-session-id class out of it.
+
+    The "planner" step profile wins when configured: planning is internal
+    side work, and a room full of Opus seats should not price its planner in
+    Opus just because no explicit supervisor was picked."""
+    spec = (step_spec(state, "planner") or state.get("supervisor") or {})
     provider = spec.get("provider") or "claude"
     model = spec.get("model") or ("claude-haiku-4-5" if provider == "claude"
                                   else None)
@@ -6942,7 +7268,9 @@ def plan_workstreams(state, io, goal=None):
                      goal, goal=goal)
     sup = build_supervisor(state)
     try:
-        reply = sup.turn(prompt)
+        with working(io, "plan", goal, label="%s is planning the work"
+                     % room_helper_name(state, "supervisor")):
+            reply = sup.turn(prompt)
     except Exception as e:
         record_usage(state, getattr(sup, "last_usage", None), kind="supervisor")
         state["supervisor_plan_attempted"] = True
@@ -6993,6 +7321,28 @@ def plan_workstreams(state, io, goal=None):
     return tasks
 
 
+def grade_findings(task):
+    """Severity-graded open findings from VERIFIED filesystem facts.
+
+    Traycer grades review comments Critical/Major/Minor/Outdated and routes
+    only the serious ones back for fixes; here the same idea runs on facts
+    instead of opinions: a file that was never created is CRITICAL (the
+    deliverable does not exist), a file that exists but predates the task is
+    MAJOR (behavior affected, workarounds possible). Nothing here takes a
+    seat's word for anything — the same truth-over-estimation rule as
+    record_usage. Empty when verification passed or found nothing to cite.
+    """
+    v = task.get("verified") or {}
+    out = []
+    for f in v.get("missing") or []:
+        out.append({"severity": "critical",
+                    "finding": "never created: %s" % f})
+    for f in v.get("stale") or []:
+        out.append({"severity": "major",
+                    "finding": "unchanged since the task started: %s" % f})
+    return out
+
+
 def replan_failed_workstreams(state, io):
     """Give each failed task one bounded Supervisor repair attempt.
 
@@ -7040,7 +7390,11 @@ def replan_failed_workstreams(state, io):
         failures="\n".join(lines))
     sup = build_supervisor(state)
     try:
-        reply = sup.turn(prompt)
+        with working(io, "replan", "%d task%s" % (
+                len(lines), "" if len(lines) == 1 else "s"),
+                label="%s is repairing the failed tasks"
+                % room_helper_name(state, "supervisor")):
+            reply = sup.turn(prompt)
         _body, replacements, _unknown = parse_task_directives(
             reply or "", slot_ids=list(state["slot_ids"]))
     except Exception as e:
@@ -7077,6 +7431,12 @@ def replan_failed_workstreams(state, io):
             continue
         new["deps"] = list(old.get("deps") or [])
         new["replans"] = old["replans"]
+        # Focused re-verify: the replacement carries EXACTLY what failed,
+        # graded, so its worker fixes findings instead of re-analyzing the
+        # whole task. The single-repair rule above is untouched — this only
+        # enriches what that one attempt is handed.
+        new["findings"] = grade_findings(old)
+        new["attempts"] = int(old.get("attempts") or 0) + 1
         tasks[pos] = new
         repaired.append(new)
         note = (f"Supervisor replanned [{new['id']}] after filesystem "
@@ -7273,7 +7633,10 @@ def supervise_next_wave(state, io):
         playbook=playbook_block())
     sup = build_supervisor(state)
     try:
-        reply = sup.turn(prompt)
+        with working(io, "review", goal,
+                     label="%s is reviewing the delivered work"
+                     % room_helper_name(state, "supervisor")):
+            reply = sup.turn(prompt)
     except Exception as e:
         record_usage(state, getattr(sup, "last_usage", None), kind="supervisor")
         supervisor_trace(state, io, "error", "Review call failed",
@@ -7724,7 +8087,8 @@ def next_objective(state, io):
         gate=_gate_block(state), roster=supervisor_roster_block(state))
     sup = build_supervisor(state)
     try:
-        reply = sup.turn(prompt)
+        with working(io, "objective", closed):
+            reply = sup.turn(prompt)
     except Exception as e:
         record_usage(state, getattr(sup, "last_usage", None), kind="objective")
         supervisor_trace(state, io, "error", "Next-objective call failed",
@@ -8015,7 +8379,8 @@ def run_checkin(state, io):
         health=health, stop_line=CHECKIN_STOP_LINE if may_stop else "")
     sup = build_supervisor(state)
     try:
-        reply = sup.turn(prompt)
+        with working(io, "checkin"):
+            reply = sup.turn(prompt)
     except Exception as e:
         record_usage(state, getattr(sup, "last_usage", None), kind="checkin")
         supervisor_trace(state, io, "error", "Check-in call failed",
@@ -8202,7 +8567,12 @@ def git_dirty(workspace):
 
 
 def gate_commit(state, message):
-    """Checkpoint a green wave. Returns a human sentence, never raises."""
+    """Checkpoint a green wave. Returns a human sentence, never raises.
+
+    On success the short sha rides `gate_commit.last_sha` (the same
+    function-attribute pattern as synthesize_brief.last_usage) so wave_gate
+    can bind the checkpoint into each settled task's execution record."""
+    gate_commit.last_sha = None
     workspace = state.get("workspace")
     gate = (state.get("continuous") or {}).get("gate") or {}
     if git_dirty(workspace) is None:
@@ -8222,7 +8592,9 @@ def gate_commit(state, message):
                 return "nothing had changed, so there was nothing to commit"
             return "git commit failed: " + out[-200:]
         sha = _git(["rev-parse", "--short", "HEAD"], workspace)
-        return "committed as " + (sha.stdout or "").strip()
+        short = (sha.stdout or "").strip()
+        gate_commit.last_sha = short or None
+        return "committed as " + short
     except Exception as e:
         return "could not commit: " + error_excerpt(e)
 
@@ -8244,7 +8616,8 @@ def wave_gate(state, io):
     supervisor_trace(state, io, "gate", "Running the verification gate",
                      command, status="running")
     io.emit("status", {"text": "Verifying: " + command})
-    result = _gate_run(command, state.get("workspace"))
+    with working(io, "gate", command):
+        result = _gate_run(command, state.get("workspace"))
     result["command"] = command
     gate["last"] = result
     if result.get("ok"):
@@ -8252,6 +8625,23 @@ def wave_gate(state, io):
         if gate.get("commit"):
             goal = (state.get("supervisor_goal") or "improvement wave")[:70]
             detail += " — " + gate_commit(state, "alloy: " + goal)
+            # Bind the checkpoint into this wave's execution records: every
+            # task that ran and settled done WITHOUT a commit yet is part of
+            # exactly the work this commit contains (earlier waves keep their
+            # own shas; a repaired task re-settles without its old one).
+            sha = getattr(gate_commit, "last_sha", None)
+            if sha:
+                bound = [t["id"] for t in state.get("workstreams") or []
+                         if t.get("status") == "done" and not t.get("commit")
+                         and t.get("executed_by")]
+                for tid in bound:
+                    by_id = {x.get("id"): x
+                             for x in state.get("workstreams") or []}
+                    by_id[tid]["commit"] = sha
+                if bound:
+                    supervisor_trace(state, io, "gate",
+                                     "Bound commit " + sha,
+                                     ", ".join(bound), status="passed")
         supervisor_trace(state, io, "gate", "Gate passed", detail,
                          status="passed")
         io.emit("message", state["log"](
@@ -8344,14 +8734,34 @@ def continuous_revive(state, io, ended):
         pass
 
 
+HANDOFF_NOTE_MAX = 600
+
+
+def normalize_handoff_note(raw):
+    """The session's standing handoff note, capped. Plain text on purpose —
+    no Handlebars, no template language: the note is appended verbatim to
+    every worker brief, so there is nothing to inject through and nothing to
+    render wrong. Anything that is not usable text becomes "" (no note)."""
+    if not isinstance(raw, str):
+        return ""
+    return raw.strip()[:HANDOFF_NOTE_MAX].strip()
+
+
 def assign_workstreams(state, io):
     """Start every task that can run right now. Overlapping file claims are
     serialized into dependencies first (an ordered plan beats a rejected one),
     and a task owned by a seat that isn't at this table fails loudly rather
-    than sitting pending forever."""
+    than sitting pending forever.
+
+    Runs BOTH at initial dispatch and after every settlement (settle_workstream
+    calls back into here), so a standing handoff note reaches each NEXT worker
+    exactly where their brief is composed — under workstream isolation the
+    brief is all a worker sees, which makes this the one honest injection
+    point."""
     tasks = state.get("workstreams")
     if not tasks:
         return
+    handoff = normalize_handoff_note(state.get("handoff_note"))
     # capability BEFORE ordering: a task moved to another seat may collide
     # with different files than the one it was planned against
     for kind, tid, old_owner, new_owner in workstreams.capability_gate(
@@ -8385,6 +8795,17 @@ def assign_workstreams(state, io):
         t["status"] = "active"
         t["started_ts"] = time.time()
         brief = f"Your task [{t['id']}]: {t['brief']}"
+        findings = t.get("findings") or []
+        if findings:
+            brief += ("\nFOCUSED RE-VERIFY: a previous attempt at this task "
+                      "failed filesystem verification. Do NOT redo the whole "
+                      "task — resolve exactly these findings:\n"
+                      + "\n".join("- %s: %s" % (
+                          str(f.get("severity") or "major").upper(),
+                          f.get("finding") or "") for f in findings))
+            brief += ("\nIn your closing report, classify anything you "
+                      "cannot fix as Critical, Major, or Minor so any next "
+                      "attempt stays focused too.")
         if t.get("files"):
             brief += ("\nYou own these paths for this task (no one else will "
                       "touch them): " + ", ".join(t["files"]) +
@@ -8394,6 +8815,9 @@ def assign_workstreams(state, io):
         brief += ("\nYou are working independently: the other seats are not "
                   "hearing this, and will get a one-line summary when you "
                   "finish. Reply when the task is complete.")
+        if handoff:
+            brief += (f"\nStanding handoff instructions for every task in "
+                      f"this room (from Josh): {handoff}")
         state["pending"][j].append(brief)
         supervisor_trace(state, io, "instruction",
                          f"Assigned [{t['id']}] to {_seat_name(state, t['owner'])}",
@@ -8455,10 +8879,17 @@ def make_activity_sink(io, key, provider, name, workspace):
     matching the Files-rail row keys."""
     acts = []
     last_progress = [None]
+    # ONE-SLOT HOLD for `say` (the model's own running commentary). Every CLI
+    # streams that prose, and the LAST piece of it is the reply itself — so
+    # narrating each one as it arrives would echo the whole answer into the
+    # log a moment before the message row prints it. Holding the newest and
+    # releasing it only when something else follows means interstitial
+    # commentary ("I'll grep for needle, then edit") is shown and the final
+    # one, which nothing follows, is simply never emitted. No turn-end hook
+    # needed: the turn ending IS the thing that does not follow.
+    held_say = [None]
 
-    def cb(act):
-        if not isinstance(act, dict):
-            return
+    def accept(act):
         text = (act.get("text") or "").strip()[:160]
         if not text:
             return
@@ -8493,6 +8924,17 @@ def make_activity_sink(io, key, provider, name, workspace):
         acts.append(entry)
         io.emit("activity", {"speaker": key, "provider": provider,
                              "name": name, **entry})
+
+    def cb(act):
+        if not isinstance(act, dict):
+            return
+        pending, held_say[0] = held_say[0], None
+        if pending is not None:          # something followed it, so it was
+            accept(pending)              # commentary and not the answer
+        if (act.get("kind") or "") == "say":
+            held_say[0] = act
+            return
+        accept(act)
     return cb, acts
 
 
@@ -8749,7 +9191,9 @@ class SpawnManager:
         requester = state["agents"][req_idx].name
         prompt = HELPER_PROMPT.format(requester=requester, task=task)
         try:
-            text = agent.turn(prompt)
+            with working(self._io, "helper", task,
+                         label=f"Helper {hid} is working for {requester}"):
+                text = agent.turn(prompt)
             self._results.put(("helper", hid, req_idx, provider, model,
                                text, None))
         except Exception as e:
@@ -8855,6 +9299,14 @@ class SpawnManager:
         return None
 
     def _run_team(self, tid, req_idx, child, opener, requester):
+        # A child conversation is deliberately silent (it replays from the
+        # rail), which makes the LONGEST side work in the app the one thing
+        # with nothing on screen at all. One row for its whole lifetime.
+        with working(self._io, "team", opener,
+                     label=f"Team {tid} is working for {requester}"):
+            self._team_body(tid, req_idx, child, opener, requester)
+
+    def _team_body(self, tid, req_idx, child, opener, requester):
         store = child["store"]
         try:
             row_text = (f"[relayed from {requester} in "
@@ -9186,8 +9638,10 @@ def build_moderator(state):
     """Fresh moderator adapter. NOT a seat: no roster entry, no queue, no
     fan-out, invisible to the seats — and stateless (its session id is reset
     after every call), which sidesteps the entire dead-session-id fatal class
-    and makes resume trivially correct."""
-    spec = state.get("moderator") or {}
+    and makes resume trivially correct. The "moderator" step profile wins
+    when configured — the later, more specific instruction about who runs
+    this internal step, exactly as a typed seat label beats an auto name."""
+    spec = (step_spec(state, "moderator") or state.get("moderator") or {})
     provider = spec.get("provider") or "claude"
     model = spec.get("model") or ("claude-haiku-4-5" if provider == "claude"
                                   else None)
@@ -9223,7 +9677,9 @@ def moderator_pick(state, io, moderator):
         tail=tail or "(no messages yet)",
         names=", ".join(a.name for a in agents))
     try:
-        reply = moderator.turn(prompt)
+        with working(io, "moderator", label="%s is choosing who speaks next"
+                     % room_helper_name(state, "moderator")):
+            reply = moderator.turn(prompt)
     except Exception as e:
         record_usage(state, getattr(moderator, "last_usage", None), kind="moderator")
         io.emit("status", {"text": f"{room_helper_name(state, "moderator")} error ({str(e)[:120]}) — "
@@ -10677,7 +11133,8 @@ def run_free(state, io):
                 io.emit("status", {"text": f"Compacting {agent.name}'s "
                                            f"context…"})
                 try:
-                    summary = compact_agent(agent)   # my thread owns the Agent
+                    with working(io, "compact", agent.name):
+                        summary = compact_agent(agent)   # my thread owns it
                 except Exception as e:
                     with cond:
                         note = (f"{agent.name} compact failed: "
@@ -10963,6 +11420,16 @@ def main():
                     help="who moderates in --mode moderator (default "
                          "claude:claude-haiku-4-5:low); the moderator is not "
                          "a seat — one cheap stateless call per turn")
+    ap.add_argument("--step-model", action="append", default=None,
+                    metavar="KEY=provider[:model[:effort]]",
+                    help="per-step model profile for the relay's OWN side "
+                         "calls: KEY is planner, moderator, or title; "
+                         "repeatable (e.g. --step-model planner=ox keeps a "
+                         "room full of expensive seats from pricing its "
+                         "planner in Opus)")
+    ap.add_argument("--handoff-note", default=None,
+                    help="standing plain-text instructions appended to every "
+                         "workstream task brief (capped at %d chars)" % HANDOFF_NOTE_MAX)
     ap.add_argument("--no-native-subagents", action="store_true",
                     help="don't tell seats they may use their CLI's built-in "
                          "subagent tools (tier-1 spawning is on by default)")
@@ -11074,6 +11541,28 @@ def main():
     if args.until_done and args.turns != 10:
         print(f"{DIM}note: --turns is ignored with --until-done "
               f"(the --ceiling bounds the run){RESET}")
+    step_models = {}
+    for tok in (args.step_model or []):
+        key, _, spec_txt = tok.partition("=")
+        key = key.strip().lower()
+        if key not in STEP_MODEL_KEYS or not spec_txt.strip():
+            sys.exit(f"--step-model needs KEY=provider[:model[:effort]] with "
+                     f"KEY from {list(STEP_MODEL_KEYS)} (got {tok!r})")
+        sp, sm, se, slabel = parse_agent_token(spec_txt)
+        if slabel or sp not in AGENT_TYPES:
+            sys.exit(f"--step-model {key} needs provider[:model[:effort]] "
+                     f"with a provider from {sorted(AGENT_TYPES)} "
+                     f"(got {spec_txt!r})")
+        spec = {"provider": sp}
+        if sm:
+            spec["model"] = sm
+        if se:
+            spec["effort"] = se
+        step_models[key] = spec
+    handoff_note = normalize_handoff_note(args.handoff_note)
+    if args.handoff_note and len(args.handoff_note.strip()) > HANDOFF_NOTE_MAX:
+        print(f"{DIM}note: --handoff-note capped at {HANDOFF_NOTE_MAX} "
+              f"chars{RESET}")
 
     slots = [parse_agent_token(t) for t in args.agents.split(",") if t.strip()]
     unknown = sorted({p for p, _, _, _ in slots if p not in AGENT_TYPES})
@@ -11242,7 +11731,10 @@ def main():
                           spec=helper_spec([p for p, _, _, _ in seats],
                                            moderator_spec),
                           enabled=not args.no_brief,
-                          on_status=brief_status_row)
+                          on_status=brief_status_row,
+                          # a synthesized brief is a full CLI call before a
+                          # single seat has spoken; the console says so too
+                          io=CLIIO(human_q=None, say_file=None))
     write_project_context(session_dir, brief)
 
     human_q = queue.Queue()
@@ -11267,6 +11759,8 @@ def main():
              "supervisor": None, "supervisor_trace": [],
              "supervisor_goal": None, "supervisor_waves": 0,
              "supervisor_wave_index": 1,
+             "step_models": step_models or None,
+             "handoff_note": handoff_note or "",
              "panel": ({"synthesizer": synthesizer} if mode == "panel"
                        else None),
              "continuous": continuous_cfg,

@@ -181,6 +181,11 @@ function mkEl(tag) {
       if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this);
     },
     appendChild(c) {
+      // A real DOM MOVES an already-parented node; a stub that only pushed
+      // duplicated it, which is exactly the shape the UI relies on when it
+      // re-appends live indicators below a new message (typingEls/workingEls).
+      // The duplicate then made one remove() look like it deleted two rows.
+      if (c.parent) c.parent.children = c.parent.children.filter(x => x !== c);
       c.parent = this;
       this.children.push(c);
       if (this.tag === 'select' && c.tag === 'option') {
@@ -1020,6 +1025,144 @@ if (topLevelError) {
     p.classifiedFolders = cls.folders.map(f => f.name);
     p.dropCueStartsHidden = !!byId['dropCue'].hidden;
   } catch (e) { more.quickwinsError = (e && e.stack) || String(e); }
+  // ---- the relay's own "I am working" indicator --------------------------
+  // Seats have typing indicators; everything that is NOT a seat used to run
+  // in silence. Driven through the REAL uiEvent path, because the grace
+  // period, the id pairing and the teardown are all top-level script.
+  try {
+    const p = more.working = {};
+    await ctx.newChat();
+    const feed = byId['feed'];
+    const rows = () => feed.querySelectorAll('.working').length;
+    const text = () => [...feed.querySelectorAll('.working')]
+      .map(deepText).join(' | ');
+
+    // 1. a side call that finishes inside the grace period paints NOTHING
+    ctx.uiEvent({event: 'working', payload: {id: 'fast', phase: 'moderator',
+      what: 'Choosing who speaks next', started: Date.now() / 1000}});
+    p.nothingImmediately = rows() === 0;
+    ctx.uiEvent({event: 'working', payload: {id: 'fast', done: true,
+                                             elapsed: 0.04}});
+    await new Promise(r => setTimeout(r, 600));
+    p.fastCallNeverPainted = rows() === 0;
+
+    // 2. a slow one paints, with its words and its detail
+    ctx.uiEvent({event: 'working', payload: {id: 'slow', phase: 'plan',
+      what: 'Supervisor is planning the work', detail: 'make this better',
+      started: Date.now() / 1000}});
+    await new Promise(r => setTimeout(r, 600));
+    p.slowRows = rows();
+    p.slowText = text();
+
+    // 3. two at once are two rows (parallel seat threads, helper threads)
+    ctx.uiEvent({event: 'working', payload: {id: 'slow2', phase: 'gate',
+      what: 'Running the verification gate', detail: 'pytest',
+      started: Date.now() / 1000}});
+    await new Promise(r => setTimeout(r, 600));
+    p.twoRows = rows();
+
+    // 4. a message lands: the rows stay BELOW it, like typing indicators
+    ctx.uiEvent({event: 'message', payload: {speaker: 0, provider: 'claude',
+      name: 'Claude', text: 'hello', round: 1}});
+    const kids = [...feed.children].map(c => c.className || '');
+    p.rowsStayLast = kids.slice(-2).every(c => c.includes('working'));
+
+    // 5. closing by ID removes exactly that row
+    ctx.uiEvent({event: 'working', payload: {id: 'slow', done: true,
+                                             elapsed: 91.2}});
+    p.afterFirstClose = rows();
+    p.remainingIsGate = /verification gate/.test(text());
+
+    // 6. the run ending clears whatever is left -- a spinner that outlives
+    //    its run is worse than no spinner at all
+    ctx.hideAllTyping();
+    p.clearedOnFinish = rows() === 0;
+
+    // 7. reopening a chat mid-plan replays it instead of rendering idle
+    p.replayed = null;
+    ctx.showWorking({id: 'replay', phase: 'plan', what: 'Planning the work',
+                     started: Date.now() / 1000 - 42});
+    await new Promise(r => setTimeout(r, 600));
+    p.replayed = text();
+    ctx.hideAllTyping();
+
+    // 8. THE routing trap: the app's pre-flight row opens before the chat has
+    //    an id and closes after `started` gave it one. A close routed like an
+    //    ordinary event is dropped by the not-my-chat gate and the spinner
+    //    never goes away.
+    ctx.uiEvent({event: 'working', payload: {id: 'setup', phase: 'setup',
+      what: 'Setting up the conversation', started: Date.now() / 1000}});
+    await new Promise(r => setTimeout(r, 600));
+    p.setupPainted = rows() === 1;
+    ctx.uiEvent({event: 'working', payload: {id: 'setup', done: true,
+      elapsed: 1.2, chat_id: 'a-chat-that-is-not-open'}});
+    p.setupClosedAcrossChats = rows() === 0;
+
+    // ...while an OPEN belonging to another chat is still not this
+    //    transcript's business
+    ctx.uiEvent({event: 'working', payload: {id: 'elsewhere', phase: 'plan',
+      what: 'Planning the work', chat_id: 'a-chat-that-is-not-open',
+      started: Date.now() / 1000}});
+    await new Promise(r => setTimeout(r, 600));
+    p.otherChatNotPainted = rows() === 0;
+    ctx.hideAllTyping();
+  } catch (e) { more.workingError = (e && e.stack) || String(e); }
+
+  // ---- richer live narration (2026-08-26) --------------------------------
+  // The seat log used to be a grey wall of file names: no commentary, no
+  // outcomes, no sense of how much had happened. The line CONTENT is checked
+  // through actLineHtml directly, because this stub parses nested innerHTML
+  // into a flat list and cannot see a span inside a div; the DOM is used for
+  // what it can answer honestly (classes, counts, the step badge).
+  try {
+    const p = more.narration = {};
+    await ctx.newChat();
+    const feed = byId['feed'];
+    ctx.showTyping(0, 'claude', 'Claude', {started: Date.now() / 1000 - 300});
+    const steps = [
+      {kind: 'say', text: "I'll grep for needle, then edit."},
+      {kind: 'search', text: 'searching in sample.txt: needle'},
+      {kind: 'result', text: 'found 1'},
+      {kind: 'command', text: '$ pytest -q'},
+      {kind: 'result', text: 'failed (exit 1): AssertionError'},
+    ];
+    steps.forEach(s => ctx.uiEvent({event: 'activity', payload:
+      Object.assign({speaker: 0, provider: 'claude', name: 'Claude'}, s)}));
+    const typing = feed.querySelectorAll('.typing')[0];
+    p.classes = [...typing.querySelectorAll('.act-line')]
+      .map(l => String(l.className || ''));
+
+    // ---- the renderer's own output, exactly as the browser gets it ----
+    p.htmlSay = ctx.actLineHtml(steps[0]);
+    p.htmlCommand = ctx.actLineHtml(steps[3]);
+    p.htmlFail = ctx.actLineHtml(steps[4]);
+    p.htmlOkResult = ctx.actLineHtml(steps[2]);
+    p.htmlEscaped = ctx.actLineHtml(
+      {kind: 'say', text: '<img src=x onerror=alert(1)>'});
+
+    // a progress tick is a stopwatch, not a step: it must not inflate the
+    // count, exactly as the engine's sink refuses to persist one
+    p.stepsAfterFive = Number(typing.dataset.steps || 0);
+    ctx.uiEvent({event: 'activity', payload: {speaker: 0, provider: 'claude',
+      name: 'Claude', kind: 'progress', text: '1,000 tokens'}});
+    p.stepsAfterProgress = Number(typing.dataset.steps || 0);
+    p.header = String(typing.querySelector('.trow').textContent || '') +
+      String(typing.querySelector('.tsteps').textContent || '');
+    // one progress LINE, replaced in place, however many ticks arrive
+    ctx.uiEvent({event: 'activity', payload: {speaker: 0, provider: 'claude',
+      name: 'Claude', kind: 'progress', text: '2,000 tokens'}});
+    p.progressLines = typing.querySelectorAll('.k-progress').length;
+
+    // the SAME renderer paints a finished row's stored activity
+    ctx.hideAllTyping();
+    ctx.uiEvent({event: 'message', payload: {speaker: 0, provider: 'claude',
+      name: 'Claude', text: 'done', round: 1, activity: steps}});
+    const row = [...feed.children].pop();
+    p.storedText = deepText(row);
+    p.storedClasses = [...row.querySelectorAll('.act-line')]
+      .map(l => String(l.className || ''));
+  } catch (e) { more.narrationError = (e && e.stack) || String(e); }
+
   report({bootRan: fns.length > 0, bootError, more});
 })();
 """
@@ -1053,6 +1196,110 @@ class UiBootTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls._tmp.cleanup()
+
+    # ---- the relay's own "I am working" indicator ----------------------
+    def _working(self):
+        self.assertIsNone(self.report.get("workingError"))
+        return self.report["working"]
+
+    def test_a_fast_side_call_never_paints_anything(self):
+        """A row that flashes on every moderator pick is noise, and noise is
+        what makes the real 90-second plan easy to miss."""
+        w = self._working()
+        self.assertTrue(w["nothingImmediately"])
+        self.assertTrue(w["fastCallNeverPainted"])
+
+    def test_a_slow_side_call_says_what_it_is_doing(self):
+        w = self._working()
+        self.assertEqual(w["slowRows"], 1)
+        self.assertIn("planning the work", w["slowText"])
+        self.assertIn("make this better", w["slowText"])
+
+    def test_concurrent_side_calls_get_their_own_rows(self):
+        """Parallel seat threads and helper threads each open their own."""
+        self.assertEqual(self._working()["twoRows"], 2)
+
+    def test_rows_stay_below_new_messages(self):
+        self.assertTrue(self._working()["rowsStayLast"])
+
+    def test_closing_removes_exactly_the_row_that_closed(self):
+        w = self._working()
+        self.assertEqual(w["afterFirstClose"], 1)
+        self.assertTrue(w["remainingIsGate"])
+
+    def test_the_run_ending_clears_every_row(self):
+        """A spinner that outlives its run is worse than no spinner."""
+        self.assertTrue(self._working()["clearedOnFinish"])
+
+    def test_a_chat_reopened_mid_side_call_replays_it(self):
+        self.assertIn("Planning the work", self._working()["replayed"])
+
+    def test_a_close_lands_even_when_the_chat_id_changed_under_it(self):
+        """The app's pre-flight row opens before the chat has an id and closes
+        after `started` gave it one — routed like an ordinary event, that
+        close is dropped as "not my chat" and the spinner never goes away."""
+        w = self._working()
+        self.assertTrue(w["setupPainted"])
+        self.assertTrue(w["setupClosedAcrossChats"])
+
+    def test_another_chats_work_is_not_painted_here(self):
+        self.assertTrue(self._working()["otherChatNotPainted"])
+
+    # ---- richer live narration ----------------------------------------
+    def _narration(self):
+        self.assertIsNone(self.report.get("narrationError"))
+        return self.report["narration"]
+
+    def test_each_kind_of_step_is_rendered_as_its_own_kind(self):
+        self.assertEqual(
+            [c.replace("act-line ", "").split()[0]
+             for c in self._narration()["classes"]],
+            ["k-say", "k-search", "k-result", "k-command", "k-result"])
+
+    def test_a_failed_step_is_marked_so_it_cannot_be_missed(self):
+        n = self._narration()
+        self.assertIn("k-result bad", n["htmlFail"])
+        self.assertNotIn("bad", n["htmlOkResult"])
+
+    def test_a_command_line_is_not_given_a_second_prompt_glyph(self):
+        """The adapters already emit "$ ", so an icon in front of it reads
+        as "> $ pytest"."""
+        html = self._narration()["htmlCommand"]
+        self.assertIn('<span class="act-icon"></span>', html)
+        self.assertIn("$ pytest -q", html)
+
+    def test_other_kinds_do_get_their_glyph(self):
+        n = self._narration()
+        for key in ("htmlSay", "htmlOkResult"):
+            icon = n[key].split('act-icon">')[1].split("</span>")[0]
+            self.assertTrue(icon.strip(), key)
+
+    def test_the_step_counter_ignores_the_token_stopwatch(self):
+        """A ticking counter is not work done — the same rule the engine's
+        sink follows when it refuses to persist a progress act."""
+        n = self._narration()
+        self.assertEqual(n["stepsAfterFive"], 5)
+        self.assertEqual(n["stepsAfterProgress"], 5)
+        self.assertIn("5 steps", n["header"])
+        self.assertIn("on this", n["header"])
+
+    def test_the_token_counter_stays_one_line(self):
+        self.assertEqual(self._narration()["progressLines"], 1)
+
+    def test_a_finished_row_replays_through_the_same_renderer(self):
+        """Live and stored narration diverging is how one of them silently
+        stops matching the adapters."""
+        n = self._narration()
+        self.assertIn("worked through 5 steps", n["storedText"])
+        self.assertEqual(
+            [c.replace("act-line ", "").split()[0] for c in n["storedClasses"]],
+            ["k-say", "k-search", "k-result", "k-command", "k-result"])
+
+    def test_narration_is_escaped(self):
+        """It is arbitrary text from a CLI stream."""
+        html = self._narration()["htmlEscaped"]
+        self.assertNotIn("<img", html)
+        self.assertIn("&lt;img", html)
 
     def test_script_survives_top_level(self):
         """One throw at top level takes the entire UI down with it."""

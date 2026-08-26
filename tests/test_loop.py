@@ -12,7 +12,9 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -322,6 +324,220 @@ class LoopTests(unittest.TestCase):
         state = build_state(self.tmp, [["a1", "a2"], ["b1", "b2"]], turns=5)
         outcome = run_rounds(state, StopIO())
         self.assertEqual(outcome, "stopped")
+
+
+class ProfileProbe(FakeAgent):
+    """Stands in for a real adapter in the side-call builders: records the
+    kwargs it was built with, runs nothing."""
+
+    def __init__(self, workspace, **kw):
+        super().__init__(workspace, [], **kw)
+        self.kw = kw
+
+
+def ws_task(tid, owner, status="pending", brief="Do the thing", files=None,
+            deps=None, started_ts=None):
+    t = {"id": tid, "owner": owner, "status": status, "brief": brief,
+         "files": list(files or [])}
+    if deps is not None:
+        t["deps"] = list(deps)
+    if started_ts is not None:
+        t["started_ts"] = started_ts
+    return t
+
+
+class StepModelProfileTests(unittest.TestCase):
+    """Per-step model profiles: which model runs the relay's OWN side calls.
+
+    A profile for a step wins before helper_spec's chain (moderator -> first
+    seat -> default); an unconfigured step keeps the old chain byte-for-byte;
+    garbage profiles fall back rather than looking configured."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ai-chat-test-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_normalization_keeps_only_real_steps_and_providers(self):
+        good = relay.normalize_step_models({
+            "planner": "ox",
+            "moderator": "claude:claude-haiku-4-5:low",
+            "title": "gpt",
+            # all of these DROP, never sanitize:
+            "typo": "ox",                    # unknown step name
+            "planner2": "ox",                # near-miss key
+            "checker": "ox",                 # not one of STEP_MODEL_KEYS
+            "title": "",                     # empty value
+        })
+        self.assertEqual(sorted(good), ["moderator", "planner"])
+        self.assertEqual(good["planner"], {"provider": "ox"})
+        self.assertEqual(good["moderator"],
+                         {"provider": "claude",
+                          "model": "claude-haiku-4-5", "effort": "low"})
+        # unknown provider: dropped — a profile must never route a side call
+        # to a CLI that is not installed
+        self.assertNotIn("planner",
+                         relay.normalize_step_models({"planner": "nope"}))
+        # a label segment makes it a SEAT spec, not a step profile
+        self.assertEqual(relay.normalize_step_models(
+            {"title": "ox=some-label"}), {})
+        # garbage shapes fall back entirely
+        self.assertEqual(relay.normalize_step_models(None), {})
+        self.assertEqual(relay.normalize_step_models("ox"), {})
+        self.assertEqual(relay.normalize_step_models({"title": 7}), {})
+
+    def test_profile_wins_and_unconfigured_chain_is_byte_identical(self):
+        seats = ["claude", "gpt"]
+        mod = {"provider": "ox", "model": "opencode/hy3-free"}
+        # no profile at all -> exactly the historical answers
+        self.assertEqual(relay.helper_spec(seats, mod),
+                         {"provider": "ox", "model": "opencode/hy3-free"})
+        self.assertEqual(relay.helper_spec(["claude", "gpt"]),
+                         {"provider": "claude"})
+        # a title profile overrides ONLY the title step
+        spec = relay.helper_spec(seats, mod, step="title",
+                                 step_models={"title": "ox"})
+        self.assertEqual(spec, {"provider": "ox"})
+        # ...and the same call without that step still resolves through the
+        # chain (helper_spec takes the step explicitly; brief synthesis does)
+        self.assertEqual(relay.helper_spec(["claude", "gpt"], None,
+                                           step=None,
+                                           step_models={"title": "ox"}),
+                         {"provider": "claude"})
+        # an unusable profile map falls back to the chain rather than lying
+        self.assertEqual(relay.helper_spec(["claude"], None, step="title",
+                                           step_models={"title": "nope"}),
+                         {"provider": "claude"})
+
+    def _probe_state(self, **extra):
+        state = {"workspace": self.tmp, "providers": ["claude"],
+                 "supervisor": None, "moderator": None, "step_models": None}
+        state.update(extra)
+        return state
+
+    def test_build_supervisor_honors_the_planner_profile(self):
+        with mock.patch.dict(relay.AGENT_TYPES, {"ox": ProfileProbe}):
+            agent = relay.build_supervisor(
+                self._probe_state(step_models={"planner": "ox"}))
+        self.assertIsInstance(agent, ProfileProbe)
+        self.assertEqual(agent.kw.get("model"), None)
+        # an explicit supervisor spec still applies when no profile exists
+        with mock.patch.dict(relay.AGENT_TYPES, {"ox": ProfileProbe}):
+            agent = relay.build_supervisor(self._probe_state(
+                supervisor={"provider": "ox", "effort": "low"}))
+        self.assertIsInstance(agent, ProfileProbe)
+        self.assertEqual(agent.kw.get("effort"), "low")
+        # and the PROFILE beats the supervisor spec when both exist — it is
+        # the later, more specific instruction about internal side work
+        with mock.patch.dict(relay.AGENT_TYPES, {"gpt": ProfileProbe}):
+            agent = relay.build_supervisor(self._probe_state(
+                supervisor={"provider": "ox"},
+                step_models={"planner": "gpt:gpt-5.6-sol:low"}))
+        self.assertIsInstance(agent, ProfileProbe)
+        self.assertEqual(agent.kw.get("model"), "gpt-5.6-sol")
+
+    def test_build_moderator_honors_the_moderator_profile(self):
+        with mock.patch.dict(relay.AGENT_TYPES, {"ox": ProfileProbe}):
+            agent = relay.build_moderator(
+                self._probe_state(moderator={"provider": "claude"},
+                                  step_models={"moderator": "ox"}))
+        self.assertIsInstance(agent, ProfileProbe)
+        # no profile -> Josh's moderator picker stands
+        with mock.patch.dict(relay.AGENT_TYPES, {"ox": ProfileProbe}):
+            agent = relay.build_moderator(self._probe_state(
+                moderator={"provider": "ox", "model": "opencode/hy3-free"}))
+        self.assertIsInstance(agent, ProfileProbe)
+        self.assertEqual(agent.kw.get("model"), "opencode/hy3-free")
+
+    def test_build_title_agent_honors_the_title_profile(self):
+        state = self._probe_state()
+        state["step_models"] = {"title": "ox:muse-spark"}
+        with mock.patch.dict(relay.AGENT_TYPES, {"ox": ProfileProbe}):
+            agent = relay.build_title_agent(state)
+        self.assertIsInstance(agent, ProfileProbe)
+        self.assertEqual(agent.kw.get("model"), "muse-spark")
+
+    def test_profiles_and_note_persist_additively(self):
+        state = build_state(self.tmp, [["a1"], ["b1"]], turns=1)
+        state["step_models"] = {"planner": "ox", "junk": "nope"}
+        state["handoff_note"] = "Always include a test list."
+        state["store"].save(state)
+        meta = saved_meta(state)
+        # saved NORMALIZED: junk gone, valid entry kept
+        self.assertEqual(meta["step_models"], {"planner": {"provider": "ox"}})
+        self.assertEqual(meta["handoff_note"],
+                         "Always include a test list.")
+        # rehydrate restores them so a resumed chat keeps its recipe
+        rstate = relay.rehydrate(meta)
+        self.assertEqual(rstate["step_models"],
+                         {"planner": {"provider": "ox"}})
+        self.assertEqual(rstate["handoff_note"],
+                         "Always include a test list.")
+
+
+class HandoffNoteTests(unittest.TestCase):
+    """The standing handoff note rides every worker brief. assign_workstreams
+    is the ONE dispatch point (initial AND post-settlement), so testing it
+    covers both; the settle path below proves the next worker after a
+    settlement gets it too."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ai-chat-test-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_note_reaches_worker_briefs(self):
+        state = build_state(self.tmp, [["w1"], ["w2"]], turns=1)
+        state["workstreams"] = [
+            ws_task("t1", 0),
+            ws_task("t2", 1, deps=["t1"]),
+        ]
+        state["handoff_note"] = "Every plan must include a test list."
+        relay.assign_workstreams(state, RecordingIO())
+        brief = state["pending"][0][0]
+        self.assertIn("Your task [t1]: Do the thing", brief)
+        self.assertIn("Standing handoff instructions for every task in "
+                      "this room (from Josh): Every plan must include a "
+                      "test list.", brief)
+
+    def test_no_note_leaves_briefs_unchanged(self):
+        state = build_state(self.tmp, [["w1"], ["w2"]], turns=1)
+        state["workstreams"] = [ws_task("t1", 0)]
+        relay.assign_workstreams(state, RecordingIO())
+        self.assertNotIn("Standing handoff instructions",
+                         state["pending"][0][0])
+
+    def test_note_is_capped_plain_text(self):
+        self.assertEqual(len(relay.normalize_handoff_note("x" * 10000)),
+                         relay.HANDOFF_NOTE_MAX)
+        self.assertEqual(relay.normalize_handoff_note("  hi  "), "hi")
+        self.assertEqual(relay.normalize_handoff_note(123), "")
+        self.assertEqual(relay.normalize_handoff_note(None), "")
+
+    def test_next_worker_after_settlement_gets_the_note(self):
+        workspace = os.path.join(self.tmp, "session", "workspace")
+        started = time.time() - 5
+        tasks = [
+            ws_task("t1", 0, status="active", files=["out.txt"],
+                    started_ts=started),
+            ws_task("t2", 1, deps=["t1"]),
+        ]
+        state = build_state(self.tmp, [["a1"], ["b1"]], turns=1)
+        state["workstreams"] = tasks
+        state["handoff_note"] = "Commit only green work."
+        with open(os.path.join(workspace, "out.txt"), "w") as f:
+            f.write("delivered\n")          # mtime AFTER started_ts: verifies
+        io = RecordingIO()
+        relay.settle_workstream(state, 0, io, reply="done")
+        self.assertEqual(tasks[0]["status"], "done")
+        # settlement unblocked t2 and dispatched it to seat 1 WITH the note
+        self.assertEqual(tasks[1]["status"], "active")
+        brief = state["pending"][1][-1]
+        self.assertIn("Your task [t2]", brief)
+        self.assertIn("Standing handoff instructions for every task in "
+                      "this room (from Josh): Commit only green work.", brief)
 
 
 if __name__ == "__main__":

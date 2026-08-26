@@ -343,6 +343,11 @@ class Run:
         # with three seats 14 minutes into a 15-minute window looked exactly
         # like a dead one (2026-08-23). open_session replays this instead.
         self.thinking = {}
+        # The relay's OWN work: token id -> {phase, what, detail, started}.
+        # Same reason `thinking` exists — the indicator is live-only, so a
+        # chat reopened while the supervisor is planning would otherwise
+        # render as completely idle.
+        self.working = {}
 
     def is_running(self):
         return bool(self.thread and self.thread.is_alive())
@@ -451,6 +456,16 @@ class _AppIO(LoopIO):
                 "started": time.time()}
         elif event == "thinking_done":
             self._run.thinking.pop(str(payload.get("speaker")), None)
+        elif event == "working":
+            wid = str(payload.get("id") or "")
+            if payload.get("done"):
+                self._run.working.pop(wid, None)
+            elif wid:
+                self._run.working[wid] = {
+                    "id": wid, "phase": payload.get("phase"),
+                    "what": payload.get("what"),
+                    "detail": payload.get("detail"),
+                    "started": payload.get("started") or time.time()}
         self._api.emit(event, payload)
 
     def drain_human(self):
@@ -1648,6 +1663,9 @@ class Api:
                     # so the UI can put the typing indicators back rather than
                     # showing a grinding chat as an idle one
                     "thinking": list(existing.thinking.values()),
+                    # same rule for the relay's own work: a chat reopened
+                    # mid-plan must not render as idle either
+                    "working": list(existing.working.values()),
                     "live": existing.is_running()}
         path = session_path(session_id)
         if not path:
@@ -1693,7 +1711,7 @@ class Api:
         self._conv = state
         # a chat this window has not loaded cannot have a turn in flight
         return {"ok": True, "session": summary, "messages": messages,
-                "thinking": [], "live": False}
+                "thinking": [], "working": [], "live": False}
 
     def get_tabs(self):
         """The open-tab strip, filtered to chats that still exist."""
@@ -2308,7 +2326,10 @@ class Api:
             self.emit("status", {"text": note})
             state["store"].system(note, round=state["rnd"])
             try:
-                summary = compact_agent(agent)
+                with relay.working(_AppIO(self, state.get("_run")), "compact",
+                                   agent.name,
+                                   label=f"Applying {agent.name}'s role change"):
+                    summary = compact_agent(agent)
             except Exception as e:
                 note = (f"{agent.name}'s role change failed "
                         f"({str(e)[:160]}) — it stays {old}.")
@@ -2574,96 +2595,103 @@ class Api:
                                "can_continue": bool(self._conv)})
             return
 
-        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        attachments = cfg.get("attachments") or []
-        title_src = topic or opener or \
-            (attachments[0].get("name", "") if attachments else "")
-        slug = re.sub(r"[^a-z0-9]+", "-", title_src.lower())[:40].strip("-") or "chat"
-        self._session_dir = os.path.join(SESSIONS_DIR, f"{stamp}-{slug}")
-        self._view_workspace = None      # the live _conv is authoritative now
-        workspace = cfg.get("workspace") or os.path.join(self._session_dir, "workspace")
-        os.makedirs(self._session_dir, exist_ok=True)
-        os.makedirs(workspace, exist_ok=True)
-        if continuous_cfg:
-            # Both of these need the real folder, which only exists now. The
-            # dirty flag is snapshotted at the START on purpose: it is what
-            # decides whether a green wave may commit, and asking later would
-            # be asking about the seats' own edits.
-            gate = continuous_cfg["gate"]
-            if not gate["command"]:
-                gate["command"] = relay.detect_test_command(workspace)
-            gate["dirty_at_start"] = bool(relay.git_dirty(workspace))
-        # attachment lines join the opener AFTER the title is set — the rail
-        # title should stay the words Josh typed, not a wall of file paths
-        opener = with_attachments(opener, save_attachments(attachments, workspace))
-        transcript = os.path.join(self._session_dir, "transcript.md")
+        # Everything from here to `started` is real work with no seat in
+        # it yet - decoding attachments, probing git for the gate, opening
+        # the transcript. Short on a small chat, not on a big attachment or
+        # a large repo, and until now it was indistinguishable from a dead
+        # window. The UI holds this row back for a beat, so a fast setup
+        # still shows nothing.
+        with relay.working(_AppIO(self), "setup"):
+            stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            attachments = cfg.get("attachments") or []
+            title_src = topic or opener or \
+                (attachments[0].get("name", "") if attachments else "")
+            slug = re.sub(r"[^a-z0-9]+", "-", title_src.lower())[:40].strip("-") or "chat"
+            self._session_dir = os.path.join(SESSIONS_DIR, f"{stamp}-{slug}")
+            self._view_workspace = None      # the live _conv is authoritative now
+            workspace = cfg.get("workspace") or os.path.join(self._session_dir, "workspace")
+            os.makedirs(self._session_dir, exist_ok=True)
+            os.makedirs(workspace, exist_ok=True)
+            if continuous_cfg:
+                # Both of these need the real folder, which only exists now. The
+                # dirty flag is snapshotted at the START on purpose: it is what
+                # decides whether a green wave may commit, and asking later would
+                # be asking about the seats' own edits.
+                gate = continuous_cfg["gate"]
+                if not gate["command"]:
+                    gate["command"] = relay.detect_test_command(workspace)
+                gate["dirty_at_start"] = bool(relay.git_dirty(workspace))
+            # attachment lines join the opener AFTER the title is set — the rail
+            # title should stay the words Josh typed, not a wall of file paths
+            opener = with_attachments(opener, save_attachments(attachments, workspace))
+            transcript = os.path.join(self._session_dir, "transcript.md")
 
-        agents = []
-        for s, label in zip(picked, labels):
-            agents.append(AGENT_TYPES[s["provider"]](
-                workspace, yolo=yolo,
-                model=s.get("model") or None, effort=s.get("effort") or None,
-                name=label,
-                role=s.get("role") or None,
-                role_instructions=s.get("role_instructions") or None,
-                connectors=connectors))
-        providers = [s["provider"] for s in picked]
+            agents = []
+            for s, label in zip(picked, labels):
+                agents.append(AGENT_TYPES[s["provider"]](
+                    workspace, yolo=yolo,
+                    model=s.get("model") or None, effort=s.get("effort") or None,
+                    name=label,
+                    role=s.get("role") or None,
+                    role_instructions=s.get("role_instructions") or None,
+                    connectors=connectors))
+            providers = [s["provider"] for s in picked]
 
-        # Full opener text is the title — the rail ellipsizes in CSS and uses
-        # the rest as a tooltip, so truncating here would throw it away.
-        store = SessionStore(self._session_dir)
-        store.open_transcript(title_src, agents, turns)
+            # Full opener text is the title — the rail ellipsizes in CSS and uses
+            # the rest as a tooltip, so truncating here would throw it away.
+            store = SessionStore(self._session_dir)
+            store.open_transcript(title_src, agents, turns)
 
-        state = {
-            "agents": agents, "slot_ids": slot_ids, "providers": providers,
-            "transcript": store.transcript, "workspace": workspace,
-            "topic": topic or opener, "title": title_src, "created": store.created,
-            "yolo": yolo, "connectors": connectors,
-            "turns": turns, "store": store, "ended": False,
-            "pending": {i: [] for i in range(len(agents))},
-            "introduced": [False] * len(agents),
-            "floor_opened": {}, "floor_turns": {},
-            "forced_next": None, "deferred_wrap": None,
-            "rnd": 0, "max": turns, "mode": mode,
-            "orchestration": recipe,
-            "moderator": moderator_spec,
-            "supervisor": supervisor_spec,
-            "supervisor_trace": [],
-            "supervisor_goal": None,
-            "supervisor_waves": 0,
-            "supervisor_wave_index": 1,
-            "workstreams": None,
-            "panel": panel_state,
-            "battle": battle_state,
-            "continuous": continuous_cfg,
-            # Keep Improving has no round cap and no ceiling of its own — the
-            # limits Josh acknowledged in the warning modal are the brakes.
-            "until_done": until_done or bool(continuous_cfg),
-            "turn_ceiling": None if continuous_cfg else ceiling,
-            "spawn": {"tier1": bool((cfg.get("spawn") or {})
-                                    .get("tier1", True)),
-                      "max_helpers": max(0, int((cfg.get("spawn") or {})
-                                                .get("max_helpers") or 0)),
-                      "helpers_used": 0,
-                      "max_teams": max(0, int((cfg.get("spawn") or {})
-                                              .get("max_teams") or 0)),
-                      "teams_used": 0},
-            # the app always has a human watching — seats may [[ASK]] Josh
-            "ask": True,
-        }
-        state["log"] = log = make_log(state, store)
-        # _session_dir was set above, so the focused run is this chat's — pin
-        # it to the state before any thread can move the focus pointer.
-        state["_run"] = self._runs.focused()
-        if (cfg.get("plan") or {}).get("enabled"):
-            # Read-only from the FIRST turn, before any seat has spoken:
-            # starting in execution and downgrading later would leave a window
-            # in which a seat could already have written something.
-            relay.start_plan(state, cfg.get("opener") or cfg.get("topic") or "")
-        self._conv = state
-        # Persist before the first turn: if the app dies here, Josh's opener is
-        # the only content that exists and it must still be resumable.
-        store.save(state)
+            state = {
+                "agents": agents, "slot_ids": slot_ids, "providers": providers,
+                "transcript": store.transcript, "workspace": workspace,
+                "topic": topic or opener, "title": title_src, "created": store.created,
+                "yolo": yolo, "connectors": connectors,
+                "turns": turns, "store": store, "ended": False,
+                "pending": {i: [] for i in range(len(agents))},
+                "introduced": [False] * len(agents),
+                "floor_opened": {}, "floor_turns": {},
+                "forced_next": None, "deferred_wrap": None,
+                "rnd": 0, "max": turns, "mode": mode,
+                "orchestration": recipe,
+                "moderator": moderator_spec,
+                "supervisor": supervisor_spec,
+                "supervisor_trace": [],
+                "supervisor_goal": None,
+                "supervisor_waves": 0,
+                "supervisor_wave_index": 1,
+                "workstreams": None,
+                "panel": panel_state,
+                "battle": battle_state,
+                "continuous": continuous_cfg,
+                # Keep Improving has no round cap and no ceiling of its own — the
+                # limits Josh acknowledged in the warning modal are the brakes.
+                "until_done": until_done or bool(continuous_cfg),
+                "turn_ceiling": None if continuous_cfg else ceiling,
+                "spawn": {"tier1": bool((cfg.get("spawn") or {})
+                                        .get("tier1", True)),
+                          "max_helpers": max(0, int((cfg.get("spawn") or {})
+                                                    .get("max_helpers") or 0)),
+                          "helpers_used": 0,
+                          "max_teams": max(0, int((cfg.get("spawn") or {})
+                                                  .get("max_teams") or 0)),
+                          "teams_used": 0},
+                # the app always has a human watching — seats may [[ASK]] Josh
+                "ask": True,
+            }
+            state["log"] = log = make_log(state, store)
+            # _session_dir was set above, so the focused run is this chat's — pin
+            # it to the state before any thread can move the focus pointer.
+            state["_run"] = self._runs.focused()
+            if (cfg.get("plan") or {}).get("enabled"):
+                # Read-only from the FIRST turn, before any seat has spoken:
+                # starting in execution and downgrading later would leave a window
+                # in which a seat could already have written something.
+                relay.start_plan(state, cfg.get("opener") or cfg.get("topic") or "")
+            self._conv = state
+            # Persist before the first turn: if the app dies here, Josh's opener is
+            # the only content that exists and it must still be resumable.
+            store.save(state)
 
         self.emit("started", {
             "session_dir": self._session_dir, "workspace": workspace,
@@ -2697,7 +2725,8 @@ class Api:
                                                moderator_spec,
                                                supervisor_spec),
                               enabled=cfg.get("brief", True),
-                              on_status=brief_status_row)
+                              on_status=brief_status_row,
+                              io=_AppIO(self, state.get("_run")))
         if brief.get("status") != "off":
             state["brief"] = brief
             if brief.get("usage"):
@@ -2810,6 +2839,7 @@ class Api:
         run = state.get("_run")
         if run is not None:
             run.thinking.clear()     # a new run starts with nobody mid-turn
+            run.working.clear()      # ...and no side call left over from the last
         self._set_status(run, "running")
         try:
             outcome_kind = run_rounds(state, _AppIO(self, run))
