@@ -151,6 +151,48 @@ class FreeModeTests(unittest.TestCase):
         # the benign pause reaches outcome hard facts as its own reason
         self.assertEqual(state["completion"]["termination_reason"], "starved")
 
+    def test_free_mode_rows_carry_no_refusal_keys_when_nothing_refused(self):
+        """The delivery gate must leave the reactive engine byte-identical:
+        no parks, no workstreams -> no row ever grows rejected_to or
+        narrowing_failed (comms-design.md section 3's identity rule)."""
+        state = free_state(self.tmp,
+                           [["a1", "a2"], ["b1", "b2"]],
+                           turns=2, labels=["A", "B"], opener="go")
+        run_rounds(state, RecordingIO())
+        seat_rows = [r for r in jsonl_rows(state)
+                     if r.get("origin") == "seat"]
+        self.assertTrue(seat_rows)
+        for r in seat_rows:
+            self.assertNotIn("rejected_to", r)
+            self.assertNotIn("narrowing_failed", r)
+
+    def test_a_parked_peer_stops_absorbing_broadcasts_in_free_mode(self):
+        """Free mode parks failing seats through the SAME shared set the
+        delivery gate reads, so once B parks, A's later commits are REFUSED
+        to it visibly (envelope receipt) instead of piling into a queue
+        nobody will drain this run. C (slow, healthy) keeps two live seats
+        so the benign starve-pause cannot preempt the scenario."""
+        boom = RuntimeError("down")
+        state = free_state(self.tmp,
+                           [[f"a{k}" for k in range(5)],
+                            [boom] * 9,
+                            [f"c{k}" for k in range(10)]],
+                           turns=3, labels=["A", "B", "C"], opener="go")
+        state["agents"][2] = SleepyAgent(state["workspace"],
+                                         [f"c{k}" for k in range(10)],
+                                         0.01, name="C")
+        run_rounds(state, RecordingIO())
+        rows = [r for r in jsonl_rows(state)
+                if r.get("origin") == "seat" and r["name"] == "A"]
+        self.assertTrue(rows)
+        refused = [r for r in rows if r.get("rejected_to")]
+        self.assertTrue(refused, "at least one commit must be refused to B")
+        for r in refused:
+            self.assertEqual([x["seat"] for x in r["rejected_to"]], [1])
+            self.assertEqual(r["rejected_to"][0]["reason"],
+                             "benched after repeated failures")
+            self.assertNotIn(1, r["delivered_to"])
+
     def test_stop_command(self):
         class StopIO(RecordingIO):
             def __init__(self):

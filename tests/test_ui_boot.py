@@ -1245,6 +1245,61 @@ if (topLevelError) {
     }
   } catch (e) { more.teamLinkError = (e && e.stack) || String(e); }
 
+  // ---- delivery-refusal pills (comms-design.md section 3.3, UI half) ------
+  // The engine stamps refused deliveries into the envelope as rejected_to
+  // [{seat, reason}] (+ narrowing_failed). Driven through the same addMsg
+  // path live turns and replay share; malformed shapes must render nothing.
+  try {
+    ctx.addMsg('claude', 'Claude', 'a reply that could not reach everyone',
+               '', '', '2026-08-26T11:00:00', null, null,
+               {speaker: 's1', origin: 'seat',
+                delivered_to: ['0'], audience: ['0', '9'],
+                rejected_to: [{seat: '9',
+                               reason: 'worker radio-silent until t3 settles'}]});
+    // narrowing failure alone: every intended seat got it, but [[TO]] fell
+    // back to broadcast and replay must say so
+    ctx.addMsg('claude', 'Claude', 'TO fell back to broadcast',
+               '', '', '2026-08-26T11:01:00', null, null,
+               {speaker: 's1', origin: 'seat', delivered_to: ['0'],
+                audience: '*', narrowing_failed: true});
+    // garbage entries must not crash or invent a pill
+    ctx.addMsg('claude', 'Claude', 'malformed refusals',
+               '', '', '2026-08-26T11:02:00', null, null,
+               {speaker: 's1', origin: 'seat', delivered_to: ['0'],
+                audience: '*', rejected_to: [null, "", {"reason": "orphan"}]});
+    const rpills = [...byId['feed'].querySelectorAll('.refusal-pill')];
+    // Stub-DOM readers: a template-parsed leaf keeps its text in _html
+    // (textContent stays ''), and attributes live in _attrs — so labels are
+    // read through tag-stripped _html and titles through getAttribute.
+    const ptext = p => String((p && p._html) || '').replace(/<[^>]*>/g, '').trim();
+    const ptitle = p => {
+      if (!p) return '';
+      const t = typeof p.getAttribute === 'function' ? p.getAttribute('title') : null;
+      return String(t || p.title || '');
+    };
+    const pattr = (p, a) => {
+      if (!p || typeof p.getAttribute !== 'function') return '';
+      return String(p.getAttribute(a) || '');
+    };
+    more.refusal = {
+      total: rpills.length,                       // exactly 2 expected
+      firstSeats: rpills.length ? pattr(rpills[0], 'data-seats') : null,
+      firstTitle: rpills.length ? ptitle(rpills[0]) : null,
+      secondText: rpills.length > 1
+        ? pattr(rpills[1], 'data-seats') || '(narrowing only)' : null,
+      secondTitle: rpills.length > 1 ? ptitle(rpills[1]) : null,
+      secondMentionsBroadcast: rpills.length > 1 &&
+        /broadcast/.test(ptitle(rpills[1])),
+    };
+    const before = rpills.length;
+    ctx.addMsg('claude', 'Claude', 'plain reply, no refusals',
+               '', '', '2026-08-26T11:03:00', null, null,
+               {speaker: 's1', origin: 'seat', delivered_to: ['0'],
+                audience: '*'});
+    more.refusal.plainAddsNone =
+      [...byId['feed'].querySelectorAll('.refusal-pill')].length === before;
+  } catch (e) { more.refusalError = (e && e.stack) || String(e); }
+
   report({bootRan: fns.length > 0, bootError, more});
 })();
 """
@@ -1729,6 +1784,34 @@ class UiBootTests(unittest.TestCase):
         self.assertEqual(tl["titles"],
                          ["Open sub-conversation 'sess-two'"])
         self.assertTrue(tl["opensChat"])
+
+    # ---- delivery-refusal pills (comms-design.md section 3.3, UI half) ------
+    def _refusal(self):
+        self.assertIsNone(self.report.get("refusalError"),
+                          "refusal probe threw: %s"
+                          % self.report.get("refusalError"))
+        return self.report["refusal"]
+
+    def test_refusal_pills_render_from_envelope_data(self):
+        """rejected_to [{seat, reason}] becomes one dim dashed pill naming the
+        refused seat, with the reason in its tooltip — visible rejection, not
+        silent success. Rendered from data only: rows without refusals grow
+        nothing, and malformed entries neither crash nor invent a pill."""
+        r = self._refusal()
+        self.assertEqual(r["total"], 2)
+        self.assertEqual(r["firstSeats"], "Seat 9")
+        self.assertIn("not delivered to Seat 9", r["firstTitle"] or "")
+        self.assertIn("worker radio-silent until t3 settles",
+                      r["firstTitle"] or "")
+        self.assertTrue(r["plainAddsNone"])
+
+    def test_narrowing_failure_is_surfaced_even_when_all_seats_heard_it(self):
+        """A [[TO:]] that mis-resolved broadcast instead: every seat was
+        delivered, and the pill still says so — intent vs delivery must not
+        quietly diverge in replay."""
+        r = self._refusal()
+        self.assertEqual(r["secondText"], "(narrowing only)")
+        self.assertTrue(r["secondMentionsBroadcast"])
 
     def test_the_shortcuts_cheat_sheet_exists_and_starts_hidden(self):
         """The ? overlay: present in the page, not shown until asked for."""

@@ -3253,10 +3253,15 @@ class SessionStore:
                "provider": provider, "name": name, "text": text,
                "round": round, "meta": meta, "role": role or None,
                "ts": ts}
-        for key in ("thread_id", "intent", "artifacts", "digest_of"):
+        for key in ("thread_id", "intent", "artifacts", "digest_of",
+                    # delivery-refusal receipts (comms-design.md section 3.3):
+                    # rejected_to [{seat, reason}] + narrowing_failed — the
+                    # payload ui/index.html's refusalPill renders
+                    "rejected_to", "narrowing_failed"):
             value = env.get(key)
             if value not in (None, "", []):
-                row[key] = list(value) if key in ("artifacts", "digest_of") else value
+                row[key] = list(value) if key in ("artifacts", "digest_of",
+                                                  "rejected_to") else value
         if activity:
             # what the seat DID before this reply (capped) — replayed chats
             # show the same collapsed activity block Josh watched live
@@ -6612,11 +6617,16 @@ def usage_snapshot(state):
 
 
 def _addressed_recipients(state, i, reply, io):
-    """Return (intended audience, actual recipient indices) for one reply.
+    """Return (intended audience, actual recipient indices, refused,
+    narrowing_failed) for one reply.
 
     A valid trailing ``[[TO: seat, seat]]`` narrows delivery in any workflow.
     Bad targets never make text disappear: they produce a visible notice and
-    fall back to the workflow's ordinary broadcast/isolation fan-out.
+    fall back to the workflow's ordinary broadcast/isolation fan-out — with
+    `narrowing_failed` set so replay can say the addressing did not survive.
+    Every candidate passes through delivery_gate; a seat it refuses is NOT
+    silently dropped from the audience, it comes back in `refused` as
+    {seat, reason} for the row's envelope (comms-design.md section 3).
     """
     agents = state["agents"]
     _, hits, _unknown = peel_directives(reply)
@@ -6624,7 +6634,9 @@ def _addressed_recipients(state, i, reply, io):
     explicit = args[0] if len(args) == 1 else None
     intended = "*"
     picks = None
+    narrowing_failed = False
     if args and not explicit:
+        narrowing_failed = True
         note = (f"{agents[i].name}'s TO directive was empty or repeated — "
                 "broadcasting normally instead.")
         io.emit("status", {"text": note})
@@ -6642,6 +6654,7 @@ def _addressed_recipients(state, i, reply, io):
             elif matches[0] != i and matches[0] not in resolved:
                 resolved.append(matches[0])
         if invalid or not resolved:
+            narrowing_failed = True
             detail = ", ".join(repr(x) for x in invalid if x) or "only itself"
             note = (f"{agents[i].name}'s TO target ({detail}) was not a "
                     "unique peer — broadcasting normally instead.")
@@ -6652,8 +6665,16 @@ def _addressed_recipients(state, i, reply, io):
             intended = [state["slot_ids"][j] for j in resolved]
     candidates = (picks if picks is not None else
                   [j for j in range(len(agents)) if j != i])
-    actual = [j for j in candidates if j != i and workstream_hears(state, i, j)]
-    return intended, actual
+    actual, refused = [], []
+    for j in candidates:
+        if j == i:
+            continue
+        reason = delivery_gate(state, i, j)
+        if reason is None:
+            actual.append(j)
+        else:
+            refused.append({"seat": state["slot_ids"][j], "reason": reason})
+    return intended, actual, refused, narrowing_failed
 
 
 MENTION_MAX_WORDS = 3
@@ -6709,6 +6730,22 @@ def enqueue_josh_message(state, io, text):
         store.save(state)
         return row
     sid = state["slot_ids"][target]
+    # Josh's mention still passes the park/runtime gate (a benched seat has
+    # nowhere to take delivery), but not the worker radio-silence gate — the
+    # room's owner is not bound by task isolation.
+    reason = delivery_gate(state, None, target, kind="human")
+    if reason is not None:
+        row = state["log"]("Josh (human)", text, envelope={
+            "audience": [sid], "delivered_to": [],
+            "rejected_to": [{"seat": sid, "reason": reason}]})
+        io.emit("message", row)
+        note = (f"Josh's message was NOT delivered to "
+                f"{agents[target].name}: {reason}. It stays in the "
+                f"transcript only.")
+        io.emit("status", {"text": note})
+        store.system(note, round=state.get("rnd", 0))
+        store.save(state)
+        return row
     row = state["log"]("Josh (human)", text, envelope={
         "audience": [sid], "delivered_to": [sid]})
     io.emit("message", row)
@@ -6894,11 +6931,19 @@ def commit_reply(state, i, reply, consumed, io, activity=None,
     del state["pending"][i][:consumed]
     if force_broadcast:
         audience = "*"
-        recipient_indices = [j for j in range(len(agents))
-                             if j != i and workstream_hears(state, i, j)]
+        recipient_indices, refused, narrowing_failed = [], [], False
+        for j in range(len(agents)):
+            if j == i:
+                continue
+            reason = delivery_gate(state, i, j)
+            if reason is None:
+                recipient_indices.append(j)
+            else:
+                refused.append({"seat": state["slot_ids"][j],
+                                "reason": reason})
     else:
-        audience, recipient_indices = _addressed_recipients(
-            state, i, reply, io)
+        audience, recipient_indices, refused, narrowing_failed = \
+            _addressed_recipients(state, i, reply, io)
     message_id = uuid.uuid4().hex
     envelope = {
         "message_id": message_id,
@@ -6907,6 +6952,16 @@ def commit_reply(state, i, reply, consumed, io, activity=None,
         "artifacts": artifact_descriptors(
             state.get("workspace"), activity, state["slot_ids"][i], message_id),
     }
+    # Refused deliveries are stamped on the SENDER's row (comms-design.md
+    # section 3.3: rejected_to [{seat, reason}], plus narrowing_failed when a
+    # [[TO]] fell back to broadcast) — the mirror of never-forge-a-turn: what
+    # did NOT arrive is said out loud where the message lives. Keys appear
+    # only when something was actually refused, so ordinary rows are
+    # byte-identical and the UI's refusalPill is never invented.
+    if refused:
+        envelope["rejected_to"] = refused
+    if narrowing_failed:
+        envelope["narrowing_failed"] = True
     if isinstance(envelope_extra, dict):
         for key in ("thread_id", "intent", "digest_of"):
             if envelope_extra.get(key) not in (None, "", []):
@@ -6945,6 +7000,39 @@ def workstream_hears(state, i, j):
         return True
     return workstreams.shares_stream(tasks, state["slot_ids"][i],
                                      state["slot_ids"][j])
+
+
+def delivery_gate(state, sender, receiver, kind="message"):
+    """The ONE deliverability answer for putting words into a seat's queue
+    (comms-design.md section 3). Returns None when delivery may proceed,
+    else a short human reason NAMING THE GATE THAT FIRED — a refusal nobody
+    can diagnose is a silent drop with extra steps.
+
+    Traycer gates delivery three ways (parked / runtime-inbox / mode-policy).
+    Alloy adapts them honestly into two real checks:
+
+      park+runtime - a seat benched for this run (mark_floor_unavailable)
+                     cannot receive: its CLI died fatally or failed twice,
+                     which is also exactly Alloy's answer to "does the
+                     target hold a live provider session?" — so Traycer's
+                     two matrices collapse into one set here. The check
+                     keeps its own name so a future per-runtime matrix
+                     lands IN this function, not at the call sites.
+      mode/stream  - delegated to workstream_hears verbatim: an active
+                     worker hears nothing until settlement (radio silence),
+                     and no workstreams means always-True, so ordinary
+                     chats are byte-identical.
+
+    `kind` says what is being delivered: "message" (seat -> seat, all gates)
+    or "human" (Josh -> seat; the room's owner is not bound by worker radio
+    silence, but a benched seat still cannot take delivery).
+    """
+    sid = state["slot_ids"][receiver]
+    if sid in (state.get("_floor_unavailable") or set()):
+        return "benched after repeated failures"
+    if kind != "human" and not workstream_hears(state, sender, receiver):
+        return "worker radio-silent until their task settles"
+    return None
 
 
 def active_workstream(state, i):
@@ -11233,6 +11321,9 @@ def run_free(state, io):
                 # retry it after the human has inspected or cleared it.
                 with cond:
                     parked[i] = True
+                    mark_floor_unavailable(state, i)   # delivery_gate sees it
+                    busy[i] = False    # a parked seat is idle, or the
+                                       # budget-cap stop waits forever
                     cond.notify_all()
                 return
 
@@ -11240,10 +11331,13 @@ def run_free(state, io):
                 if fails >= 3:
                     with cond:
                         parked[i] = True
+                        mark_floor_unavailable(state, i)
+                        busy[i] = False     # same leak, same fix
                         note = (f"{agent.name} keeps failing — parked for "
-                                f"this run (its queue keeps accumulating; "
-                                f"/clear {agent.name.lower()} on a later "
-                                f"continue revives it).")
+                                f"this run (its queue is kept as-is; new "
+                                f"messages to it are refused with a "
+                                f"receipt — /clear {agent.name.lower()} on "
+                                f"a later continue revives it).")
                         io.emit("agent_error", {"speaker": key,
                                                 "provider": providers[i],
                                                 "message": note})

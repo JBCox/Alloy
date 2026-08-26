@@ -1340,6 +1340,15 @@
     border: 1px solid rgba(112,151,188,.28); border-radius: 999px;
     padding: 1px 7px; white-space: nowrap;
   }
+  /* Delivery REFUSALS (comms-design.md §3.3): deliberately dim and dashed —
+     a refusal is information, not an error. Workstream radio-silence is
+     by design; the pill exists so it never reads as silent success. */
+  .msg-head .refusal-pill {
+    font: 10.5px "Cascadia Mono", Consolas, monospace;
+    color: var(--muted); background: transparent;
+    border: 1px dashed rgba(255,255,255,.24); border-radius: 999px;
+    padding: 1px 7px; white-space: nowrap; cursor: default;
+  }
   .msg.lens-hidden { display: none; }
   .day-divider.lens-hidden { display: none; }
   .msg-head .mtime {
@@ -3098,6 +3107,37 @@ function deliveryPill(row) {
   const title = `Intended: ${intended}; delivered: ${label}`;
   return `<span class="delivery-pill" title="${esc(title)}">${esc(label)}</span>`;
 }
+function refusalPill(row) {
+  // comms-design.md section 3.3: the engine stamps refused deliveries into
+  // the envelope as `rejected_to` [{seat, reason}], plus `narrowing_failed`
+  // when a [[TO:]] mis-resolved and the reply broadcast instead. Rendered
+  // purely from data: until t10's engine side lands, no row carries these
+  // keys and this returns "" — a pill must never be invented.
+  const rej = row && Array.isArray(row.rejected_to) ? row.rejected_to : [];
+  if (!rej.length && !row?.narrowing_failed) return "";
+  const lines = [];
+  const names = [];
+  (rej.length ? rej : []).forEach(r => {
+    const seat = (r && typeof r === "object") ? r.seat : r;
+    if (seat === undefined || seat === null || seat === "") return;
+    const reason = (r && typeof r === "object") ? String(r.reason || "") : "";
+    const nm = deliverySeatName(seat);
+    names.push(nm);
+    lines.push("not delivered to " + nm + (reason ? ": " + reason : ""));
+  });
+  if (!names.length && !row.narrowing_failed) return "";
+  if (row.narrowing_failed) {
+    lines.push("[[TO]] did not resolve - the relay broadcast this reply instead");
+  }
+  const label = "\u2300 " + (names.length === 1 ? names[0]
+                              : names.length ? names.length + " seats"
+                              : "narrowing failed");
+  // data-seats mirrors the label's seat list as a plain attribute: styling
+  // hook today, and the one honest way to pin the naming logic from tests
+  // whose DOM stub does not model text nodes inside parsed markup.
+  return `<span class="refusal-pill" data-seats="${esc(names.join(", "))}" ` +
+         `title="${esc(lines.join("\r\n"))}">${esc(label)}</span>`;
+}
 // Blind-duel context for the OPEN chat. Null everywhere else. letters maps
 // seat slot id -> "A"/"B" (lower slot id = A, same mapping as the engine's
 // battle_seats); masked while the duel is unanswered, revealed flips on the
@@ -3182,6 +3222,7 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
     : "";
   const costPill = formatUsage(usage);
   const delivery = deliveryPill(row);
+  const refusal = refusalPill(row);
   // what the seat DID before this reply — the stored row's capped activity
   // list, rendered as a collapsed block ABOVE the body (escaped: command
   // lines and file names are arbitrary text from the CLIs)
@@ -3191,7 +3232,7 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
       activity.map(a => actLineHtml(a)).join("") + `</details>`
     : "";
   d.innerHTML = `<div class="msg-head"><span class="who">${esc(name)}</span>` +
-    (meta ? `<span class="meta">${esc(meta)}</span>` : "") + costPill + delivery + clock +
+    (meta ? `<span class="meta">${esc(meta)}</span>` : "") + costPill + delivery + refusal + clock +
     `</div>` + think + `<div class="msg-body">${md(text)}</div>`;
   const cp = document.createElement("button");
   cp.className = "copy-btn"; cp.title = "Copy message text"; cp.textContent = "⧉";
