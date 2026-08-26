@@ -4096,6 +4096,92 @@ def write_event_hooks(hooks, path=None):
     return data
 
 
+# --------------------------------------------------------------- rooms -----
+# Saved room templates: a named snapshot of exactly what the stage builds for
+# a launch — seats, models, efforts, roles, the orchestration recipe, limits
+# and the working folder. Like tabs, deliberately NOT in any session's
+# meta.json: a template exists before and across conversations, and a file
+# the loop never rewrites has no race with the engine's meta saves.
+ROOMS_FILE = os.path.join(SESSIONS_DIR, "rooms.json")
+ROOMS_MAX = 64
+ROOM_NAME_MAX = 80
+
+
+def _read_rooms(path=None):
+    """The raw {name: {"cfg", "saved_at"}} mapping, always a dict.
+
+    Never raises: a corrupt or missing file means "no saved rooms", which
+    degrades to exactly the behaviour that existed before rooms.
+    """
+    try:
+        with open(path or ROOMS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    rooms = data.get("rooms")
+    return rooms if isinstance(rooms, dict) else {}
+
+
+def save_room(name, cfg, path=None):
+    """Persist one room template under `name`; an existing name is OVERWRITTEN
+    (the newest stage wins) and gets a fresh saved_at. The name must be real
+    text — non-empty after trimming and at most ROOM_NAME_MAX chars; anything
+    else raises ValueError rather than being sanitized into a surprise."""
+    if not isinstance(name, str):
+        raise ValueError("Room name must be text.")
+    name = name.strip()
+    if not name:
+        raise ValueError("Give the room a name.")
+    if len(name) > ROOM_NAME_MAX:
+        raise ValueError(f"Room name must be at most {ROOM_NAME_MAX} chars.")
+    if not isinstance(cfg, dict):
+        raise ValueError("Room config must be an object.")
+    rooms = dict(_read_rooms(path))
+    stamp = datetime.datetime.now().isoformat(timespec="seconds")
+    rooms[name] = {"cfg": cfg, "saved_at": stamp}
+    target = path or ROOMS_FILE
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    _atomic_write(target, json.dumps({"version": 1, "rooms": rooms},
+                                     ensure_ascii=False, indent=1))
+    return {"ok": True, "name": name, "saved_at": stamp}
+
+
+def list_rooms(path=None):
+    """{"version": 1, "rooms": [{name, cfg, saved_at}]}, newest first.
+
+    Malformed entries are dropped, never raised: one bad record must not
+    hide every good template.
+    """
+    rows = []
+    for name, rec in _read_rooms(path).items():
+        if not isinstance(rec, dict) or not isinstance(rec.get("cfg"), dict):
+            continue
+        rows.append({"name": name, "cfg": rec["cfg"],
+                     "saved_at": str(rec.get("saved_at") or "")})
+    # Ascending stable sort, then reverse: newest stamp first, and two rooms
+    # saved in the SAME SECOND keep "the one saved last lists first". Truncate
+    # only after ordering, or the cap could evict exactly the newest rooms.
+    rows.sort(key=lambda r: r["saved_at"])
+    rows.reverse()
+    return {"version": 1, "rooms": rows[:ROOMS_MAX]}
+
+
+def delete_room(name, path=None):
+    """Remove one template. A missing name (or unreadable store) is a clean
+    False — deleting something already gone must never surface as an error."""
+    rooms = dict(_read_rooms(path))
+    if not isinstance(name, str) or name not in rooms:
+        return False
+    del rooms[name]
+    target = path or ROOMS_FILE
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    _atomic_write(target, json.dumps({"version": 1, "rooms": rooms},
+                                     ensure_ascii=False, indent=1))
+    return True
+
+
 def session_summary(session_dir, meta=None):
     """One sidebar row. Pure file reads (one meta.json + one stat)."""
     sid = os.path.basename(session_dir.rstrip("\\/"))
