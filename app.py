@@ -29,6 +29,7 @@ from relay import (AGENT_TYPES, PROVIDERS, SESSIONS_DIR, HELP_TEXT,
                    MODES, DEFAULT_MODE, IMPLEMENTED_MODES, DEFAULT_CEILING,
                    OX_FREE_MODELS, OX_DEFAULT_MODEL, helper_spec,
                    read_tabs, write_tabs, TAB_COLORS,
+                   read_event_hooks, write_event_hooks, HOOK_EVENTS,
                    ox_model_details, ox_default_level,
                    assign_labels, compact_agent, resolve_cmd, clean_env,
                    logout_gemini,
@@ -483,6 +484,11 @@ class Api:
         # UI toggles it via set_sound and remembers the choice in localStorage;
         # ON by default because the events that chime are the ones that block.
         self._sound = True
+        # Event hooks: user shell commands per conversation event. The cache
+        # is loaded lazily off disk on first fire and refreshed by
+        # set_event_hooks; underscore-prefixed like everything else here.
+        self._hooks_lock = threading.Lock()
+        self._hooks_cache = None
         threading.Thread(target=self._drain_emits, daemon=True).start()
 
     # ---- focused-run views (the old singular attributes) -----------------
@@ -597,6 +603,14 @@ class Api:
                 if event in SOUND_CUES and self._sound:
                     threading.Thread(target=_play_cue, args=(event,),
                                      daemon=True).start()
+                # Event hooks ride the same one thread, but never ON it: the
+                # command runs on its own daemon (see run_event_hook), so a
+                # slow or hung hook cannot stall the emit queue.
+                try:
+                    self.run_event_hook(event,
+                                        json.loads(data).get("payload"))
+                except Exception:
+                    pass
             except Exception:
                 pass
             finally:
@@ -1608,6 +1622,102 @@ class Api:
         self._sound = bool(enabled)
         return {"ok": True, "sound": self._sound}
 
+    # -------------------------------------------------------- event hooks --
+    def _hook_command(self, hook_name):
+        """The configured command for one event, or None. Lazy-loads the file
+        once; a corrupt read degrades to "no hooks" (never raises)."""
+        with self._hooks_lock:
+            if self._hooks_cache is None:
+                try:
+                    self._hooks_cache = read_event_hooks().get("hooks") or {}
+                except Exception:
+                    self._hooks_cache = {}
+            return self._hooks_cache.get(hook_name)
+
+    def run_event_hook(self, event, payload=None):
+        """Fire the user's shell command for one conversation event.
+
+        Called from the ONE emitter thread where _play_cue/_flash_taskbar
+        fire — which is exactly why this must never block it: the command
+        runs on a fresh daemon thread with a hard timeout, DEVNULL pipes and
+        CREATE_NO_WINDOW, and every failure is swallowed (the same contract
+        as activity narration). Zero overhead when nothing is configured.
+        Returns the spawned Thread so tests can join it (None = nothing to do).
+        """
+        payload = payload if isinstance(payload, dict) else {}
+        if event == "gate":
+            # wave_gate emits both colours; only a RED gate is worth a buzz.
+            if payload.get("ok") is not False:
+                return None
+            hook_name = "gate_red"
+        elif event in ("question", "checkin", "done"):
+            hook_name = event
+        else:
+            return None
+        command = self._hook_command(hook_name)
+        if not command:
+            return None
+        detail = ""
+        for key in ("text", "question", "message", "command"):
+            if payload.get(key):
+                detail = str(payload[key])
+                break
+        session_id, title = "", ""
+        try:
+            run = self._runs.focused()
+            if run is not None and run.id:
+                session_id = run.id
+        except Exception:
+            pass
+        env = hook_environment(hook_name, session_id, title, detail)
+        worker = threading.Thread(target=self._hook_worker,
+                                  args=(hook_name, command, env), daemon=True)
+        worker.start()
+        return worker
+
+    def _hook_worker(self, hook_name, command, env):
+        try:
+            _execute_command(command, env)
+        except Exception:
+            pass
+
+    def get_event_hooks(self):
+        """Bridge-thread safe: ONE small bounded JSON read (like
+        list_sessions), no subprocess anywhere near it."""
+        with self._hooks_lock:
+            try:
+                data = read_event_hooks()
+                self._hooks_cache = data.get("hooks") or {}
+            except Exception:
+                data = {"version": 1, "hooks": {}}
+                self._hooks_cache = {}
+        return {"ok": True, "events": list(HOOK_EVENTS),
+                "hooks": data.get("hooks") or {}}
+
+    def set_event_hooks(self, hooks):
+        """Persist hook commands: the recheck_auth shape — answer {"ok": True}
+        at once, do the file write on a worker thread, report with a
+        hooks_status event. Unknown names reject HERE (cheap, no I/O) so the
+        UI sees the refusal immediately."""
+        hooks = hooks if isinstance(hooks, dict) else {}
+        for name in hooks:
+            if name not in HOOK_EVENTS:
+                return {"error": "Unknown hook event %r — expected one of: %s."
+                                 % (name, ", ".join(HOOK_EVENTS))}
+        threading.Thread(target=self._set_hooks_worker, args=(dict(hooks),),
+                         daemon=True).start()
+        return {"ok": True}
+
+    def _set_hooks_worker(self, hooks):
+        try:
+            data = write_event_hooks(hooks)
+            with self._hooks_lock:
+                self._hooks_cache = data.get("hooks") or {}
+            self.emit("hooks_status", {"ok": True})
+        except Exception as e:
+            self.emit("hooks_status",
+                      {"ok": False, "error": str(e)[:200]})
+
     def new_conversation(self):
         return self.reset_conversation()
 
@@ -2415,6 +2525,34 @@ SOUND_CUES = {
     "checkin": ((880, 90), (880, 90), (880, 90)),
     "done": ((587, 160),),
 }
+
+# Event hooks (feature #16): the same best-effort attention channel as sound
+# cues and the taskbar flash, but Josh's own commands instead of built-ins —
+# e.g. a termux-notification on his phone when a run asks him something.
+HOOK_TIMEOUT_S = 10       # a hook is a nudge, not a job; it never queues work
+HOOK_DETAIL_MAX = 200     # AICHAT_DETAIL is an excerpt, not the whole payload
+
+
+def hook_environment(hook_name, session_id="", title="", detail=""):
+    """os.environ plus the four AICHAT_* variables a hook command may read."""
+    env = dict(os.environ)
+    env["AICHAT_EVENT"] = str(hook_name or "")
+    env["AICHAT_SESSION"] = str(session_id or "")
+    env["AICHAT_TITLE"] = str(title or "")
+    env["AICHAT_DETAIL"] = str(detail or "")[:HOOK_DETAIL_MAX]
+    return env
+
+
+def _execute_command(command, env):
+    """Run ONE user-configured shell command. Raises on timeout/failure by
+    design — Api._hook_worker swallows everything; keeping this pure makes
+    both halves testable without spawning anything."""
+    kwargs = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    subprocess.run(command, shell=True, stdin=subprocess.DEVNULL,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=HOOK_TIMEOUT_S, env=env, **kwargs)
 
 
 def _apply_window_icon(window):
