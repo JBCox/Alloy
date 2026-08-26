@@ -3203,6 +3203,9 @@ class SessionStore:
             # tracking on resume, never continuity
             "workstreams": state.get("workstreams"),
             "usage": state.get("usage"),
+            # additive: old code ignoring it just means an old chat may earn
+            # its auto-title on its next continued run, never a wrong title
+            "auto_titled": bool(state.get("auto_titled")),
             "seats": [{
                 "id": state["slot_ids"][i],
                 "provider": state["providers"][i],
@@ -3666,6 +3669,100 @@ def helper_spec(seat_providers, moderator_spec=None, supervisor_spec=None):
         if provider in AGENT_TYPES:
             return {"provider": provider}
     return {}
+
+
+TITLE_PROMPT = (
+    "Name this conversation in at most 6 words, plain text only: no quotes, "
+    "no punctuation at the end, no preamble. Reply with the title and "
+    "nothing else.\n\n"
+    "Opening message:\n{opener}\n\n"
+    "First reply:\n{reply}")
+
+TITLE_MAX_CHARS = 80
+
+
+def clean_title(raw):
+    """Sanitize a model-proposed title into a safe rail label."""
+    text = str(raw or "").strip().splitlines()
+    text = next((ln.strip() for ln in text if ln.strip()), "")
+    text = text.strip("\"'`“”‘’* ").strip()
+    text = text.replace("*", "").replace("`", "")   # stray markdown emphasis
+    words = text.split()
+    if len(words) > 8:                      # the prompt says 6; enforce 8
+        text = " ".join(words[:8])
+    return text[:TITLE_MAX_CHARS].rstrip()
+
+
+def build_title_agent(state):
+    """Throwaway stateless adapter for the one-shot auto-title side call.
+
+    Routed through helper_spec like every piece of the relay's OWN side work,
+    so an all-Ox room never silently spends a Claude call. Tests stub THIS
+    builder (the way test_continuous stubs build_supervisor) and stay
+    token-free."""
+    spec = helper_spec(state.get("providers"),
+                       moderator_spec=state.get("moderator"),
+                       supervisor_spec=state.get("supervisor"))
+    provider = spec.get("provider") or "claude"
+    if provider not in AGENT_TYPES:
+        provider = "claude"
+    model = spec.get("model") or ("claude-haiku-4-5"
+                                  if provider == "claude" else None)
+    effort = spec.get("effort") or ("low" if provider == "claude" else None)
+    return AGENT_TYPES[provider](state["workspace"], yolo=False,
+                                 model=model, effort=effort,
+                                 name="Relay title")
+
+
+def maybe_auto_title(state, io):
+    """After the FIRST committed reply, retitle the chat once.
+
+    One cheap stateless side call over the opener + that reply; the new title
+    lands in meta.json via store.save and reaches the rail live through a
+    `session_title` event. Best-effort by contract: any failure is a silent
+    skip that never touches the turn in progress and never fabricates a
+    title. The flag is set BEFORE the side call (the run_checkin rule), so a
+    dead call cannot retry at every later boundary — exactly once per
+    session, never again on resume, and forks inherit the flag with their
+    copied meta."""
+    if state.get("auto_titled"):
+        return None
+    if int(state.get("turn") or 0) < 1:
+        return None
+    store = state.get("store")
+    if not isinstance(store, SessionStore):
+        return None
+    state["auto_titled"] = True             # once, whatever happens below
+    opener = ""
+    try:
+        rows = read_messages(store.dir)
+        opener = next((str(r.get("text") or "") for r in rows
+                       if r.get("speaker") == "josh"), "")
+    except Exception:
+        opener = ""
+    opener = (opener or state.get("topic") or state.get("title") or "")[:2000]
+    agent = None
+    title = ""
+    try:
+        agent = build_title_agent(state)
+        raw = agent.turn(TITLE_PROMPT.format(
+            opener=opener,
+            reply=str(state.get("_last_reply") or "")[:4000]))
+        record_usage(state, getattr(agent, "last_usage", None), kind="title")
+        title = clean_title(raw)
+    except Exception:
+        title = ""                          # silent skip, never fails a turn
+    finally:
+        if agent is not None:
+            agent.session_id = None         # stateless by design
+    if title:
+        state["title"] = title
+        io.emit("session_title", {"session_id": store.id, "title": title})
+    try:
+        store.save(state)                   # persist the flag (and the title)
+    except Exception:
+        pass
+    return title or None
 
 
 def project_brief(workspace, session_dir, spec=None, enabled=True,
@@ -4528,6 +4625,7 @@ def rehydrate(meta, workspace=None):
         "spawn": meta.get("spawn"),
         "ask": bool(meta.get("ask")),      # pre-feature metas -> False
         "ask_pending": meta.get("ask_pending"),
+        "auto_titled": bool(meta.get("auto_titled")),
         "plan": meta.get("plan"),
         "panel": meta.get("panel"),
         "hidden": dict(meta.get("hidden") or {}),
@@ -5384,6 +5482,13 @@ class LoopIO:
     def on_turn_boundary(self, state):
         """Hook before each prompt is composed (app: staged role commit)."""
 
+    def auto_title(self, state):
+        """One-shot post-first-round retitle hook. The headless default is a
+        no-op so tests driving the real loop with fakes stay token-free; the
+        CLI and the app override it to run relay.maybe_auto_title(state, io)
+        at a barrier, where no seat thread is alive and a slow side call can
+        never block a sibling commit."""
+
     def ask_human(self, payload, abort=None):
         """A seat put a structured question to Josh ([[ASK: …]]). payload:
         {"qid", "speaker" (slot id), "provider", "asker" (name),
@@ -5401,9 +5506,13 @@ class CLIIO(LoopIO):
     """Terminal front end: stdin + say.txt in, ANSI status lines out.
     Message rows are NOT printed here — the CLI's make_log echo owns that."""
 
-    def __init__(self, human_q, say_file):
+    def __init__(self, human_q, say_file, title_side_calls=False):
         self._q = human_q
         self._say = say_file
+        # The one-shot auto-title side call costs a real CLI invocation, so
+        # the production launcher opts in explicitly; tests building a CLIIO
+        # stay token-free by default (structurally, not by vigilance).
+        self._title_side_calls = bool(title_side_calls)
         self._ask_lock = threading.Lock()   # one question at a time
         self._asking = False
 
@@ -5414,6 +5523,10 @@ class CLIIO(LoopIO):
         if self._asking:
             return []
         return drain_human_input(self._q, self._say)
+
+    def auto_title(self, state):
+        if self._title_side_calls:
+            maybe_auto_title(state, self)
 
     def ask_human(self, payload, abort=None):
         with self._ask_lock:
@@ -6060,6 +6173,70 @@ def _addressed_recipients(state, i, reply, io):
     return intended, actual
 
 
+MENTION_MAX_WORDS = 3
+
+
+def parse_mention(text, agents):
+    """Split a leading ``@Seat `` mention off a HUMAN message.
+
+    Returns (seat index or None, remaining text). The token — up to
+    MENTION_MAX_WORDS words of it, so "@Claude 2" matches a multi-word
+    label — resolves through the SAME matcher /clear, [[TO:]] and --role
+    use (case-insensitive labels first, provider names second). A name that
+    matches NOBODY, an ambiguous one (a provider with several seats), or a
+    mention with no message after it is not magic: the text stays literal
+    and the message broadcasts exactly as it always did.
+    """
+    raw = (text or "").lstrip()
+    if not raw.startswith("@"):
+        return None, (text or "")
+    words = raw[1:].split()
+    for k in range(min(MENTION_MAX_WORDS, len(words)), 0, -1):
+        token = " ".join(words[:k])
+        hits = match_seats(agents, token)
+        if len(hits) == 1:
+            rest = raw[1 + len(token):].strip()
+            if rest:
+                return hits[0], rest
+            return None, (text or "")   # address with no message: literal
+        if hits:
+            break                       # ambiguous on purpose; stop digging
+    return None, (text or "")
+
+
+def enqueue_josh_message(state, io, text):
+    """Record ONE human message and put it where the queues say it goes.
+
+    The one funnel behind every front end's drain loop (sequential, panel,
+    parallel and free all call this). Without a leading @mention this is the
+    historic broadcast, byte-for-byte; with one, delivery narrows to the
+    addressed seat only — the transcript row still carries the full verbatim
+    text, and its envelope records the narrowed audience so replay shows the
+    routing. Deliberately NOT wired into hidden/digest synchronization: the
+    point of addressing Josh's message is that the other seats never hear it.
+    """
+    agents = state["agents"]
+    store = state["store"]
+    target, rest = parse_mention(text, agents)
+    if target is None:
+        row = state["log"]("Josh (human)", text)
+        io.emit("message", row)
+        for j in range(len(agents)):
+            state["pending"][j].append(f"Josh (human) interjects: {text}")
+        store.save(state)
+        return row
+    sid = state["slot_ids"][target]
+    row = state["log"]("Josh (human)", text, envelope={
+        "audience": [sid], "delivered_to": [sid]})
+    io.emit("message", row)
+    state["pending"][target].append(f"Josh (human) says to you: {rest}")
+    note = f"Josh addressed this message to {agents[target].name} only."
+    io.emit("status", {"text": note})
+    store.system(note, round=state.get("rnd", 0))
+    store.save(state)
+    return row
+
+
 def artifact_descriptors(workspace, activity, producer, message_id):
     """Turn confined edit activity into truthful, verified file references."""
     found = []
@@ -6246,6 +6423,9 @@ def commit_reply(state, i, reply, consumed, io, activity=None,
     # live seat config — a later role edit can't relabel this message
     row = state["log"](agent.name, reply, meta=f"round {state['rnd']}",
                        activity=activity, envelope=envelope)
+    # in-memory only: the raw text the one-shot auto-title side call reads if
+    # this turns out to be the conversation's first committed reply
+    state["_last_reply"] = str(reply or "")
     io.emit("message", row)
     if audience != "*":
         hidden = state.setdefault("hidden", {})
@@ -9121,11 +9301,7 @@ def _run_rounds(state, io):
                 if dispatch_command(state, h, io):
                     stopped = True
                 continue
-            row = log("Josh (human)", h)
-            io.emit("message", row)
-            for j in range(len(agents)):
-                pending[j].append(f"Josh (human) interjects: {h}")
-            store.save(state)
+            enqueue_josh_message(state, io, h)
         mgr.drain_into_pending()
         if stopped:
             outcome = "stopped"
@@ -9134,6 +9310,9 @@ def _run_rounds(state, io):
         # to speak gets a fresh preamble with the new role rather than
         # switching identity halfway through a turn.
         io.on_turn_boundary(state)
+        # One-shot auto-title: rides the same barrier rule as Keep Improving
+        # (no seat thread alive; guarded to fire once, after turn 1).
+        io.auto_title(state)
         # Keep Improving rides the boundary, never a background timer: no
         # seat thread is alive here, which is the only place the one-owner-
         # thread-per-Agent rule permits a side call to touch a seat or a task.
@@ -9539,12 +9718,7 @@ def run_panel(state, io):
                         stopped = True
                 continue
             with lock:
-                row = state["log"]("Josh (human)", h)
-                io.emit("message", row)
-                for j in range(len(agents)):
-                    state["pending"][j].append(
-                        f"Josh (human) interjects: {h}")
-                store.save(state)
+                enqueue_josh_message(state, io, h)
         return stopped
 
     while True:
@@ -9561,6 +9735,7 @@ def run_panel(state, io):
             mgr.finish()
             return "stopped"
         io.on_turn_boundary(state)
+        io.auto_title(state)                    # one-shot; guarded in relay
 
         if _panel_phase_settled(state, phase):
             _advance_panel(state)
@@ -9753,11 +9928,7 @@ def run_parallel(state, io):
                         stop = True
                 continue
             with lock:
-                row = log("Josh (human)", h)
-                io.emit("message", row)
-                for j in range(len(agents)):
-                    pending[j].append(f"Josh (human) interjects: {h}")
-                store.save(state)
+                enqueue_josh_message(state, io, h)
         return stop
 
     while True:
@@ -9777,6 +9948,7 @@ def run_parallel(state, io):
             outcome = "stopped"
             break
         io.on_turn_boundary(state)
+        io.auto_title(state)                    # one-shot; guarded in relay
         # Keep Improving rides the boundary, never a background timer: no
         # seat thread is alive here, which is the only place the one-owner-
         # thread-per-Agent rule permits a side call to touch a seat or a task.
@@ -10324,12 +10496,11 @@ def run_free(state, io):
                     stop_all("stopped")
                 continue
             with cond:
-                row = log("Josh (human)", h)
-                io.emit("message", row)
-                for j in range(n):
-                    pending[j].append(f"Josh (human) interjects: {h}")
-                store.save(state)
+                enqueue_josh_message(state, io, h)
                 cond.notify_all()
+        # one-shot auto-title, OUTSIDE cond: a slow side call must never hold
+        # the lock every seat thread waits on
+        io.auto_title(state)
         if io.should_stop():
             stop_all("stopped")
         with cond:
@@ -10749,7 +10920,7 @@ def main():
     store.save(state)  # a chat exists the moment it starts, not after turn 1
 
     try:
-        run_rounds(state, CLIIO(human_q, say_file))
+        run_rounds(state, CLIIO(human_q, say_file, title_side_calls=True))
     except KeyboardInterrupt:
         print(f"\n{DIM}interrupted — transcript saved.{RESET}")
 

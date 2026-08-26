@@ -953,6 +953,53 @@ if (topLevelError) {
     p.hiddenAfterNewChat = !(byId['budgetStrip'].className || '').includes('show');
     p.textAfterNewChat = String(byId['budgetStrip'].textContent);
   } catch (e) { more.budgetError = (e && e.stack) || String(e); }
+=======
+
+  // ---- @-mention hint + composer drag-and-drop, through their seams ------
+  // The chip only MIRRORS engine routing (relay.parse_mention), so the probe
+  // is that it appears for a seated label and stays hidden otherwise. Drop
+  // planning is a pure core over plain descriptors; classification is driven
+  // with fake DataTransferItemList items.
+  try {
+    const p = more.quickwins = {};
+    await ctx.newChat();
+    byId['say'].value = '@claude hello there';
+    ctx.updateMentionHint();
+    p.hintForClaude = !byId['mentionHint'].hidden
+      ? byId['mentionHint'].textContent : null;
+    byId['say'].value = '@nobody hello there';
+    ctx.updateMentionHint();
+    p.hintHiddenWhenNoMatch = !!byId['mentionHint'].hidden;
+    byId['say'].value = 'plain text';
+    ctx.updateMentionHint();
+    p.hintHiddenForPlain = !!byId['mentionHint'].hidden;
+    byId['say'].value = '';
+    // files plan: everything attaches, nothing is refused
+    const filesPlan = ctx.planDrop(
+      [{name: 'a.png', isDir: false}, {name: 'b.txt', isDir: false}], false);
+    p.filesAttach = filesPlan.attachCount;
+    p.filesNoCue = filesPlan.cue === null && filesPlan.folderName === null;
+    // folder while UNSEATED: detected and named, refused with the Choose hint
+    const unseated = ctx.planDrop([{name: 'proj', isDir: true}], false);
+    p.folderUnseatedCue = /choose/i.test(unseated.cue || '');
+    p.folderNamed = unseated.folderName === 'proj' &&
+      unseated.attachCount === 0;
+    // folder while SEATED: locked, said in those words
+    const seatedF = ctx.planDrop([{name: 'proj', isDir: true}], true);
+    p.folderSeatedCue = /locked/i.test(seatedF.cue || '');
+    // entry-vs-folder classification over fake drop items
+    const items = [
+      {kind: 'file', getAsFile() { return {name: 'x.png'}; },
+       webkitGetAsEntry() { return null; }},
+      {kind: 'file', getAsFile() { return null; },
+       webkitGetAsEntry() { return {isDirectory: true, name: 'proj'}; }},
+      {kind: 'string'},
+    ];
+    const cls = ctx.classifyDropEntries(items);
+    p.classifiedFiles = cls.files.length;
+    p.classifiedFolders = cls.folders.map(f => f.name);
+    p.dropCueStartsHidden = !!byId['dropCue'].hidden;
+  } catch (e) { more.quickwinsError = (e && e.stack) || String(e); }
   report({bootRan: fns.length > 0, bootError, more});
 })();
 """
@@ -1400,6 +1447,34 @@ class UiBootTests(unittest.TestCase):
         to cost Josh the message as well as the turn."""
         p = self.report["newTab"]
         self.assertEqual(p["sayAfterRefusal"], "words worth keeping")
+
+    def test_mention_hint_mirrors_engine_routing(self):
+        """The chip shows for a seated label (case-insensitively), and an
+        @name matching nobody stays literal text with no chip."""
+        self.assertIsNone(self.report.get("quickwinsError"))
+        q = self.report["quickwins"]
+        self.assertEqual(q["hintForClaude"], "→ only Claude will receive this")
+        self.assertTrue(q["hintHiddenWhenNoMatch"])
+        self.assertTrue(q["hintHiddenForPlain"])
+
+    def test_drop_planning_attaches_files_and_refuses_folders(self):
+        """Files attach; a folder is DETECTED and named but refused — while
+        unseated because WebView2 never exposes a dropped item's absolute
+        path (so the cue points at Choose), and while seated because the
+        working folder is locked once a conversation starts."""
+        q = self.report["quickwins"]
+        self.assertEqual(q["filesAttach"], 2)
+        self.assertTrue(q["filesNoCue"])
+        self.assertTrue(q["folderNamed"])
+        self.assertTrue(q["folderUnseatedCue"], q.get("quickwinsError"))
+        self.assertTrue(q["folderSeatedCue"])
+
+    def test_drop_classification_splits_entries_from_files(self):
+        """webkitGetAsEntry folders vs getAsFile files, string items skipped."""
+        q = self.report["quickwins"]
+        self.assertEqual(q["classifiedFiles"], 1)
+        self.assertEqual(q["classifiedFolders"], ["proj"])
+        self.assertTrue(q["dropCueStartsHidden"])
 
     def test_harness_still_catches_the_original_regression(self):
         """RED guard: put the 2026-08-21 TDZ call back and demand a failure.

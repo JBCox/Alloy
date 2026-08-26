@@ -1482,6 +1482,8 @@
     display: flex; gap: 10px; padding: 4px 18px 14px; border-top: 1px solid var(--line);
     background: #1A1720; align-items: flex-end; flex-wrap: wrap;
   }
+  /* drag-and-drop target highlight (files attach, folders are refused) */
+  .composer.dragover { background: #221D29; box-shadow: inset 0 3px 0 var(--alloy); }
   /* the whole-width grab bar above the box — drag it to resize the typing area */
   #sayGrip { flex-basis: 100%; height: 10px; cursor: ns-resize; touch-action: none; }
   #sayGrip::after {
@@ -1571,6 +1573,11 @@
   }
   #attRow { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; }
   #attRow[hidden] { display: none; }
+  .mention-hint {
+    flex-basis: 100%; font-size: 11.5px; color: var(--alloy);
+    padding: 0 2px;
+  }
+  .mention-hint[hidden] { display: none; }
   .att-chip {
     display: inline-flex; align-items: center; gap: 7px; background: var(--surface);
     border: 1px solid var(--line); border-radius: 999px; padding: 3px 11px;
@@ -1891,6 +1898,8 @@
         title="A seat is waiting on your answer — click to reopen the question"></button>
       <div id="sayGrip" title="Drag up or down to resize the message box (or focus and use ↑/↓)"
            role="separator" aria-label="Message box height" tabindex="0"></div>
+      <div id="mentionHint" class="mention-hint" hidden></div>
+      <div id="dropCue" class="mention-hint" hidden></div>
       <div id="attRow" hidden></div>
       <button id="attachBtn" title="Attach files — saved into the working folder for the AIs to open"
               aria-label="Attach files">📎</button>
@@ -3355,6 +3364,12 @@ window.uiEvent = packet => {
     mergeSupervisorTasks(chatId, payload.tasks || []);
   } else if (chatId && event === "supervisor") {
     appendSupervisorTrace(chatId, payload.entry);
+  } else if (chatId && event === "session_title") {
+    // The engine's one-shot auto-title: patch the stored summary and repaint
+    // the rail, so the new name appears live instead of on reopen.
+    const s = sessions.find(x => x.id === chatId);
+    if (s && payload.title) s.title = payload.title;
+    renderChats();
   } else if (chatId && event === "plan") {
     const run = runFor(chatId); run.plan = payload;
     if (planPhase(payload.phase) === "awaiting") setRunStatus(chatId, "waiting");
@@ -5568,6 +5583,115 @@ $("say").addEventListener("paste", e => {
     addAttachment(f, `pasted-${++pasteN}.${ext}`);
   });
 });
+/* ---------- @-mention hint ---------- */
+// "@SeatName …" typed at the START of a draft is delivered to that one seat
+// only — the ENGINE does the routing (relay.parse_mention, the same matcher
+// /clear and [[TO:]] use). This chip only mirrors what will happen: it is a
+// JS mirror over the seated labels (typed name first, auto display name
+// second), case-insensitive, longest match up to 3 words ("@Claude 2"). An
+// @name that matches nobody — or is ambiguous — stays literal text here too.
+function mentionCandidates() {
+  return seats.map(s => {
+    const box = s.el.querySelector(".name");
+    return ((box && box.value.trim()) || seatDisplayName(s)).toLowerCase();
+  });
+}
+function mentionTarget(text) {
+  const t = String(text || "").replace(/^\s+/, "");
+  if (!t.startsWith("@")) return null;
+  const words = t.slice(1).trim().split(/\s+/).filter(Boolean);
+  const names = mentionCandidates();
+  for (let k = Math.min(3, words.length); k >= 1; k--) {
+    const token = words.slice(0, k).join(" ").toLowerCase();
+    const hits = names.filter(n => n === token);
+    if (hits.length === 1)
+      return k < words.length ? { index: names.indexOf(hits[0]) } : null;
+    if (hits.length) return null;   // ambiguous label: no magic anywhere
+  }
+  return null;
+}
+function updateMentionHint() {
+  const el = $("mentionHint"), hit = mentionTarget($("say").value);
+  if (!hit) { el.hidden = true; el.textContent = ""; return; }
+  const seat = seats[hit.index];
+  const box = seat && seat.el.querySelector(".name");
+  el.textContent = "→ only " + ((box && box.value.trim()) ||
+    seatDisplayName(seat)) + " will receive this";
+  el.hidden = false;
+}
+$("say").addEventListener("input", updateMentionHint);
+/* ---------- drag-and-drop onto the composer ---------- */
+// Files dropped here attach exactly like the 📎 button / paste (the same
+// pendingAtt chips — no second code path). A dropped FOLDER can be DETECTED,
+// but WebView2 never exposes a dropped item's absolute filesystem path
+// (webkitGetAsEntry's fullPath is relative to the dropped root), so "set the
+// working folder by dropping" degrades honestly to pointing at the Choose
+// button; a seated room has that control locked entirely and is told so.
+function classifyDropEntries(items) {
+  const out = { files: [], folders: [] };
+  [...(items || [])].forEach(item => {
+    if (!item || item.kind === "string") return;
+    const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+    if (entry && entry.isDirectory) out.folders.push(entry);
+    else {
+      const f = item.getAsFile ? item.getAsFile() : null;
+      if (f) out.files.push(f);
+    }
+  });
+  return out;
+}
+function planDrop(entries, isSeated) {
+  // pure core over plain descriptors ({name, isDir}) so the boot harness can
+  // drive it: what a drop SHOULD do, before any DOM is touched
+  const descs = (entries || []).filter(Boolean);
+  const files = descs.filter(e => !e.isDir);
+  const dirs = descs.filter(e => e.isDir);
+  return {
+    attachCount: files.length,
+    folderName: dirs.length ? (dirs[0].name || "folder") : null,
+    cue: dirs.length
+      ? (isSeated
+          ? "The working folder is locked once a conversation starts."
+          : "Drops don't carry a folder's location — use the Choose button " +
+            "above to set the working folder.")
+      : null,
+  };
+}
+let dropCueTimer = 0;
+function showDropCue(text) {
+  const el = $("dropCue");
+  el.textContent = text;
+  el.hidden = false;
+  clearTimeout(dropCueTimer);
+  dropCueTimer = setTimeout(() => { el.hidden = true; }, 4000);
+}
+const composerEl = document.querySelector(".composer");
+if (composerEl) {
+  let dragDepth = 0;
+  const endDrag = () => { dragDepth = 0; composerEl.classList.remove("dragover"); };
+  composerEl.addEventListener("dragenter", e => {
+    e.preventDefault();
+    dragDepth++;
+    composerEl.classList.add("dragover");
+  });
+  // preventDefault on dragover is what ALLOWS a drop here and stops the
+  // browser navigating to the dragged file
+  composerEl.addEventListener("dragover", e => e.preventDefault());
+  composerEl.addEventListener("dragleave", () => {
+    if (--dragDepth <= 0) endDrag();
+  });
+  composerEl.addEventListener("drop", e => {
+    e.preventDefault();
+    endDrag();
+    const { files, folders } = classifyDropEntries(e.dataTransfer?.items);
+    const plan = planDrop([
+      ...files.map(f => ({ name: f.name, isDir: false })),
+      ...folders.map(d => ({ name: d.name, isDir: true })),
+    ], seated);
+    files.forEach(f => addAttachment(f, f.name));
+    if (plan.cue) showDropCue(plan.cue);
+  });
+}
 /* ---------- dictation ---------- */
 // Hold the mic (or Ctrl+Shift+Space) and talk. Capture AND transcription both
 // happen in Python — this side only asks, paints the state, and inserts the
@@ -5636,6 +5760,7 @@ function insertDictation(text) {
   el.setSelectionRange(caret, caret);
   histIdx = -1;
   autoGrow();
+  updateMentionHint();
 }
 function onDictation(p) {
   const st = p && p.state;

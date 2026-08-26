@@ -418,6 +418,15 @@ class _AppIO(LoopIO):
     def should_stop(self):
         return self._run.stop_flag.is_set()
 
+    def auto_title(self, state):
+        # The engine's one-shot post-first-round retitle, run at this barrier
+        # (no seat thread alive). emit carries the run's chat_id, so the rail
+        # refreshes even for a background chat. Gated on the production flag:
+        # a side call costs a real CLI invocation, and headless Api instances
+        # in tests must stay token-free structurally, not by vigilance.
+        if self._api._side_calls_enabled:
+            relay.maybe_auto_title(state, self)
+
     def on_turn_boundary(self, state):
         # a staged role lands here, so the seat about to speak gets its fresh
         # preamble with the new role rather than switching identity mid-turn
@@ -489,6 +498,10 @@ class Api:
         # set_event_hooks; underscore-prefixed like everything else here.
         self._hooks_lock = threading.Lock()
         self._hooks_cache = None
+        # Production-only opt-in for side calls that cost real CLI turns
+        # (currently the one-shot auto-title). main() flips this; tests
+        # instantiating Api directly stay token-free by construction.
+        self._side_calls_enabled = False
         threading.Thread(target=self._drain_emits, daemon=True).start()
 
     # ---- focused-run views (the old singular attributes) -----------------
@@ -2369,10 +2382,19 @@ class Api:
         if opener:
             # emit the recorded row so live and replayed chats carry the
             # same keys (ts, meta, …) for this message
-            self.emit("message", log("Josh (human)", opener))
-            for j in state["pending"]:
-                state["pending"][j].append(
-                    f"Josh (human) opens the conversation: {opener}")
+            target, rest = relay.parse_mention(opener, state["agents"])
+            if target is None:
+                self.emit("message", log("Josh (human)", opener))
+                for j in state["pending"]:
+                    state["pending"][j].append(
+                        f"Josh (human) opens the conversation: {opener}")
+            else:
+                # "@Seat ..." opener: the named seat alone opens with it
+                sid = state["slot_ids"][target]
+                self.emit("message", log("Josh (human)", opener, envelope={
+                    "audience": [sid], "delivered_to": [sid]}))
+                state["pending"][target].append(
+                    f"Josh (human) opens the conversation: {rest}")
             store.save(state)
         self._rounds(state)
 
@@ -2436,9 +2458,18 @@ class Api:
             state["store"].system(note, round=state["rnd"])
             self.emit("status", {"text": note})
         if opener:
-            self.emit("message", state["log"]("Josh (human)", opener))
-            for j in state["pending"]:
-                state["pending"][j].append(f"Josh (human) says: {opener}")
+            target, rest = relay.parse_mention(opener, state["agents"])
+            if target is None:
+                self.emit("message", state["log"]("Josh (human)", opener))
+                for j in state["pending"]:
+                    state["pending"][j].append(f"Josh (human) says: {opener}")
+            else:
+                sid = state["slot_ids"][target]
+                self.emit("message", state["log"](
+                    "Josh (human)", opener,
+                    envelope={"audience": [sid], "delivered_to": [sid]}))
+                state["pending"][target].append(
+                    f"Josh (human) says to you: {rest}")
             state["store"].save(state)
         self._rounds(state)
 
@@ -2614,6 +2645,7 @@ def main():
         except Exception:
             pass
     api = Api()
+    api._side_calls_enabled = True     # real window: side calls may spend
     threading.Thread(target=api.precompute_config, daemon=True).start()
     threading.Thread(target=api.precompute_auth, daemon=True).start()
     ui = os.path.join(os.path.dirname(os.path.abspath(__file__)),
