@@ -206,9 +206,10 @@ class RoomsUIMarkupTests(unittest.TestCase):
     def test_modal_id_is_in_both_css_selector_groups(self):
         self.assertRegex(
             self.html, r"#acctModal,\s*#roleModal[^{]*#roomsModal\s*\{")
+        # #hooksModal (event hooks) legitimately sits in the same group, so the
+        # rooms id only has to be IN the .show list, not directly after kbd's.
         self.assertRegex(
-            self.html, r"#contModal\.show,\s*#kbdModal\.show,\s*"
-                       r"#roomsModal\.show\s*\{")
+            self.html, r"#contModal\.show,\s*#kbdModal\.show,[^{]*#roomsModal\.show\s*\{")
 
     def test_escape_listener_closes_the_rooms_modal(self):
         m = self.html.index('e.key === "Escape"')
