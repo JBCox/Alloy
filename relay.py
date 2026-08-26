@@ -5801,6 +5801,52 @@ def record_usage(state, usage, seat_key=None, kind="seat"):
         s_u["total_tokens"] += (usage.get("total_tokens") or 0)
         s_u["turns"] += 1
 
+    # Live budget bar: the UI learns cumulative spend the moment it is
+    # recorded, through the same seam every loop event uses. The payload is
+    # REPORTED truth only (totals + per-seat), never an estimate; seats that
+    # report nothing simply have no entry, and the front end renders that as
+    # an explicit blank. run_rounds stashes the front-end seam under
+    # `_usage_io` (a private key, like `_cont_mark` — meta.save whitelists
+    # fields, so it never reaches disk); callers outside a run (the app's
+    # brief precompute) have no seam yet and skip silently. Best-effort by
+    # the same contract as activity narration: telemetry never fails a turn.
+    io = state.get("_usage_io")
+    if io is not None:
+        try:
+            io.emit("usage", usage_snapshot(state))
+        except Exception:
+            pass
+
+
+def usage_snapshot(state):
+    """The compact additive-totals payload for the live `usage` event.
+
+    Mirrors exactly what record_usage accumulated — nothing derived, nothing
+    inferred: total cost/tokens plus per-seat cost/tokens where cost_usd
+    stays None for any seat whose CLI reports no spend (Gemini, Ox). Small
+    on purpose; the burn rate and cap projection are the FRONT END's math,
+    computed from this snapshot plus its own clock.
+    """
+    u = state.get("usage") if isinstance(state, dict) else None
+    u = u if isinstance(u, dict) else {}
+    seats = {}
+    for sid, s in (u.get("by_seat") or {}).items():
+        if not isinstance(s, dict):
+            continue
+        cost = s.get("cost_usd")
+        seats[str(sid)] = {
+            "cost_usd": (round(float(cost), 4)
+                         if isinstance(cost, (int, float)) else None),
+            "total_tokens": int(s.get("total_tokens") or 0),
+        }
+    return {
+        "total_cost_usd": round(float(u.get("total_cost_usd") or 0.0), 4),
+        "input_tokens": int(u.get("input_tokens") or 0),
+        "output_tokens": int(u.get("output_tokens") or 0),
+        "total_tokens": int(u.get("total_tokens") or 0),
+        "by_seat": seats,
+    }
+
 
 def _addressed_recipients(state, i, reply, io):
     """Return (intended audience, actual recipient indices) for one reply.
@@ -8729,6 +8775,9 @@ def run_rounds(state, io):
     # Wire the permission engine only once the front-end seam exists. The
     # callback is per-seat and fail-closed; headless LoopIO returns None.
     grant_lock = state.setdefault("_permission_lock", threading.RLock())
+    # The live budget bar rides the same seam: record_usage emits its
+    # `usage` event through whatever front end is running the loop.
+    state["_usage_io"] = io
     for i, agent in enumerate(state.get("agents") or ()):
         if getattr(agent, "permission", None) != "ask":
             agent.on_approval = None

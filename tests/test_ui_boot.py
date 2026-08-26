@@ -907,6 +907,52 @@ if (topLevelError) {
         dividers().every(d => !d.classList.contains('lens-hidden'));
     }
   } catch (e) { more.tstructError = (e && e.stack) || String(e); }
+  // ---- the live budget bar, driven through its REAL event path ----------
+  // Engine `usage` events must light the strip with REPORTED truth only,
+  // blank-reporting seats must land in an explicit "not reported" tooltip
+  // group, zero burn must produce no projection, and a fresh stage clears it.
+  try {
+    const p = more.budget = {};
+    const strip = byId['budgetStrip'];
+    p.present = !!strip;
+    p.hiddenAtBoot = !(strip.className || '').includes('show');
+    // pure math first — edge cases need no DOM at all
+    const noon = new Date(2026, 7, 25, 9, 0).getTime();   // local 09:00
+    p.noCap = JSON.stringify(ctx.projectCapHit(0.42, 0, null, 18, noon));
+    p.zeroBurn = JSON.stringify(ctx.projectCapHit(0, 0, 2, 18, noon));
+    p.noTime = JSON.stringify(ctx.projectCapHit(0.42, 0, 2, 0, noon));
+    p.overCap = JSON.stringify(ctx.projectCapHit(2.5, 0, 2, 10, noon));
+    // $0.42 in 18 min ⇒ ~1.58 left at .0233/min ⇒ ~68 min ⇒ ~10:07
+    p.proj = ctx.projectCapHit(0.42, 0, 2, 18, noon);
+    p.textWithCap = String(ctx.budgetStripText({spend: 0.42, cap: 2,
+      anchor: 0, elapsedMin: 18, nowMs: noon}));
+    p.textNoCap = String(ctx.budgetStripText({spend: 0.05, cap: null,
+      anchor: 0, elapsedMin: null, nowMs: noon}));
+    p.textZeroBurn = String(ctx.budgetStripText({spend: 0, cap: 2,
+      anchor: 0, elapsedMin: 30, nowMs: noon}));
+    p.textOver = String(ctx.budgetStripText({spend: 2.5, cap: 2,
+      anchor: 0, elapsedMin: 30, nowMs: noon}));
+    p.textNothing = String(ctx.budgetStripText({spend: null, cap: null,
+      anchor: 0, elapsedMin: null, nowMs: noon}));
+    // live path: one seat reports, the other two stay honestly blank
+    ctx.uiEvent({event: 'usage', payload: {total_cost_usd: 0.42,
+      input_tokens: 100, output_tokens: 50, total_tokens: 150,
+      by_seat: {'0': {cost_usd: 0.42, total_tokens: 150}}}});
+    p.shownAfterUsage = (strip.className || '').includes('show');
+    p.textAfterUsage = String(strip.textContent);
+    p.tipAfterUsage = String(strip.title || '');
+    // the payload carries ADDITIVE totals, so the second event replaces
+    ctx.uiEvent({event: 'usage', payload: {total_cost_usd: 0.9,
+      input_tokens: 200, output_tokens: 100, total_tokens: 300,
+      by_seat: {'0': {cost_usd: 0.5, total_tokens: 150},
+                '1': {cost_usd: 0.4, total_tokens: 150}}}});
+    p.textAfterSecond = String(strip.textContent);
+    p.tipAfterSecond = String(strip.title || '');
+    // a fresh stage forgets the chat's budget entirely
+    await ctx.newChat();
+    p.hiddenAfterNewChat = !(byId['budgetStrip'].className || '').includes('show');
+    p.textAfterNewChat = String(byId['budgetStrip'].textContent);
+  } catch (e) { more.budgetError = (e && e.stack) || String(e); }
   report({bootRan: fns.length > 0, bootError, more});
 })();
 """

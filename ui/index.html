@@ -959,13 +959,13 @@
     padding: 0; font: inherit; text-decoration: underline;
   }
   /* the live strip while a Keep Improving run is going */
-  #contStrip {
+  #contStrip, #budgetStrip {
     display: none; align-items: center; gap: 10px; padding: 5px 12px;
     font: 11.5px "Cascadia Mono", Consolas, monospace; color: var(--muted);
     border-bottom: 1px solid var(--line); background: var(--surface2);
   }
-  #contStrip.show { display: flex; }
-  #contStrip b { color: var(--alloy); font-weight: 600; }
+  #contStrip.show, #budgetStrip.show { display: flex; }
+  #contStrip b, #budgetStrip b { color: var(--alloy); font-weight: 600; }
   #contBanner {
     display: none; gap: 10px; align-items: flex-start; margin: 8px 0;
     padding: 9px 11px; border-radius: 8px; font-size: 12.5px; line-height: 1.45;
@@ -1793,6 +1793,7 @@
         <option value="all">All messages</option>
       </select>
     </div>
+    <div id="budgetStrip" role="status" aria-label="Live budget"></div>
     <div id="contStrip" role="status" aria-label="Keep Improving progress"></div>
     <div class="feed-wrap">
       <div id="contBanner" role="status"></div>
@@ -2120,6 +2121,10 @@ const $ = id => document.getElementById(id);
 let running = false, canContinue = false;
 let transcriptPath = null, workspacePath = null, customFolder = null;
 let rounds = 6;
+// Live budget bar state (see budgetApply): REPORTED spend only, plus this
+// window's own running clock for the burn rate. Null until some usage is
+// reported or a reopened chat restores its historical totals.
+let budget = null;
 let historyHasDelivery = false;
 const EMPTY_HTML = document.getElementById("feed").innerHTML;
 
@@ -3428,6 +3433,8 @@ window.uiEvent = packet => {
     const strip = $("contStrip");
     strip.textContent = contStripText(payload);
     strip.classList.toggle("show", !!strip.textContent);
+  } else if (event === "usage") {
+    budgetApply(payload);
   } else if (event === "checkin") {
     showContBanner(payload.text || "The scheduled check-in ran.");
   } else if (event === "workstreams") {
@@ -3720,6 +3727,129 @@ function contStripText(p) {
   if (typeof p.next_checkin_min === "number")
     bits.push(`next check-in ${Math.max(0, Math.round(p.next_checkin_min))}m`);
   return bits.join(" · ");
+}
+
+/* ---------- live budget bar (feature #20) ----------
+   Burn rate and cap projection for ANY chat, from the engine's `usage`
+   events — which carry only what CLIs actually reported. Seats whose CLI
+   reports nothing (Gemini, Ox) have no cost and are rendered as an explicit
+   "not reported" group in the tooltip; they are never estimated, averaged
+   in, or invented. The projection is linear over THIS WINDOW's accumulated
+   running seconds (the same clock discipline as continuous_tick: the mark
+   resets on pause, the total does not), is always labelled ≈, and simply
+   disappears when the burn is zero or the numbers would be absurd. A chat
+   with no configured cap says "no cap set" rather than hiding the spend. */
+
+// The cap comes from the Keep Improving limits — the one place a spend cap
+// exists. Null everywhere else, and the strip says so honestly.
+function budgetCap() {
+  return (contOn && contCfg.spendOn && Number(contCfg.spend) > 0)
+    ? Number(contCfg.spend) : null;
+}
+// Pure math: linear projection of when spend crosses cap. Returns
+// {reached:true} once over, {mins,label:"HH:MM"} while approaching,
+// null whenever an honest projection is impossible (no burn yet, no time
+// elapsed, or a horizon beyond a year).
+function projectCapHit(spendNow, spendAnchor, cap, elapsedMin, nowMs) {
+  if (!(cap > 0) || !(elapsedMin > 0)) return null;
+  if (typeof spendNow !== "number" || typeof spendAnchor !== "number")
+    return null;
+  const burned = spendNow - spendAnchor;
+  if (!(burned > 0)) return null;             // zero burn ⇒ no projection
+  const remain = cap - spendNow;
+  const mins = remain / (burned / elapsedMin);
+  if (!isFinite(mins)) return null;
+  if (remain <= 0) return {reached: true};
+  if (!(mins >= 0) || mins > 60 * 24 * 365) return null;
+  const d = new Date(nowMs + mins * 60000);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return {mins, label: `${hh}:${mm}`};
+}
+// Pure text builder so tests can pin the exact wording.
+function budgetStripText(snap) {
+  snap = snap || {};
+  const bits = [];
+  if (typeof snap.spend === "number")
+    bits.push(`$${snap.spend.toFixed(2)} spent`);
+  else
+    bits.push("no spend reported yet");
+  bits.push(snap.cap > 0 ? `of $${snap.cap.toFixed(2)} cap` : "no cap set");
+  if (typeof snap.elapsedMin === "number" && snap.elapsedMin >= 1)
+    bits.push(`${Math.round(snap.elapsedMin)} min`);
+  const proj = projectCapHit(snap.spend, snap.anchor, snap.cap,
+                             snap.elapsedMin, snap.nowMs || Date.now());
+  if (proj)
+    bits.push(proj.reached ? "cap reached" : `≈ hits cap ~${proj.label}`);
+  return bits.join(" · ");
+}
+// Per-seat tooltip. Every SEATED seat appears; one without reported cost
+// lands in an explicit blank group, never averaged into anyone's rate.
+function budgetTip(bySeat) {
+  bySeat = bySeat || {};
+  const lines = ["Reported cost this chat (CLIs that report it)"];
+  const blanks = [];
+  seats.forEach(seat => {
+    const u = bySeat[String(seat.id)];
+    if (u && typeof u.cost_usd === "number")
+      lines.push(`${seatDisplayName(seat)} — $${u.cost_usd.toFixed(4)} · `
+                 + `${(u.total_tokens || 0).toLocaleString()} tok`);
+    else
+      blanks.push(seatDisplayName(seat));
+  });
+  if (blanks.length) lines.push(`${blanks.join(", ")} — not reported`);
+  return lines.join("\n");
+}
+function budgetClearEl() {
+  const el = $("budgetStrip");
+  el.textContent = "";
+  el.removeAttribute("title");
+  el.classList.remove("show");
+}
+function budgetSnapshot() {
+  if (!budget) return null;
+  return {spend: budget.spend, cap: budgetCap(), anchor: budget.anchor,
+          elapsedMin: budget.accS / 60, nowMs: Date.now(),
+          bySeat: budget.bySeat};
+}
+function budgetPaint() {
+  const snap = budgetSnapshot();
+  // relevant = something reported, or a cap to measure against
+  if (!snap || (typeof snap.spend !== "number" && !(snap.cap > 0))) {
+    budgetClearEl();
+    return;
+  }
+  const el = $("budgetStrip");
+  el.textContent = budgetStripText(snap);
+  el.title = budgetTip(snap.bySeat);
+  el.classList.add("show");
+}
+// Live engine event: additive totals after every record_usage.
+function budgetApply(p) {
+  p = p || {};
+  if (!budget) budget = {anchor: null, accS: 0, markTs: null};
+  // First live sample of a window anchors the burn clock at whatever spend
+  // already existed (0 in a fresh chat, the restored history in a continued
+  // one) so the rate measures only what THIS window actually burned.
+  if (budget.anchor == null)
+    budget.anchor = typeof budget.spend === "number" ? budget.spend : 0;
+  budget.spend = typeof p.total_cost_usd === "number" ? p.total_cost_usd : null;
+  budget.bySeat = p.by_seat || {};
+  budget.tokens = p.total_tokens || 0;
+  budgetPaint();
+}
+// Reopened chat: historical spend from meta.json, truthfully — but with NO
+// clock, so no rate and no projection until the chat runs again in a window.
+function budgetRestore(usage) {
+  budget = null;
+  budgetClearEl();
+  if (!usage || typeof usage !== "object") return;
+  budget = {anchor: null, accS: 0, markTs: null,
+            spend: typeof usage.total_cost_usd === "number"
+              ? usage.total_cost_usd : null,
+            bySeat: usage.by_seat || {},
+            tokens: usage.total_tokens || 0};
+  budgetPaint();
 }
 function showContBanner(text) {
   const box = $("contBanner");
@@ -6582,6 +6712,8 @@ async function openChat(id, findQuery, findExcerpt) {
   clearFatal();
   restoreSeats(s.participants || []);
   restoreOrchestration(s);
+  // historical spend from meta.json — truthfully, with no clock attached
+  budgetRestore(s.usage);
   renderCompletion(s.completion);
   renderWorkstreams(s.tasks || []);
   renderSupervisorOverview(s.goal || "", s.tasks || [], s.mode || "");
@@ -6702,6 +6834,7 @@ function resetStage() {
   renderCompletion(null);
   applyPreset("open_discussion");
   restoreContinuous(null);           // strip, banner and settings all reset
+  budgetRestore(null);               // and the budget bar forgets the chat
   $("contBanner").classList.remove("show");
   hideFeedback();
   $("afterRow").classList.remove("show");
@@ -6881,6 +7014,24 @@ window.addEventListener("pywebviewready", async () => {
   refreshFiles();
   $("say").focus();
 });
+
+// The budget bar's clock, ticked from the very end of boot (initializers
+// that read top-level state belong down here — TDZ history). Same discipline
+// as continuous_tick: seconds accrue ONLY while a run is live, the mark
+// resets on pause, and the accumulated total does not. Capped per tick so a
+// backgrounded window cannot bill a huge gap to one frame.
+setInterval(() => {
+  if (!budget) return;
+  const now = Date.now();
+  if (running) {
+    if (budget.markTs != null)
+      budget.accS += Math.min(Math.max(now - budget.markTs, 0), 5000) / 1000;
+    budget.markTs = now;
+  } else {
+    budget.markTs = null;
+  }
+  budgetPaint();
+}, 1000);
 </script>
 </body>
 </html>
