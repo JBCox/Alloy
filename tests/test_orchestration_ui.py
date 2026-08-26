@@ -21,16 +21,51 @@ class OrchestrationUiTests(unittest.TestCase):
 
     def test_primary_composer_is_goal_first(self):
         for name, value in [
-            # Verb-first titles: the card must say what YOU are doing, not
+            # Verb-first names: the mode must say what YOU are doing, not
             # name an orchestration concept (Josh, 2026-08-22).
             ("Discuss in Turns", "open_discussion"),
-            ("Compare &amp; Decide", "panel_review"),
+            ("Compare & Decide", "panel_review"),
             ("Build Together", "build_execute"),
             ("Talk Live", "live_room"),
         ]:
             self.assertIn(name, self.source)
-            self.assertIn(f'data-preset="{value}"', self.source)
+        # 2026-08-25: the card grid left the rail for a composer pill; the
+        # five modes now live in ONE list (MODE_PRESETS) shared by the pill
+        # and its popover rows.
+        for value in ["open_discussion", "live_room", "panel_review",
+                      "build_execute", "keep_improving"]:
+            self.assertIn(f'{{v: "{value}"', self.source)
         self.assertIn('id="advancedOrchestration"', self.source)
+
+    def test_the_mode_picker_is_a_composer_pill_not_a_card_grid(self):
+        # The pill mirrors the permission picker's pattern: a button that
+        # opens an upward popover, sitting beside it in the composer bar.
+        self.assertIn('id="modePickWrap"', self.source)
+        self.assertIn('id="modePickBtn"', self.source)
+        self.assertIn('id="modePickLabel"', self.source)
+        self.assertIn('id="modePickMenu"', self.source)
+        self.assertIn('id="modeOptList"', self.source)
+        self.assertLess(self.source.index('id="modePickWrap"'),
+                        self.source.index('id="permPickWrap"'),
+                        "the mode pill sits beside the permission pill")
+        # every trace of the old card grid is gone — a dead CSS block or a
+        # stray wiring loop would read as a second mode picker
+        for gone in ["preset-card", "preset-grid", 'id="presetGrid"',
+                     "presetNote", "data-preset"]:
+            self.assertNotIn(gone, self.source)
+        # each row keeps its one-line description (the old card copy)
+        for desc in ["Ask questions and think together in an orderly conversation.",
+                     "Everyone responds whenever ready",
+                     "Get separate answers, critiques, and one final recommendation.",
+                     "Split real work and create verified files in your folder.",
+                     "inventing its own next improvements"]:
+            self.assertIn(desc, self.source)
+
+    def test_hand_edited_axes_read_as_custom_on_the_pill(self):
+        # presetForCurrentRecipe's custom verdict must reach the ONE visible
+        # surface now: no row is highlighted and the label says Custom.
+        self.assertIn('known ? MODE_SHORT[value] : "Custom"', self.source)
+        self.assertIn('"Custom"', self.source)
 
     def test_choosing_the_moderator_is_a_primary_control(self):
         # It used to be reachable only by opening Advanced and finding "Who

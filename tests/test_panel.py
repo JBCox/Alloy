@@ -100,6 +100,32 @@ class PanelTests(unittest.TestCase):
                 self.assertIn(draft["message_id"], critique_prompt)
                 self.assertIn(draft["text"], critique_prompt)
 
+    def test_prompts_carry_each_contribution_once(self):
+        """Drafts reached critique prompts twice — once via the queue fan-out,
+        once via the collected-drafts packet (~2x prompt tokens). The packet
+        is the carrier; the fan-out must not double it."""
+        state = panel_state(
+            self.tmp,
+            [["A draft", "A critique"],
+             ["B draft", "B critique", "B synthesis"],
+             ["C draft", "C critique"]],
+            labels=["A", "B", "C"], synthesizer=1)
+        outcome = run_rounds(state, RecordingIO())
+        self.assertEqual(outcome, "wrapped")
+        for agent in state["agents"]:
+            critique_prompt = next(
+                p for p in agent.prompts if relay.PANEL_CRITIQUE_PROMPT in p)
+            self.assertEqual(critique_prompt.count("B draft"), 1,
+                             agent.name)
+            self.assertEqual(critique_prompt.count("C draft"), 1,
+                             agent.name)
+        synth_prompt = state["agents"][1].prompts[-1]
+        self.assertEqual(synth_prompt.count("A draft"), 1)
+        self.assertEqual(synth_prompt.count("B critique"), 1)
+        # rows still broadcast to the UI/transcript exactly as before
+        rows = seat_rows(state)
+        self.assertEqual(len(rows), 7)
+
     def test_draft_and_critique_wrap_tokens_do_not_add_a_closing_lap(self):
         state = panel_state(
             self.tmp,

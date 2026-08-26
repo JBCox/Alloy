@@ -208,7 +208,10 @@ def workspace_artifacts(workspace, since_ts):
 # how it ended, so when it tells us we believe it; inferring from the messages
 # is the fallback for sessions rebuilt after the fact.
 ENDED_FROM_LOOP = {"wrapped": "wrap", "stopped": "stop", "cap": "cap",
-                   "fatal": "fatal"}
+                   "fatal": "fatal",
+                   # A benign pause, not a failure: every seat parked for the
+                   # run (sequential) or fewer than two live seats (free).
+                   "starved": "starved"}
 
 # The v1 ``ended`` field remains untouched for compatibility.  These are the
 # normalized, deliberately narrower values exposed beside it.  In particular,
@@ -220,6 +223,11 @@ TERMINATION_REASONS = ("wrap", "moderator_done", "supervisor_done", "cap",
                        # and NOT "stop" (he pressed the button) — a run that
                        # hit the money is a different fact from both.
                        "limit",
+                       # "starved" is likewise benign: every seat parked after
+                       # double failures, or fewer than two live seats in free
+                       # mode. Never recorded as "fatal" — that means a dead
+                       # CLI, and blending the two would lie in hard facts.
+                       "starved",
                        "ceiling", "stop", "fatal", "unknown")
 TERMINATION_ALIASES = {"wrapped": "wrap", "stopped": "stop",
                        "done": "wrap", "failed": "fatal"}

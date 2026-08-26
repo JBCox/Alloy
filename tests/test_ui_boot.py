@@ -606,10 +606,27 @@ if (topLevelError) {
     const modal = byId['contModal'];
     more.cont.hiddenAtBoot = !(modal.className || '').includes('show');
     more.cont.onAtBoot = ctx.continuousCfg() !== null;
-    // selecting the card must open the warning, not silently arm the mode
-    byId['presetGrid'];
-    ctx.applyPreset('keep_improving');
-    more.cont.openedByCard = (byId['contModal'].className || '').includes('show');
+    // the composer MODE PILL replaced the rail's card grid: boot paints the
+    // current mode, opening the pill lists all five modes once each, and
+    // picking Keep Improving from the popover must open the warning, not
+    // silently arm the mode
+    more.cont.pillLabelAtBoot = String(byId['modePickLabel'].textContent);
+    byId['modePickBtn'].onclick({stopPropagation() {}});
+    more.cont.menuOpenedByPill = !byId['modePickMenu'].hidden;
+    const modeRows = byId['modeOptList'].children.slice();
+    more.cont.menuRows = modeRows.length;
+    more.cont.menuNames = modeRows.map(r => {
+      const b = r.querySelector('b');
+      return b ? b.textContent : null;
+    });
+    more.cont.menuSelectedCount =
+      modeRows.filter(r => r.getAttribute('aria-selected') === 'true').length;
+    const kiRow = modeRows.find(r =>
+      r.getAttribute('data-mode') === 'keep_improving');
+    kiRow.onclick();
+    more.cont.pillAfterKeepPick = String(byId['modePickLabel'].textContent);
+    more.cont.menuClosedAfterPick = !!byId['modePickMenu'].hidden;
+    more.cont.openedByPill = (byId['contModal'].className || '').includes('show');
     more.cont.onBeforeOk = ctx.continuousCfg() !== null;
     more.cont.okDisabledBeforeAck = !!byId['contOk'].disabled;
     more.cont.ackDefault = byId['contAgreeText'].textContent;
@@ -628,14 +645,18 @@ if (topLevelError) {
     byId['contMinutes'].value = '2';       // below the floor
     byId['contMinutes'].onchange();
     more.cont.minutesClamped = String(byId['contMinutes'].value);
-    // Cancel must put the cards back where they were, not re-open the
-    // warning forever (the previous preset used to be read AFTER the cards
-    // had already moved to keep_improving).
+    // Cancel must put the mode back where it was, not re-open the warning
+    // forever (the previous preset used to be read AFTER the selection had
+    // already moved to keep_improving).
     ctx.closeContinuous();
     more.cont.presetAfterCancel = byId['presetSel'].value;
+    more.cont.pillAfterCancel = String(byId['modePickLabel'].textContent);
     more.cont.closedAfterCancel = !(byId['contModal'].className || '').includes('show');
     more.cont.onAfterCancel = ctx.continuousCfg() !== null;
-    ctx.applyPreset('keep_improving');      // and it re-opens cleanly
+    // and it re-opens cleanly, through the pill again
+    byId['modePickBtn'].onclick({stopPropagation() {}});
+    byId['modeOptList'].children
+      .find(r => r.getAttribute('data-mode') === 'keep_improving').onclick();
     byId['contAgree'].checked = true;
     byId['contAgree'].onchange();
     byId['contOk'].onclick();
@@ -1127,13 +1148,30 @@ class UiBootTests(unittest.TestCase):
         # and unticking restores the rounds number, not the ceiling
         self.assertEqual(self.report.get("roundsAfterUntilDone"), "1")
 
+    def test_the_mode_pill_replaces_the_card_grid(self):
+        """The five preset cards left the seat rail for a compact composer
+        pill; boot paints the current mode and the popover lists them all."""
+        c = self.report.get("cont") or {}
+        self.assertEqual(c.get("pillLabelAtBoot"), "Discuss in Turns")
+        self.assertTrue(c.get("menuOpenedByPill"))
+        self.assertEqual(c.get("menuRows"), 5)
+        self.assertEqual(c.get("menuNames"),
+                         ["Discuss in Turns", "Talk Live", "Compare & Decide",
+                          "Build Together", "Keep Improving"])
+        # exactly ONE row claims to be the current mode at boot
+        self.assertEqual(c.get("menuSelectedCount"), 1)
+        # picking a mode repaints the pill and closes the popover
+        self.assertEqual(c.get("pillAfterKeepPick"), "Keep Improving")
+        self.assertTrue(c.get("menuClosedAfterPick"))
+
     def test_keep_improving_is_gated_behind_its_warning(self):
-        """The card opens the modal; only the acknowledgement arms the mode."""
+        """The pill's Keep-Improving row opens the modal; only the
+        acknowledgement arms the mode."""
         c = self.report.get("cont") or {}
         self.assertIsNone(self.report.get("contError"))
         self.assertTrue(c.get("hiddenAtBoot"))
         self.assertFalse(c.get("onAtBoot"))
-        self.assertTrue(c.get("openedByCard"), "the card opens the warning")
+        self.assertTrue(c.get("openedByPill"), "the pill row opens the warning")
         self.assertFalse(c.get("onBeforeOk"),
                          "selecting the card alone must NOT arm the mode")
         self.assertTrue(c.get("okDisabledBeforeAck"))
@@ -1161,7 +1199,7 @@ class UiBootTests(unittest.TestCase):
         self.assertIsNone(limits.get("hours"))
         self.assertFalse(limits.get("watchdog_may_stop"))
 
-    def test_cancelling_the_warning_puts_the_cards_back(self):
+    def test_cancelling_the_warning_puts_the_mode_back(self):
         """Backing out is a refusal. It used to re-apply Keep Improving and
         re-open the modal, forever."""
         c = self.report.get("cont") or {}
@@ -1169,6 +1207,8 @@ class UiBootTests(unittest.TestCase):
         self.assertFalse(c.get("onAfterCancel"), "cancel never arms the mode")
         self.assertEqual(c.get("presetAfterCancel"), "open_discussion",
                          "back to where the user was, not keep_improving")
+        # and the pill repaints with it — the revert must be visible
+        self.assertEqual(c.get("pillAfterCancel"), "Discuss in Turns")
 
     def test_hidden_rows_in_the_warning_are_actually_hidden(self):
         """CSS-only, so the executing harness cannot see it: an explicit

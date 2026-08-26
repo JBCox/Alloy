@@ -202,6 +202,44 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(saved_meta(state)["seats"][0]["pending"],
                          ["Fake 2 said:\nb1"])
 
+    def test_parked_seat_is_not_retried_on_later_laps(self):
+        boom = RuntimeError("provider down")
+        state = build_state(
+            self.tmp,
+            [["a1", "a2", "a3", "a4"],
+             [boom, boom] + [RuntimeError("never again")] * 6],
+            turns=4)
+        io = RecordingIO()
+        outcome = run_rounds(state, io)
+        self.assertEqual(outcome, "cap")
+        # B got exactly its double-failure attempts — the cursor skipped it
+        # on every later lap instead of hammering the dead provider.
+        self.assertEqual(len(state["agents"][1].prompts), 2)
+        self.assertIn("failed twice; skipping",
+                      "\n".join(r["text"] for r in jsonl_rows(state)))
+        # A kept working the remaining laps alone
+        rows = [r for r in jsonl_rows(state) if r["speaker"] == 0]
+        self.assertEqual([r["text"] for r in rows], ["a1", "a2", "a3", "a4"])
+
+    def test_all_seats_parked_ends_the_run_visibly(self):
+        boom = RuntimeError("provider down")
+        state = build_state(
+            self.tmp,
+            [[boom, boom], [RuntimeError("x"), RuntimeError("y")]],
+            turns=3)
+        outcome = run_rounds(state, RecordingIO())
+        # Nothing can speak: a visible pause, never a forged turn or a spin.
+        self.assertEqual(outcome, "starved")
+        sys_rows = [r["text"] for r in jsonl_rows(state)
+                    if r["speaker"] == "system"]
+        self.assertTrue(any("failed twice" in t for t in sys_rows), sys_rows)
+        self.assertTrue(
+            any("Every seat has failed twice" in t for t in sys_rows),
+            sys_rows)
+        self.assertEqual(state["completion"]["termination_reason"], "starved")
+        self.assertFalse([r for r in jsonl_rows(state)
+                          if r.get("origin") == "seat"])
+
     # -------------------------------------------------------------- wrap --
     def test_wrap_gives_others_one_closing_turn(self):
         state = build_state(

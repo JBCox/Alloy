@@ -140,13 +140,16 @@ class FreeModeTests(unittest.TestCase):
                            [[f"a{k}" for k in range(9)], list(boom)],
                            turns=3, labels=["A", "B"], opener="go")
         outcome = run_rounds(state, RecordingIO())
-        # B parks after 3 double-failures; <2 live seats -> the run pauses
-        self.assertEqual(outcome, "fatal")
+        # B parks after 3 double-failures; <2 live seats -> the run pauses.
+        # A parked-seat pause is benign ("starved"), never a dead CLI's fatal.
+        self.assertEqual(outcome, "starved")
         sys_rows = [r["text"] for r in jsonl_rows(state)
                     if r["speaker"] == "system"]
         self.assertTrue(any("parked" in t for t in sys_rows), sys_rows)
         self.assertTrue(any("Fewer than two live seats" in t
                             for t in sys_rows), sys_rows)
+        # the benign pause reaches outcome hard facts as its own reason
+        self.assertEqual(state["completion"]["termination_reason"], "starved")
 
     def test_stop_command(self):
         class StopIO(RecordingIO):

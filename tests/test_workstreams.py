@@ -911,6 +911,42 @@ def test_cap_without_a_verdict_says_so():
        "and a wrap is not an unfinished ending either")
 
 
+def test_plan_attempt_latches_until_explicitly_cleared():
+    """A planner attempt that yields no tasks must run ONCE — not again on
+    every resume. The watchdog's replan remedy is the explicit retry."""
+    import tempfile as _tf
+    real = relay.build_supervisor
+    calls = []
+
+    def failing_planner(st):
+        calls.append(1)
+        return _StubPlanner("I would start by asking what 'better' means.")
+
+    state = _sup_state(_tf.mkdtemp(prefix="alloy-latch-"))
+    io = RecordingIO()
+    relay.build_supervisor = failing_planner
+    try:
+        eq(relay._run_rounds(state, io), "cap", "the first run completes")
+        eq(len(calls), 1, "the doomed planning side call runs exactly once")
+        ok(state.get("supervisor_plan_attempted"), "and latches the session")
+        # A resume (new run over the same state) must not re-plan.
+        relay._run_rounds(state, RecordingIO())
+        eq(len(calls), 1, "a resumed run does not re-invoke the planner")
+        # The watchdog's explicit remedy clears the latch and plans again.
+        state["continuous"] = {"on": True, "objectives": [],
+                               "checkin": {"minutes": 5}}
+        relay.build_supervisor = lambda st: _StubPlanner(
+            "Plan.\n[[TASK: eng | owner=0 | files=engine.py | build it]]")
+        note = relay.apply_remedy(state, RecordingIO(), "replan", "")
+        ok("engine" in note or "task" in note.lower(),
+           "the remedy reports what it did: %r" % note)
+        ok(state.get("workstreams"), "the retried plan produced tasks")
+        eq(not state.get("supervisor_plan_attempted"),
+           True, "and the latch is cleared for future resumes")
+    finally:
+        relay.build_supervisor = real
+
+
 def main():
     for fn in (test_fanout_default_is_broadcast, test_fanout_isolates_active_seats,
                test_serialize_conflicts, test_task_directive_parser,
@@ -924,6 +960,7 @@ def main():
                test_capability_gate, test_engine_capability_gate,
                test_supervisor_roster_block, test_plan_workstreams_dispatches,
                test_plan_workstreams_degrades_safely,
+               test_plan_attempt_latches_until_explicitly_cleared,
                test_failed_task_gets_one_bounded_replan,
                test_replan_failure_is_final_and_visible,
                test_parallel_barrier_triggers_replan,

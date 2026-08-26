@@ -208,7 +208,7 @@ class InterruptedTests(unittest.TestCase):
 
     def test_every_real_ending_is_NOT_an_interruption(self):
         for reason in ("wrap", "cap", "ceiling", "stop", "fatal", "limit",
-                       "supervisor_done", "moderator_done"):
+                       "starved", "supervisor_done", "moderator_done"):
             self.assertFalse(relay.was_interrupted(
                 {"completion": {"lifecycle": "paused",
                                 "termination_reason": reason}}), reason)

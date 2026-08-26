@@ -16,15 +16,15 @@ you can jump in anytime.
 Open the app, pick how the room should work, optionally choose where it works,
 and start typing — everything else has a sensible default.
 
-- **Pick a preset card** (top of the window). Five recipes cover most rooms:
-  **Discuss in Turns** (the default — orderly round-robin conversation),
+- **Pick a mode from the pill beside the chat box.** Five recipes cover most
+  rooms: **Discuss in Turns** (the default — orderly round-robin conversation),
   **Talk Live** (everyone replies whenever ready — faster, less orderly),
   **Compare & Decide** (separate answers and critiques, then one final
   recommendation), **Build Together** (work is split into parallel tasks whose
   files are verified on disk), and **Keep Improving** (works on your project
   non-stop, choosing its own next objective, until you stop it — it asks
-  before starting because it never ends by itself). Any card can be fine-tuned
-  in the Conversation controls below it; cards lock once a chat begins.
+  before starting because it never ends by itself). Fine-tuning lives in the
+  Conversation controls in the seat rail; the pill locks once a chat begins.
 - **Choose a working folder** (optional). By default seats share a private
   scratch folder created per conversation. Point them at one of your real
   project folders instead (**Working folder → Choose**) and they read its

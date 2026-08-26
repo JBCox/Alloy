@@ -21,6 +21,8 @@ import time
 import webview
 
 import dictation
+import speaker
+import webhook as webhook_mod
 import export as export_mod
 import fork as fork_mod
 import outcome
@@ -185,6 +187,8 @@ RAIL_SUMMARY_FIELDS = (
     "ended", "legacy", "can_continue", "can_continue_reason",
     # lineage ("↳ spawned by …", "branched from …") and project grouping headers
     "parent", "fork_of", "project",
+    # rail decluttering (the Archived group at the bottom of the rail)
+    "archived",
     # outcome pill + compact manager badge (NOT the trace behind it)
     "completion", "supervisor_status",
 )
@@ -201,6 +205,44 @@ def _rail_row(summary):
         {k: p[k] for k in ("id", "provider", "name") if k in p}
         for p in summary.get("participants") or []]
     return row
+
+
+# ------------------------------------------------------------ webhook config --
+# Persisted beside tabs.json (derived from relay.SESSIONS_DIR at CALL time —
+# the same rule as write_tabs: a module-level constant captured at import
+# would survive test redirects and throw away real state). Shape:
+# {"enabled": bool, "token": "<hex>", "port": 0}. The token is generated once
+# on first enable and then stable, so scripts can hardcode it.
+
+def _webhook_cfg_path():
+    return os.path.join(relay.SESSIONS_DIR, "webhook.json")
+
+
+def read_webhook_config():
+    try:
+        with open(_webhook_cfg_path(), encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def write_webhook_config(cfg):
+    target = _webhook_cfg_path()
+    tmp = f"{target}.tmp-{os.getpid()}-{threading.get_ident()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, target)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+    return True
 
 
 def _thumb_bytes(path):
@@ -484,6 +526,14 @@ class Api:
         self._dict_rec = None          # the live dictation.Recorder, if any
         self._dict_engine = None       # lazily built Transcriber, then cached
         self._dict_probe = None        # dictation.probe() result, set at startup
+        # Read-aloud: the output twin of dictation. One app-wide Speaker (the
+        # engine itself serializes latest-wins), probed on the same startup
+        # thread for the same reason — a subprocess probe never runs here.
+        self._speaker = speaker.Speaker()
+        self._spk_probe = None        # speaker.probe() result, set at startup
+        # Webhook trigger: the server object lives here, its config on disk
+        # beside tabs.json. None until first enabled.
+        self._webhook = None
         # Serialized emitter: evaluate_js is only ever called from ONE thread
         # (pywebview/WebView2 marshalling isn't documented thread-safe, and
         # parallel modes emit from several seat threads). A single queue also
@@ -675,6 +725,8 @@ class Api:
             # mic that cannot work — same posture as an `unknown` auth probe.
             "dictation": {"available": False,
                           "reason": "Still checking the microphone."},
+            "speaker": {"available": False,
+                        "detail": "Still checking text-to-speech."},
         }
 
     def precompute_config(self):
@@ -692,6 +744,11 @@ class Api:
             self._dict_probe = dictation.probe()
         except Exception as exc:
             self._dict_probe = {"available": False, "reason": relay.error_excerpt(exc)}
+        # Read-aloud probe: shutil.which only — never launches SAPI here
+        try:
+            self._spk_probe = speaker.probe()
+        except Exception as exc:
+            self._spk_probe = {"available": False, "detail": relay.error_excerpt(exc)}
         gemini_models = []
         try:
             out = subprocess.run(
@@ -840,6 +897,7 @@ class Api:
             "gemini_models": gemini_models,
             "gemini_default": "gemini-3.7-flash-high",
             "dictation": self._dict_probe or {"available": False, "reason": ""},
+            "speaker": self._spk_probe or {"available": False, "detail": ""},
             "docs": os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  "README.md"),
         }
@@ -969,6 +1027,123 @@ class Api:
         threading.Thread(target=rec.cancel, daemon=True).start()
         self._dict_emit("idle")
         return {"ok": True}
+
+    # ------------------------------------------------------- read-aloud --
+    # The output twin of dictation (speaker.py explains the engine). SAPI is
+    # local and free, so like dictation this needs no account and no key.
+
+    def speak_text(self, text):
+        """Speak one message aloud. Bridge-thread safe: Speaker.speak only
+        spawns its PowerShell child on a daemon thread and returns at once,
+        so nothing subprocess-shaped runs on this thread. Latest-wins —
+        speaking another message replaces the current utterance."""
+        if not isinstance(text, str) or not text.strip():
+            return {"error": "Nothing to read aloud."}
+        self._speaker.speak(text[:speaker.MAX_CHARS])
+        return {"ok": True}
+
+    def stop_speech(self):
+        """Interrupt read-aloud. Safe when idle, exactly like dictation's
+        stop-with-no-start: hold-to-talk loses its pointerup, and a stop
+        click can race a finished utterance."""
+        self._speaker.stop()
+        return {"ok": True}
+
+    def speaker_state(self):
+        """Cheap poll for a play/stop button's face. Pure attribute reads."""
+        return {"speaking": bool(self._speaker.speaking)}
+
+    # ---------------------------------------------------- webhook trigger --
+    # A loopback HTTP endpoint outside scripts can POST to start a chat
+    # (webhook.py owns the protocol). Config rides webhook.json beside
+    # tabs.json; start/stop follow the recheck_auth shape — the bridge call
+    # returns at once, a worker thread binds/unbinds the socket, and the
+    # truth comes back as a `webhook_status` event (a bind can fail on a
+    # busy port, which the checkbox must not silently swallow).
+
+    def get_webhook(self):
+        """Current trigger state. Bridge-thread safe: one small config read
+        plus in-memory server state."""
+        cfg = read_webhook_config()
+        return {"enabled": bool(cfg.get("enabled")),
+                "running": self._webhook is not None and self._webhook.serving,
+                "url": getattr(self._webhook, "url", None),
+                "token": cfg.get("token") or ""}
+
+    def set_webhook(self, enabled):
+        if not isinstance(enabled, bool):
+            return {"error": "Enabled must be true or false."}
+        cfg = read_webhook_config()
+        cfg["enabled"] = enabled
+        if enabled and not cfg.get("token"):
+            import secrets
+            cfg["token"] = secrets.token_hex(16)
+        write_webhook_config(cfg)
+        threading.Thread(target=self._webhook_apply, args=(cfg,),
+                         daemon=True).start()
+        return {"ok": True}
+
+    def _webhook_on_start(self, payload):
+        """The webhook's on_start callback: turn a validated payload into a
+        conversation. Refuses while ANY chat is live — this window runs one
+        new conversation per call, and racing an active loop would fork its
+        emit queue mid-turn. Runs on the webhook handler thread (a normal
+        thread), so spawning the conversation worker here is safe."""
+        for run in list(self._runs._runs.values()):
+            if run.is_running():
+                # raise, not return: the webhook module turns a raised
+                # exception into an HTTP 500 {"error": …}, and a script must
+                # see the refusal as a FAILURE, not as ok-with-error attached
+                raise ValueError("A conversation is already running.")
+        seatable = {p["id"] for p in Api._seatable_providers()}
+        asked = [str(s) for s in payload.get("seats") or []]
+        providers = [s for s in asked if s in seatable] or \
+            [p["id"] for p in Api._seatable_providers()][:3]
+        seats = [{"id": i, "provider": p, "enabled": True}
+                 for i, p in enumerate(providers)]
+        cfg = {"opener": payload["topic"], "turns": payload.get("turns", 10),
+               "seats": seats}
+        ws = payload.get("workspace")
+        if ws and os.path.isdir(ws):
+            cfg["workspace"] = ws
+        threading.Thread(target=self._conversation, args=(dict(cfg),),
+                         daemon=True).start()
+        return {"started": True}
+
+    def _webhook_apply(self, cfg):
+        """Worker thread: make the running server match cfg.enabled."""
+        want = bool(cfg.get("enabled"))
+        if want:
+            token = cfg.get("token") or None
+            port = int(cfg.get("port") or 0)
+            try:
+                srv = webhook_mod.WebhookServer(
+                    self._webhook_on_start, token=token, port=port)
+            except ValueError as e:      # non-loopback host refused
+                self.emit("webhook_status", {"running": False, "error": str(e)})
+                return
+            if not srv.start():
+                self.emit("webhook_status",
+                          {"running": False, "error": f"Port {port} is in use."
+                           if port else "Could not bind a local port."})
+                return
+            self._webhook = srv
+            self.emit("webhook_status", {"running": True, "url": srv.url,
+                                         "token": token or ""})
+        else:
+            srv, self._webhook = self._webhook, None
+            if srv is not None:
+                srv.stop()
+            self.emit("webhook_status", {"running": False})
+
+    def webhook_stop_all(self):
+        """Shutdown path: release the socket so the process can exit."""
+        srv, self._webhook = self._webhook, None
+        if srv is not None:
+            try:
+                srv.stop()
+            except Exception:
+                pass
 
     # ------------------------------------------------- file/image viewing --
     # Bridge-thread rules apply: bounded file I/O and Pillow only — no
@@ -1610,6 +1785,43 @@ class Api:
             return {"error": f"Could not delete chat: {e}"}
         self._runs.forget(session_id)
         return {"ok": True, "id": session_id}
+
+    def set_archived(self, session_id, archived):
+        """Rail decluttering: move a chat into/out of the Archived group.
+
+        Bridge-thread safe (bounded file I/O — one meta read + atomic write,
+        the rename_session shape). Archiving is the opposite of deleting on
+        purpose: the folder, workspace and resumability are untouched. A
+        RUNNING chat refuses for the same reason rename does — its loop
+        rewrites meta.json at every commit and would race or un-archive the
+        flag on the next save.
+        """
+        path = session_path(session_id)
+        if not path:
+            return {"error": "That chat no longer exists."}
+        run = self._runs.get(session_id)
+        if run is not None and run.is_running():
+            return {"error": "Wait until this conversation pauses before "
+                             "archiving it."}
+        meta = read_meta(path)
+        if not meta:
+            return {"error": "Legacy chats can be viewed but not archived."}
+        meta["archived"] = bool(archived)
+        target = os.path.join(path, "meta.json")
+        tmp = f"{target}.archive-{os.getpid()}-{threading.get_ident()}"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=1)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, target)
+        except OSError as e:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return {"error": f"Could not update chat: {e}"}
+        return {"ok": True, "session": session_summary(path, meta)}
 
     def export_session(self, session_id):
         """Render one chat as a self-contained HTML file and open it.
@@ -2655,7 +2867,11 @@ def main():
         width=1220, height=820,
         min_size=(940, 620), background_color="#17151C")
     api._window.events.shown += lambda *a: _apply_window_icon(api._window)
-    webview.start(debug=False)
+    try:
+        webview.start(debug=False)
+    finally:
+        # release the webhook socket so the process can exit promptly
+        api.webhook_stop_all()
 
 
 if __name__ == "__main__":

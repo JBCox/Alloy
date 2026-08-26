@@ -3202,6 +3202,11 @@ class SessionStore:
             # additive like brief/ask: old code ignoring this loses task
             # tracking on resume, never continuity
             "workstreams": state.get("workstreams"),
+            # additive latch (see plan_workstreams): a plan attempt that
+            # produced no tasks must not re-fire on every resume. The
+            # watchdog's replan remedy and a fresh /objective clear it.
+            "supervisor_plan_attempted": bool(
+                state.get("supervisor_plan_attempted")),
             "usage": state.get("usage"),
             # additive: old code ignoring it just means an old chat may earn
             # its auto-title on its next continued run, never a wrong title
@@ -4347,6 +4352,9 @@ def session_summary(session_dir, meta=None):
         # provenance for forked chats ("branched from …" in the rail tooltip);
         # absent on every chat that was never forked
         "fork_of": meta.get("fork_of"),
+        # rail decluttering, not deletion: an archived chat keeps its folder,
+        # workspace and resumability — it only leaves the project groups
+        "archived": bool(meta.get("archived")),
         "workspace": meta.get("workspace", ""),
         "project": session_project(session_dir, meta.get("workspace", "")),
         "transcript": os.path.join(session_dir, "transcript.md"),
@@ -4634,6 +4642,8 @@ def rehydrate(meta, workspace=None):
         "parent": meta.get("parent"),
         "children": meta.get("children"),   # hints — a child may be deleted
         "workstreams": meta.get("workstreams"),
+        "supervisor_plan_attempted": bool(
+            meta.get("supervisor_plan_attempted")),
         "usage": meta.get("usage"),
     }
 
@@ -5804,6 +5814,8 @@ def dispatch_command(state, text, io):
                 # instruction and as the manager's stated next goal.
                 state["continuous"].setdefault("objectives", []).append(arg)
                 state["supervisor_goal"] = arg
+                # A fresh objective is an explicit retry of planning.
+                state["supervisor_plan_attempted"] = False
                 for j in range(len(state.get("agents") or ())):
                     state["pending"][j].append(
                         "Josh (human) set the next objective: " + arg)
@@ -6386,11 +6398,17 @@ def deliver_hidden_digest(state, i, io, summarizer=None, lock=None):
 
 
 def commit_reply(state, i, reply, consumed, io, activity=None,
-                 envelope_extra=None, force_broadcast=False):
+                 envelope_extra=None, force_broadcast=False, fan_out=True):
     """Deliver a successful turn: consume exactly the composed backlog, flip
     introduced, log + emit the row, fan out to every other seat, count the
     turn, save. The one implementation of the queue invariant — the saved
-    queues always match what each seat is still owed."""
+    queues always match what each seat is still owed.
+
+    `fan_out=False` logs/broadcasts the row but appends nothing to the other
+    seats' queues: Panel phases use it because their peers receive the reply
+    through the next phase's collected-source packet instead, and doubling it
+    into the backlog doubled every draft and critique inside the prompt too.
+    """
     agents = state["agents"]
     agent = agents[i]
     # Initialize before flipping `introduced`: on a fresh seat the legacy
@@ -6434,8 +6452,9 @@ def commit_reply(state, i, reply, consumed, io, activity=None,
             if j != i and j not in actual:
                 key = _floor_key(state["slot_ids"][j])
                 hidden.setdefault(key, []).append(message_id)
-    for j in recipient_indices:
-        state["pending"][j].append(f"{agent.name} said:\n{reply}")
+    if fan_out:
+        for j in recipient_indices:
+            state["pending"][j].append(f"{agent.name} said:\n{reply}")
     settle_workstream(state, i, io, reply=reply)
     state["turn"] = state.get("turn", 0) + 1
     record_usage(state, getattr(agent, "last_usage", None),
@@ -6750,6 +6769,9 @@ def plan_workstreams(state, io, goal=None):
     """
     goal = (goal or state.get("topic") or state.get("title") or "").strip()
     if not goal:
+        # Latch BEFORE any outcome is known (run_checkin rule): a completed
+        # attempt must never re-fire on every continue/resume.
+        state["supervisor_plan_attempted"] = True
         return []
     prompt = SUPERVISOR_PROMPT.format(roster=supervisor_roster_block(state),
                                       playbook=playbook_block(),
@@ -6761,6 +6783,7 @@ def plan_workstreams(state, io, goal=None):
         reply = sup.turn(prompt)
     except Exception as e:
         record_usage(state, getattr(sup, "last_usage", None), kind="supervisor")
+        state["supervisor_plan_attempted"] = True
         supervisor_trace(state, io, "error", "Planning call failed",
                          str(e)[:500], status="failed")
         io.emit("status", {"text": f"{room_helper_name(state, "supervisor")} could not plan "
@@ -6772,6 +6795,7 @@ def plan_workstreams(state, io, goal=None):
         body, tasks, _unknown = parse_task_directives(
             reply or "", slot_ids=list(state["slot_ids"]))
     except Exception as e:
+        state["supervisor_plan_attempted"] = True
         supervisor_trace(state, io, "error", "Plan could not be parsed",
                          str(e)[:500], status="failed")
         io.emit("status", {"text": f"{room_helper_name(state, "supervisor")}'s plan did not parse "
@@ -6779,11 +6803,15 @@ def plan_workstreams(state, io, goal=None):
                                    f"parallel conversation"})
         return []
     if not tasks:
+        # Latch: this attempt completed without tasks. Without it, every
+        # resume re-invokes the planner for the same doomed side call.
+        state["supervisor_plan_attempted"] = True
         supervisor_trace(state, io, "error", "No executable tasks returned",
                          (reply or "")[:1000], status="failed")
         io.emit("status", {"text": f"{room_helper_name(state, "supervisor")} produced no tasks - running "
                                    "as a normal parallel conversation"})
         return []
+    state["supervisor_plan_attempted"] = False
     state["workstreams"] = tasks
     state["supervisor_goal"] = goal
     state["supervisor_wave_index"] = 1
@@ -7741,6 +7769,9 @@ def apply_remedy(state, io, remedy, detail):
             return "There is no objective to re-plan."
         archive_objective(state)
         rearm_seats(state)
+        # An explicit replan is exactly what the latch exists to block on
+        # resume — so it clears the latch for this and future attempts.
+        state["supervisor_plan_attempted"] = False
         wave_index = max(1, int(state.get("supervisor_wave_index") or 1))
         tasks = plan_workstreams(state, io, goal=goal)
         state["supervisor_wave_index"] = wave_index + 1
@@ -9223,7 +9254,10 @@ def run_rounds(state, io):
         if ended is not None:
             reason = state.get("termination_reason") or {
                 "wrapped": "wrap", "stopped": "stop", "cap": "cap",
-                "fatal": "fatal"}.get(ended, "unknown")
+                "fatal": "fatal",
+                # starved: a benign pause — every seat parked (sequential) or
+                # fewer than two live seats (free). NOT a dead CLI.
+                "starved": "starved"}.get(ended, "unknown")
             completion["termination_reason"] = reason
             completion["lifecycle"] = "paused"
             completion.setdefault("goal_verdict", "unknown")
@@ -9255,7 +9289,8 @@ def _run_rounds(state, io):
     CLI's ended footer and the app's paused footer + `done` event stay with
     their owners. KeyboardInterrupt propagates (the CLI catches it as before).
 
-    Returns how the run ended: 'cap' | 'wrapped' | 'stopped' | 'fatal'.
+    Returns how the run ended: 'cap' | 'wrapped' | 'stopped' | 'fatal'
+    | 'starved' (every seat parked for this run).
     """
     # A run that is starting or resuming re-arms every seat: cancellation is
     # sticky for the duration of a turn, so without this a seat stopped last
@@ -9269,7 +9304,8 @@ def _run_rounds(state, io):
     if policy["workflow"] == "panel":
         return run_panel(state, io)
     if policy["workflow"] == "supervisor":
-        if not state.get("workstreams"):
+        if (not state.get("workstreams")
+                and not state.get("supervisor_plan_attempted")):
             plan_workstreams(state, io)
         return run_parallel(state, io)
     if policy["concurrency"] == "barrier":
@@ -9366,6 +9402,18 @@ def _run_rounds(state, io):
             io.emit("status", {"text": "Conversation wrapped."})
             outcome = "wrapped"
             break
+        # Every seat parked for this run (double-failure): pause visibly
+        # rather than spin through cursor slots that can never speak.
+        if (source == "cursor" and not any(floor_available(state, k)
+                                           for k in range(len(agents)))):
+            state["termination_reason"] = "starved"
+            note = ("Every seat has failed twice this run — pausing. "
+                    "Continue the chat to give them a fresh chance.")
+            io.emit("status", {"text": note})
+            store.system(note, round=state["rnd"])
+            store.save(state)
+            outcome = "starved"
+            break
         dynamic = policy["budget"]["unit"] == "turns"
         if dynamic:
             # per-turn budget: the rounds knob means ≈ conversation length,
@@ -9385,6 +9433,15 @@ def _run_rounds(state, io):
                         state["rnd"] >= state["max"]):
                     break                   # outcome stays "cap"
                 state["rnd"] += 1
+
+        # Parked seats are skipped like already-spoken ones — but AFTER the
+        # lap accounting above, because the cursor still has to cross seat 0
+        # for the round cap. Skipping inside choose_next_seat instead would
+        # silence the lap boundary whenever seat 0 itself is parked, and an
+        # uncapped run would spin on the remaining seats forever.
+        if source == "cursor" and not floor_available(state, i):
+            state["cursor"] = slot_ids[(i + 1) % len(agents)]
+            continue
 
         i, source, floor_done, moderator = apply_sequential_floor_policy(
             state, i, source, io, moderator)
@@ -9830,6 +9887,12 @@ def run_panel(state, io):
                         row = commit_reply(
                             state, i, reply, consumed, io, activity=acts,
                             force_broadcast=True,
+                            # Drafts and critiques reach their readers through
+                            # the next phase's collected-source packet, not the
+                            # queue fan-out — both copies used to ride every
+                            # critique/synthesis prompt. Synthesis is the final
+                            # word, so it still lands in every queue.
+                            fan_out=(phase == "synthesis"),
                             envelope_extra={"thread_id": panel["thread_id"],
                                             "intent": intent})
                     except Exception:
@@ -10512,7 +10575,10 @@ def run_free(state, io):
                 io.emit("status", {"text": note})
                 store.system(note, round=state["rnd"])
                 store.save(state)
-                stop_all("fatal")
+                # Benign pause, NOT a dead CLI: a distinct outcome so outcome
+                # hard facts never read a parked-seat pause as fatal.
+                state["termination_reason"] = "starved"
+                stop_all("starved")
             if (state["closing"] is None and not flow["stop"]
                     and not budget_left() and not any(busy)
                     and not any(inbox[k] for k in range(n))):
@@ -10825,6 +10891,12 @@ def main():
                      else ""))
                  if continuous_cfg["gate"]["command"]
                  else "none — no test command for this folder"))
+    elif mode == "panel":
+        # Panel ignores the rounds knob: it is always exactly 3 phases
+        # (~2n+1 calls, see estimate_calls), so "up to N" would be a lie.
+        print(f"rounds       : panel review — exactly 3 phases "
+              f"(draft, critique, synthesis; about {2 * len(agents) + 1} "
+              f"calls)")
     elif args.until_done:
         print(f"rounds       : until done (ceiling {max(1, args.ceiling)} turns)")
     else:

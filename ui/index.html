@@ -282,6 +282,7 @@
   .chat-row.done .unread { background: #75C995; }
   .chat-row .unread[hidden] { display: none; }
   .chat-row.legacy .t, .search-row.legacy .t { color: var(--muted); }
+  .chat-row.archived { opacity: .62; }
   .chat-row .chat-actions {
     position: absolute; top: 50%; transform: translateY(-50%); right: 3px;
     display: flex; align-items: center; gap: 1px;
@@ -706,6 +707,20 @@
     font-size: 12px;
   }
   .hook-row input:focus { outline: none; border-color: var(--alloy); }
+  .webhook-sect { clear: both; margin-top: 18px; padding-top: 12px;
+    border-top: 1px solid var(--line); }
+  .webhook-sect > .chat-search-h { margin-bottom: 8px; }
+  .webhook-row { display: flex; gap: 10px; align-items: center; margin-top: 8px;
+    font-size: 12.5px; color: var(--text); flex-wrap: wrap; }
+  .webhook-row input[type=text] {
+    flex: 1; min-width: 0; background: var(--surface2);
+    border: 1px solid var(--line); border-radius: 6px; color: var(--muted);
+    padding: 5px 9px; font-family: "Cascadia Mono", Consolas, monospace;
+    font-size: 11.5px;
+  }
+  #whCopy { background: var(--surface2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px;
+    font-size: 12px; cursor: pointer; }
   #hookSave {
     margin-top: 14px; float: right;
     background: var(--alloy); color: #1A1520; border: 0; border-radius: 8px;
@@ -857,31 +872,12 @@
     font: 12.5px "Cascadia Mono", Consolas, monospace; outline: none;
   }
   .ctl select:disabled, #advancedOrchestration select:disabled { color: var(--muted); cursor: not-allowed; }
-  .preset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  .preset-card {
-    min-height: 58px; padding: 7px 8px; border: 1px solid var(--line);
-    border-radius: 8px; background: var(--surface2); color: var(--text);
-    cursor: pointer; text-align: left;
-  }
-  .preset-card:hover { border-color: rgba(255,255,255,.25); }
-  .preset-card[aria-pressed=true] { border-color: var(--alloy); background: #2D2731; }
-  .preset-card b { display: block; font-size: 11.5px; font-weight: 600; }
-  .preset-card span { display: block; margin-top: 3px; color: var(--muted); font-size: 9.5px; line-height: 1.25; }
-  /* mode cards carry an icon on the title line — the icon span must NOT
-     inherit the description span's top margin or block layout */
-  .preset-card .pc-head {
-    display: flex; align-items: center; gap: 5px; margin-top: 0;
-  }
-  .preset-card .pc-head svg {
-    flex: 0 0 auto; width: 13px; height: 13px;
-    color: var(--alloy); opacity: .85;
-  }
   /* two short, related selects share one control box instead of stacking */
   .duo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .duo-grid > label { margin-bottom: 0; }
-  /* The Advanced drawer is a DIFFERENT altitude of control than the preset
-     cards above it — its own collapsed card BELOW the Goal box, so the goal
-     picker stays one glance tall and the rare knobs wait behind one click.
+  /* The Advanced drawer is a DIFFERENT altitude of control than the
+     contextual controls around it — its own collapsed card BELOW them, so
+     the rail stays one glance tall and the rare knobs wait behind one click.
      Inside, mini-headings cut the eight knobs into three readable groups. */
   #advancedOrchestration {
     background: var(--surface); border: 1px solid var(--line);
@@ -899,7 +895,7 @@
     color: var(--muted); opacity: .8; margin: 12px 2px 2px;
   }
   .policy-body .policy-h:first-child { margin-top: 9px; }
-  #presetNote, #callEstimate, #policyReason {
+  #callEstimate, #policyReason {
     margin-top: 7px; color: var(--muted); font-size: 10.5px; line-height: 1.35;
   }
   #callEstimate { color: var(--alloy); font-family: "Cascadia Mono", Consolas, monospace; }
@@ -1551,6 +1547,44 @@
     border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; margin-top: 2px;
   }
   #permPickMenu .permission-note { margin: 6px 4px 2px; border-top: 1px solid var(--line); padding-top: 7px; }
+  /* conversation-mode picker — same composer-pill pattern as permissions:
+     a compact button that opens an upward menu of modes (2026-08-25; the old
+     card grid ate the whole seat rail) */
+  #modePickWrap { position: relative; flex-basis: 100%; display: flex; }
+  #modePickBtn {
+    display: inline-flex; align-items: center; gap: 7px;
+    border: 1px solid var(--line); background: none; color: var(--muted);
+    border-radius: 7px; padding: 5px 11px; font-size: 11.5px; cursor: pointer;
+    width: max-content; font-family: Bahnschrift, "Segoe UI", sans-serif;
+  }
+  #modePickBtn:hover, #modePickBtn[aria-expanded=true] {
+    color: var(--text); border-color: rgba(255,255,255,.25);
+  }
+  #modePickBtn:disabled { opacity: .4; cursor: default; }
+  #modePickBtn .mode-ico { display: inline-flex; color: var(--alloy); opacity: .85; }
+  #modePickBtn .mode-ico svg { width: 13px; height: 13px; display: block; }
+  #modePickBtn .perm-caret { color: var(--muted); font-size: 10px; }
+  #modePickMenu {
+    position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 60;
+    width: 330px; background: #241F2B; border: 1px solid var(--line);
+    border-radius: 10px; padding: 6px;
+    box-shadow: 0 10px 28px rgba(0,0,0,.5);
+  }
+  #modePickMenu[hidden] { display: none; }
+  .mode-opt {
+    display: flex; width: 100%; align-items: flex-start; gap: 8px;
+    background: none; border: 0; color: var(--text); text-align: left;
+    border-radius: 7px; padding: 7px 9px; cursor: pointer; font: inherit;
+  }
+  .mode-opt:hover { background: var(--surface2); }
+  .mode-opt[aria-selected=true] { background: var(--surface2); }
+  .mode-opt:disabled { opacity: .4; cursor: not-allowed; }
+  .mode-opt .mode-check { flex: 0 0 12px; color: var(--alloy); font-size: 12px; }
+  .mode-opt .mode-ico { flex: none; color: var(--alloy); opacity: .85; margin-top: 2px; }
+  .mode-opt .mode-ico svg { width: 13px; height: 13px; display: block; }
+  .mode-opt .mode-main { flex: 1; min-width: 0; }
+  .mode-opt b { display: block; font-size: 12px; font-weight: 600; }
+  .mode-opt .mode-desc { display: block; color: var(--muted); font-size: 10.5px; margin-top: 2px; line-height: 1.3; }
   #attachBtn, #micBtn {
     border: 1px solid var(--line); background: var(--surface); color: var(--muted);
     border-radius: 9px; padding: 0 13px; font-size: 15px; cursor: pointer;
@@ -1685,18 +1719,12 @@
     </div>
 
     <div class="rail-label">Conversation</div>
-    <div class="rail-sub">Goal</div>
     <div class="ctl" id="orchestrationCtl">
-      <label>What should the room do?</label>
+      <!-- The mode picker itself moved into the composer pill (#modePickBtn);
+           #presetSel stays here as the hidden STATE HOLDER every engine-facing
+           read (orchestrationCfg, restore, setSeated) goes through. What is
+           left in the rail is only the workflow's own contextual controls. -->
       <input type="hidden" id="presetSel" value="open_discussion">
-      <div id="presetGrid" class="preset-grid" role="group" aria-label="Conversation goal">
-        <button class="preset-card" data-preset="open_discussion" aria-pressed="true"><span class="pc-head"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.5h11v7h-6l-3 2.8v-2.8h-2z"/></svg><b>Discuss in Turns</b></span><span>Ask questions and think together in an orderly conversation.</span></button>
-        <button class="preset-card" data-preset="live_room" aria-pressed="false"><span class="pc-head"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 1.5 3.5 9H8l-.9 5.5L13 7H8z"/></svg><b>Talk Live</b></span><span>Everyone responds whenever ready — faster, but less orderly.</span></button>
-        <button class="preset-card" data-preset="panel_review" aria-pressed="false"><span class="pc-head"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v11M3 4.5h10M3 4.5l-1.6 3.6a2.1 2.1 0 0 0 3.2 0zM13 4.5l-1.6 3.6a2.1 2.1 0 0 0 3.2 0zM5.5 13.5h5"/></svg><b>Compare &amp; Decide</b></span><span>Get separate answers, critiques, and one final recommendation.</span></button>
-        <button class="preset-card" data-preset="build_execute" aria-pressed="false"><span class="pc-head"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 13.5v-4h4v4zM6 9.5v-4h4v4M9.5 5.5v-3h4v7h-4"/></svg><b>Build Together</b></span><span>Split real work and create verified files in your folder.</span></button>
-        <button class="preset-card" data-preset="keep_improving" aria-pressed="false"><span class="pc-head"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 1.5v3h-3"/></svg><b>Keep Improving</b></span><span>Works on your project non-stop, inventing its own next improvements, until you stop it.</span></button>
-      </div>
-      <div id="presetNote"></div>
       <div id="contSummary" hidden></div>
       <div id="synthCtl" hidden>
         <label>Synthesizer — writes the final Panel result</label>
@@ -1909,6 +1937,19 @@
         aria-label="Dictate">🎤</button>
       <textarea id="say" rows="1" placeholder="Type your opening message — Send starts the conversation" autocomplete="off" spellcheck="false"></textarea>
       <button id="sayBtn" class="display">Send</button>
+      <div id="modePickWrap">
+        <!-- the mode pill: label/icon are a PAINT of #presetSel (see
+             setSelectedPreset); the menu's rows call applyPreset like the old
+             cards did, so the Keep-Improving warning path is unchanged -->
+        <button id="modePickBtn" aria-haspopup="listbox" aria-expanded="false"
+                title="What the room is doing">
+          <span class="mode-ico" id="modePickIcon"></span><span id="modePickLabel">Discuss in Turns</span>
+          <span class="perm-caret">⌄</span>
+        </button>
+        <div id="modePickMenu" role="listbox" aria-label="Conversation mode" hidden>
+          <div id="modeOptList"></div>
+        </div>
+      </div>
       <div id="permPickWrap">
         <!-- state holder: every engine-facing read (cfgFor, restore, setSeated)
              goes through this select; the pill and menu below drive it -->
@@ -2199,6 +2240,19 @@
     <div id="hookRows"></div>
     <div class="kbd-note"><span id="hookNote"></span></div>
     <button id="hookSave" title="Save the hook commands">Save</button>
+    <div class="webhook-sect">
+      <div class="chat-search-h">Webhook trigger</div>
+      <label class="webhook-row"><input type="checkbox" id="whEnable">
+        <span>Let local scripts start a conversation —
+          <span class="mono">POST <span id="whUrl">…</span></span></span></label>
+      <div class="webhook-row"><span>Token:</span>
+        <input type="text" class="mono" id="whToken" readonly spellcheck="false">
+        <button id="whCopy" title="Copy a ready-to-use curl example">Copy curl</button></div>
+      <div class="kbd-note">Loopback only — nothing outside this machine can
+        reach it. Body: <span class="mono">{"topic": "…", "seats":
+        ["claude","gpt"], "turns": 6}</span>. Unknown keys are rejected.</div>
+      <div class="kbd-note"><span id="whNote"></span></div>
+    </div>
   </div>
 </div>
 
@@ -2963,6 +3017,26 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
   cp.className = "copy-btn"; cp.title = "Copy message text"; cp.textContent = "⧉";
   cp.onclick = e => { e.stopPropagation(); copyText(text, cp); };
   d.querySelector(".msg-head").appendChild(cp);
+  // Read-aloud: every row can be spoken (SAPI is local and free). The button
+  // toggles — click again to interrupt. Availability comes from the startup
+  // probe (speakerCfg); on a machine without SAPI the button simply hides,
+  // like the mic button does.
+  if (speakerAvailable()) {
+    const sp = document.createElement("button");
+    sp.className = "copy-btn tts-btn"; sp.title = "Read this message aloud";
+    sp.textContent = "🔊";
+    sp.onclick = e => {
+      e.stopPropagation();
+      const api = pywebview.api;
+      if (sp.dataset.on) { delete sp.dataset.on; sp.textContent = "🔊"; api.stop_speech(); return; }
+      document.querySelectorAll(".tts-btn[data-on]").forEach(b => {
+        delete b.dataset.on; b.textContent = "🔊";
+      });
+      sp.dataset.on = "1"; sp.textContent = "⏹";
+      api.speak_text(text);
+    };
+    d.querySelector(".msg-head").appendChild(sp);
+  }
   // Branch point: any persisted row can start a fork of the conversation up
   // to and including itself. Live rows without an id (UI-only echoes) and old
   // replays predate message ids, so they get no button at all.
@@ -3445,6 +3519,8 @@ window.uiEvent = packet => {
     renderAccounts(payload);
   } else if (event === "mcp_status") {
     renderConns(payload);
+  } else if (event === "webhook_status") {
+    paintWebhook(payload);
   } else if (event === "run_status") {
     if (canonicalRunState(payload.status) === "waiting" && payload.pending_ask)
       showQuestion(payload.pending_ask);
@@ -3776,8 +3852,8 @@ function paintContModal() {
 }
 function openContinuous(fromCard) {
   if (seated) return;                 // baked in once the conversation exists
-  // contPrevPreset is captured in applyPreset, BEFORE the cards move — see
-  // the comment there. Reading it here would always say "keep_improving".
+  // contPrevPreset is captured in applyPreset, BEFORE the selection moves —
+  // see the comment there. Reading it here would always say "keep_improving".
   contAccepted = false;
   $("contAgree").checked = false;
   // The gate command and the dirty flag need a subprocess, which cannot run on
@@ -3789,8 +3865,8 @@ function openContinuous(fromCard) {
 function closeContinuous() {
   if (!$("contModal").classList.contains("show")) return;
   $("contModal").classList.remove("show");
-  // Backing out of the warning is a refusal, not a silent yes: put the cards
-  // back where they were rather than leaving Keep Improving selected.
+  // Backing out of the warning is a refusal, not a silent yes: put the mode
+  // back where it was rather than leaving Keep Improving selected.
   if (!contAccepted && !contOn) applyPreset(contPrevPreset);
 }
 // A reopened chat must show what it ACTUALLY ran with, not what the last new
@@ -3996,13 +4072,85 @@ function selectedPreset() { return $("presetSel").value || "open_discussion"; }
 function setSelectedPreset(value) {
   if (value !== "custom" && !PRESET_RECIPES[value]) value = "open_discussion";
   $("presetSel").value = value;
-  document.querySelectorAll(".preset-card").forEach(button =>
-    button.setAttribute("aria-pressed", button.dataset.preset === value ? "true" : "false"));
-  $("presetNote").textContent = value === "custom"
-    ? "Custom setup — built from your Advanced choices. Pick a card above to go back to a recommended one."
-    : PRESET_NOTES[value];
+  // the composer pill is the one visible surface now (the old card grid is
+  // gone): repaint its icon + name, "Custom" when the axes match no preset
+  const known = value !== "custom";
+  $("modePickLabel").textContent = known ? MODE_SHORT[value] : "Custom";
+  $("modePickIcon").innerHTML =
+    (MODE_PRESETS.find(m => m.v === value) || {}).icon || "";
 }
-// A preset card is only "pressed" when the recipe EXACTLY equals that preset.
+
+/* ---------- conversation-mode picker (composer bottom bar) ----------
+   One row per mode, mirroring the permission pill's pattern exactly:
+   #presetSel stays the single state holder; the menu below drives it and
+   every click lands in applyPreset, so the Keep-Improving warning flow,
+   restore paths and cfg keys are all untouched by the relocation. */
+const MODE_PRESETS = [
+  {v: "open_discussion", name: "Discuss in Turns",
+   icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.5h11v7h-6l-3 2.8v-2.8h-2z"/></svg>',
+   desc: "Ask questions and think together in an orderly conversation."},
+  {v: "live_room", name: "Talk Live",
+   icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 1.5 3.5 9H8l-.9 5.5L13 7H8z"/></svg>',
+   desc: "Everyone responds whenever ready — faster, but less orderly."},
+  {v: "panel_review", name: "Compare & Decide",
+   icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v11M3 4.5h10M3 4.5l-1.6 3.6a2.1 2.1 0 0 0 3.2 0zM13 4.5l-1.6 3.6a2.1 2.1 0 0 0 3.2 0zM5.5 13.5h5"/></svg>',
+   desc: "Get separate answers, critiques, and one final recommendation."},
+  {v: "build_execute", name: "Build Together",
+   icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 13.5v-4h4v4zM6 9.5v-4h4v4M9.5 5.5v-3h4v7h-4"/></svg>',
+   desc: "Split real work and create verified files in your folder."},
+  {v: "keep_improving", name: "Keep Improving",
+   icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 1.5v3h-3"/></svg>',
+   desc: "Works on your project non-stop, inventing its own next improvements, until you stop it."},
+];
+const MODE_SHORT = {open_discussion: "Discuss in Turns", live_room: "Talk Live",
+                    panel_review: "Compare & Decide",
+                    build_execute: "Build Together",
+                    keep_improving: "Keep Improving"};
+function renderModePick() {
+  const cur = selectedPreset();
+  const list = $("modeOptList");
+  list.innerHTML = "";
+  for (const m of MODE_PRESETS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "mode-opt";
+    b.setAttribute("role", "option");
+    b.setAttribute("data-mode", m.v);
+    // Custom means hand-edited axes: no row may claim to be the current one
+    const on = cur === m.v;
+    b.setAttribute("aria-selected", String(on));
+    b.innerHTML = '<span class="mode-check">' + (on ? "✓" : "") + '</span>' +
+      '<span class="mode-ico">' + m.icon + '</span>' +
+      '<span class="mode-main"><b></b><span class="mode-desc"></span></span>';
+    b.querySelector("b").textContent = m.name;
+    b.querySelector(".mode-desc").textContent = m.desc;
+    b.onclick = () => {
+      if ($("modePickBtn").disabled) return;
+      applyPreset(m.v);
+      closeModeMenu();
+    };
+    list.appendChild(b);
+  }
+}
+function openModeMenu() {
+  if ($("modePickBtn").disabled) return;
+  renderModePick();
+  $("modePickMenu").hidden = false;
+  $("modePickBtn").setAttribute("aria-expanded", "true");
+}
+function closeModeMenu() {
+  if ($("modePickMenu").hidden) return;
+  $("modePickMenu").hidden = true;
+  $("modePickBtn").setAttribute("aria-expanded", "false");
+}
+$("modePickBtn").onclick = e => {
+  e.stopPropagation();
+  if ($("modePickMenu").hidden) openModeMenu(); else closeModeMenu();
+};
+document.addEventListener("click", e => {
+  if (!$("modePickMenu").hidden && !$("modePickWrap").contains(e.target)) closeModeMenu();
+});
+// The pill names a preset only when the recipe EXACTLY equals that preset.
 // Anything else is honestly Custom -- calling a hand-tuned recipe "Discuss in
 // Turns" is the same silent relabelling we just removed everywhere else.
 function presetForCurrentRecipe() {
@@ -4213,7 +4361,7 @@ function normalizePolicyControls(anchor) {
 }
 function applyPreset(name) {
   const recipe = PRESET_RECIPES[name] || PRESET_RECIPES.open_discussion;
-  // Capture where we came FROM before the cards move. Reading it inside
+  // Capture where we came FROM before the selection moves. Reading it inside
   // openContinuous would read "keep_improving" — already selected by the line
   // below — so Cancel would re-apply Keep Improving and re-open the warning,
   // forever.
@@ -4325,9 +4473,6 @@ function restoreOrchestration(session={}) {
   updateSynthOptions(session.panel?.synthesizer ?? session.synthesizer);
 }
 
-document.querySelectorAll(".preset-card").forEach(button => {
-  button.onclick = () => applyPreset(button.dataset.preset);
-});
 for (const id of ["modeSel", "workflowSel", "concurrencySel", "floorSel", "routingSel",
                   "completionSel", "budgetUnitSel", "fairnessLeadSel"])
   $(id).addEventListener("change", () => advancedPolicyChanged(id));
@@ -4707,7 +4852,10 @@ function setSeated(on) {
   // turn order + end condition + helper budget are baked into the running
   // conversation; continuing keeps them (the ceiling stepper stays live)
   $("modeSel").disabled = seated;
-  document.querySelectorAll(".preset-card").forEach(button => { button.disabled = seated; });
+  // the mode is baked into the running conversation, same as today's cards
+  // were — the pill locks with everything else (an open menu would offer
+  // choices the engine just refused)
+  $("modePickBtn").disabled = seated;
   for (const id of ["workflowSel", "concurrencySel", "floorSel", "routingSel",
                     "completionSel", "budgetUnitSel", "fairnessLeadSel", "synthSel"])
     $(id).disabled = seated;
@@ -4733,6 +4881,7 @@ function setSeated(on) {
   // menu would offer choices the select just refused
   $("permPickBtn").disabled = seated;
   if (seated) closePermMenu(); else renderPermPick();
+  if (seated) closeModeMenu(); else renderModePick();
   $("connectors").disabled = seated;
   if (!seated) normalizePolicyControls();
 }
@@ -4933,6 +5082,7 @@ async function openHooks() {
     rows.append(row);
   }
   $("hookNote").textContent = "";
+  loadWebhook();
   $("hooksModal").classList.add("show");
 }
 $("hooksBtn").onclick = openHooks;
@@ -4949,6 +5099,37 @@ $("hookSave").onclick = async () => {
   try { r = await pywebview.api.set_event_hooks(hooks); }
   catch (e) { $("hookNote").textContent = String(e); return; }
   if (r && r.error) $("hookNote").textContent = r.error;
+};
+
+/* ---------- webhook trigger (hooks modal, bottom section) ---------- */
+// set_webhook answers {"ok": true} at once and does the bind/unbind on a
+// worker thread; the truth comes back painted via the webhook_status event,
+// exactly like recheck_auth -> auth_status.
+function paintWebhook(st) {
+  st = st || {};
+  $("whEnable").checked = !!st.running;
+  $("whUrl").textContent = st.url || "http://127.0.0.1:<port>/start";
+  $("whToken").value = st.token || "";
+}
+async function loadWebhook() {
+  let r;
+  try { r = await pywebview.api.get_webhook(); }
+  catch (e) { return; }
+  paintWebhook(r);
+}
+$("whEnable").onchange = async e => {
+  let r;
+  try { r = await pywebview.api.set_webhook(e.target.checked); }
+  catch (err) { $("whNote").textContent = String(err); return; }
+  if (r?.error) { $("whNote").textContent = r.error; e.target.checked = !e.target.checked; }
+};
+$("whCopy").onclick = async () => {
+  const tok = $("whToken").value;
+  await copyText(
+    'curl -X POST ' + $("whUrl").textContent +
+    ' -H "Content-Type: application/json"' +
+    (tok ? ` -H "X-Alloy-Token: ${tok}"` : "") +
+    ' -d "{\\"topic\\": \\"hello\\", \\"turns\\": 4}"', $("whCopy"));
 };
 
 async function refreshSkills() {
@@ -5287,6 +5468,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
     closeAccounts(); closeRole(); hideAsk(); closeSkills(); closeRooms();
     closeContinuous(); closeKbd(); closeHooks();
+    closeModeMenu();                   // the composer's own popover
     if ($("findBar") && !$("findBar").hidden) findClose();
     if (micOn) micStop(true);          // a live mic is the one thing Escape must kill
   }
@@ -5532,7 +5714,17 @@ $("sayGrip").addEventListener("pointerdown", e => {
   grip.addEventListener("pointermove", move);
   grip.addEventListener("pointerup", up);
 });
-function clearSay() { $("say").value = ""; histIdx = -1; autoGrow(); }
+function sayDraftLoad() {
+  // The composer's words survive a restart, best-effort like every
+  // localStorage preference here. Saved on every keystroke (tiny strings),
+  // cleared wherever the box is cleared, and restored only into an EMPTY box
+  // — the same never-clobber-a-fresh-draft rule sendSay obeys at 5922.
+  try { return localStorage.getItem("sayDraft") || ""; } catch (e) { return ""; }
+}
+function sayDraftSave(text) {
+  try { localStorage.setItem("sayDraft", text || ""); } catch (e) {}
+}
+function clearSay() { $("say").value = ""; histIdx = -1; sayDraftSave(""); autoGrow(); }
 
 /* ---------- attachments ---------- */
 // Files ride to Python as base64 and land in <workspace>\attachments\ — the
@@ -5727,6 +5919,15 @@ function applyDictationConfig(info) {
     ? (d.reason ? MIC_TITLE + " — " + d.reason : MIC_TITLE)
     : (d.reason || "Dictation is unavailable on this machine.");
 }
+// Read-aloud availability, from the same startup probe. Unlike the mic, the
+// 🔊 buttons hide rather than grey: there is one of them per message row, and
+// rows are rendered before boot finishes anyway, so a hidden-when-unavailable
+// rule needs no repaint pass. New rows re-check at render time.
+let speakerCfg = { available: true, detail: "" };
+function applySpeakerConfig(info) {
+  speakerCfg = info || { available: false, detail: "" };
+}
+function speakerAvailable() { return !!speakerCfg.available; }
 function micStart() {
   if (!micReady || micOn || micBusy) return;
   micOn = true; micLatched = false;
@@ -5819,7 +6020,7 @@ async function sendSay() {
       // clearSay()'d a moment ago, so an error left Josh with a relay excuse
       // and no message; retyping it is the last thing he should have to do.
       // Only when the box is still empty — never clobber a fresh draft.
-      if (!$("say").value) { $("say").value = t; autoGrow(); }
+      if (!$("say").value) { $("say").value = t; sayDraftSave(t); autoGrow(); }
       addMsg("system", "relay", r.error, ""); return;
     }
     // r.text carries the attachment lines Python appended — show what was sent
@@ -5892,7 +6093,7 @@ async function sendSay() {
   $("say").placeholder = RUN_PH;
 }
 $("sayBtn").onclick = sendSay;
-$("say").addEventListener("input", () => { histIdx = -1; autoGrow(); });
+$("say").addEventListener("input", () => { histIdx = -1; sayDraftSave($("say").value); autoGrow(); });
 addEventListener("resize", autoGrow);
 $("say").addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendSay(); return; }
@@ -6419,32 +6620,47 @@ function renderChats() {
   // those chats one calm, static priority group; everything else keeps its
   // project grouping and newest-first order.
   const groups = new Map();
-  const waiting = sessions.filter(s => runFor(s.id, s.run || s).status === "waiting");
+  // Archived chats are decluttered, not gone: they leave every other grouping
+  // (a question Josh must answer on an archived chat still shows — it lands in
+  // Needs input via runFor's live status, which outranks the archive) and
+  // gather in one collapsed-by-default group at the very bottom.
+  const archived = sessions.filter(s => s.archived);
+  const live = sessions.filter(s => !s.archived);
+  const waiting = live.filter(s => runFor(s.id, s.run || s).status === "waiting");
   if (waiting.length) groups.set("\u0000needs-input", waiting);
   // Pinned chats rank just under "Needs input": a question Josh must answer
   // still outranks a chat he merely likes. Pinned ids live in localStorage —
   // a UI preference, never engine state, so deleting a pinned chat needs no
   // cleanup beyond the stale id being ignored.
   const pinnedIds = new Set(pinnedChats());
-  const pinned = sessions.filter(s => !waiting.includes(s) && pinnedIds.has(s.id));
+  const pinned = live.filter(s => !waiting.includes(s) && pinnedIds.has(s.id));
   if (pinned.length) groups.set("\u0000pinned", pinned);
-  sessions.filter(s => !waiting.includes(s) && !pinnedIds.has(s.id)).forEach(s => {
+  live.filter(s => !waiting.includes(s) && !pinnedIds.has(s.id)).forEach(s => {
     const key = s.project || "";
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(s);
   });
+  // The Archived group is appended AFTER the project groups and starts closed:
+  // its whole job is to hold chats Josh chose not to look at. Unlike the other
+  // groups, "never toggled" means closed here, not open.
+  if (archived.length) groups.set("\u0001archived", archived);
   groups.forEach((rows, name) => {
     const needsInput = name === "\u0000needs-input";
     const isPinnedGroup = name === "\u0000pinned";
+    const isArchived = name === "\u0001archived";
     const g = document.createElement("div");
-    g.className = "chat-group" + (!needsInput && !isPinnedGroup && closedGroups[name || "*"] ? " closed" : "");
+    g.className = "chat-group" +
+      (!needsInput && !isPinnedGroup &&
+       (isArchived ? !!closedGroups[name] : closedGroups[name || "*"]) ? " closed" : "");
     const h = document.createElement("button");
     h.className = "chat-group-h";
     h.innerHTML = `<span class="chev">▾</span><span class="gname"></span>`;
     h.querySelector(".gname").textContent =
-      needsInput ? "Needs input" : isPinnedGroup ? "Pinned" : name || "No project";
+      needsInput ? "Needs input" : isPinnedGroup ? "Pinned" :
+      isArchived ? "Archived" : name || "No project";
     h.title = needsInput ? "Conversations waiting for your answer"
       : isPinnedGroup ? "Chats you pinned"
+      : isArchived ? "Chats you archived — click to unfold; unarchive from a row"
       : name ? "Working folder: " + name : "Chats with their own private folder";
     h.onclick = () => {
       if (needsInput) return;
@@ -6495,6 +6711,7 @@ function chatRow(s) {
      <span class="chat-actions">
        <button class="chat-stop" title="Stop this conversation">■</button>
        <button class="pin" title="Pin this chat to the top of the rail">★</button>
+       <button class="arc" title="Archive this chat">🗄</button>
        <button class="exp" title="Export this chat as a self-contained web page">⤓</button>
        <button class="x" title="Delete this chat">✕</button>
      </span>`;
@@ -6532,6 +6749,18 @@ function chatRow(s) {
   pin.classList.toggle("on", isPinned);
   pin.title = isPinned ? "Unpin this chat" : "Pin this chat to the top of the rail";
   pin.onclick = e => { e.stopPropagation(); togglePin(s.id); };
+  // Archive is reversible, so unlike delete it needs no two-step arm — one
+  // stray click costs a trip to the Archived group, not a workspace.
+  const arc = d.querySelector(".arc");
+  arc.textContent = s.archived ? "↩" : "🗄";
+  arc.title = s.archived ? "Unarchive this chat" : "Archive this chat";
+  if (s.archived) d.classList.add("archived");
+  arc.onclick = async e => {
+    e.stopPropagation();
+    const r = await pywebview.api.set_archived(s.id, !s.archived);
+    if (r?.error) addMsg("system", "relay", r.error, "");
+    await refreshChats();
+  };
   d.querySelector(".exp").onclick = async e => {
     e.stopPropagation();
     const r = await pywebview.api.export_session(s.id);
@@ -7393,6 +7622,7 @@ window.addEventListener("pywebviewready", async () => {
   renderAccounts(await pywebview.api.get_auth_status());
   uiCfg = await pywebview.api.get_config();
   applyDictationConfig(uiCfg.dictation);
+  applySpeakerConfig(uiCfg.speaker);
   gptModels = uiCfg.gpt_models;
   geminiFamilies = uiCfg.gemini_families;
   seats.forEach(fillSeat);
@@ -7406,6 +7636,9 @@ window.addEventListener("pywebviewready", async () => {
   // the tab strip present.
   await resumeAfterRestart();
   refreshFiles();
+  // Restore the saved draft LAST, into an empty box only, so a chat that
+  // resumeAfterRestart just opened (or anything else that typed) wins.
+  if (!$("say").value) { $("say").value = sayDraftLoad(); autoGrow(); }
   $("say").focus();
 });
 
