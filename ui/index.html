@@ -740,7 +740,7 @@
     font: 11px "Cascadia Mono", Consolas, monospace; padding: 1px 7px;
   }
   #acctModal, #roleModal, #askModal, #skillModal, #contModal, #kbdModal,
-  #hooksModal, #roomsModal, #deskModal, #brwsModal {
+  #hooksModal, #roomsModal, #deskModal, #brwsModal, #statsModal {
     position: fixed; inset: 0; z-index: 50; display: none;
     align-items: flex-start; justify-content: center; padding-top: 9vh;
     background: rgba(10,8,14,.6);
@@ -764,10 +764,59 @@
   #roomEmpty { color: var(--muted); font-size: 12px; padding: 10px 0 4px; }
   #acctModal.show, #roleModal.show, #askModal.show, #skillModal.show,
   #contModal.show, #kbdModal.show, #hooksModal.show, #roomsModal.show,
-  #deskModal.show, #brwsModal.show { display: flex; }
+  #deskModal.show, #brwsModal.show, #statsModal.show { display: flex; }
   #deskModal .modal, #brwsModal .modal { width: min(560px, 94vw); border-left: 3px solid var(--danger); }
   #deskModal ul, #brwsModal ul { margin: 10px 0 0; padding-left: 18px; line-height: 1.65; }
   #deskModal li, #brwsModal li { margin-bottom: 4px; }
+  /* ---------- stats + playbook ---------- */
+  #stHead, #bookHead {
+    color: var(--muted); font-size: 12px; line-height: 1.6; margin-bottom: 10px;
+  }
+  #stHead b, #bookHead b { color: var(--text); font-weight: 600; }
+  #stCaveat {
+    margin-top: 12px; padding: 8px 10px; border-radius: 8px;
+    background: rgba(224,108,92,.10); border: 1px solid rgba(224,108,92,.3);
+    color: var(--text); font-size: 11.5px; line-height: 1.55;
+  }
+  #stCaveat.show { display: block; }
+  .st-table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+  .st-table caption {
+    text-align: left; color: var(--muted); font-size: 11px;
+    letter-spacing: .1em; text-transform: uppercase; padding-bottom: 5px;
+    font-family: Bahnschrift, sans-serif;
+  }
+  .st-table th, .st-table td {
+    padding: 5px 8px; border-bottom: 1px solid rgba(255,255,255,.06);
+    font: 12px "Cascadia Mono", Consolas, monospace; text-align: right;
+    white-space: nowrap;
+  }
+  .st-table th { color: var(--muted); font-size: 10.5px; font-weight: normal; }
+  .st-table td.name, .st-table th.name { text-align: left; }
+  .st-table td.name { color: var(--text); }
+  .st-table .dot {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    margin-right: 6px; background: var(--who, var(--muted));
+  }
+  /* A number nobody reported. It must never look like a zero, which is a
+     measurement — this is the absence of one. */
+  .st-table td.blank { color: var(--muted); opacity: .45; }
+  .st-table tr.total td { border-top: 1px solid var(--line); border-bottom: none; }
+  .book-row {
+    display: flex; align-items: flex-start; gap: 10px; padding: 9px 0;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+  }
+  .book-row:last-child { border-bottom: none; }
+  .book-row.dismissed { opacity: .45; }
+  .book-row .book-text { flex: 1; min-width: 0; }
+  .book-row .book-directive { color: var(--text); font-size: 13px; line-height: 1.5; }
+  .book-row.dismissed .book-directive { text-decoration: line-through; }
+  .book-row .book-why {
+    color: var(--muted); font-size: 11px; margin-top: 3px;
+    font-family: "Cascadia Mono", Consolas, monospace;
+  }
+  .book-row .book-acts { display: flex; gap: 6px; flex: none; }
+  .book-pin.on { color: var(--alloy); border-color: var(--alloy); }
+  #bookEmpty { color: var(--muted); font-size: 12px; padding: 12px 0; }
   .hook-row { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
   .hook-row label {
     width: 120px; flex: none; font-family: Bahnschrift, sans-serif;
@@ -2070,6 +2119,9 @@
     <button id="skillBtn" title="Write skills once and give them to every seat; manage MCP servers">
       <span>Skills &amp; Connections</span>
     </button>
+    <button id="statsBtn" title="What every provider has actually cost, how long it took, how much came from cache — and the playbook those outcomes derived">
+      <span>Stats &amp; playbook</span>
+    </button>
     <button id="roomsBtn" title="Save this lineup — seats, models, roles, limits — and start it again in one click">
       <span>Saved rooms</span>
     </button>
@@ -2292,6 +2344,29 @@
     </div>
 
     <div id="connPane" hidden></div>
+  </div>
+</div>
+
+<div id="statsModal">
+  <div class="modal wide">
+    <div class="modal-head">
+      <h2>Stats &amp; playbook</h2>
+      <div id="stTabs">
+        <button class="sk-tab on" id="stTabStats">Stats</button>
+        <button class="sk-tab" id="stTabBook">Playbook</button>
+      </div>
+      <button class="close" id="stClose" title="Close" aria-label="Close">✕</button>
+    </div>
+    <div id="stNote" hidden></div>
+    <div id="stPane">
+      <div id="stHead"></div>
+      <div id="stTables"></div>
+      <div id="stCaveat" hidden></div>
+    </div>
+    <div id="bookPane" hidden>
+      <div id="bookHead"></div>
+      <div id="bookList"></div>
+    </div>
   </div>
 </div>
 
@@ -4310,6 +4385,12 @@ window.uiEvent = packet => {
     renderAccounts(payload);
   } else if (event === "mcp_status") {
     renderConns(payload);
+  } else if (event === "stats") {
+    // Both of these are app-wide, not per-chat, so they are handled here
+    // and never routed through the not-my-chat gate below.
+    renderStats(payload);
+  } else if (event === "playbook") {
+    renderPlaybook(payload);
   } else if (event === "webhook_status") {
     paintWebhook(payload);
   } else if (event === "battle_ready") {
@@ -5964,6 +6045,206 @@ async function answerAsk(text) {
 }
 $("askPill").onclick = openAsk;
 
+/* ---------- stats & playbook ----------
+   Two readers over the same pile of outcome.json records. Both bridge calls
+   follow the recheck_auth shape (ok at once, truth as an event), because an
+   uncapped scan of every session folder on the bridge thread would freeze
+   the window.
+
+   The one rule this whole panel is built around: a number nobody reported
+   is a BLANK, never a zero. Gemini and OpenCode report no cost at all, and
+   a 0 in a spend column reads as "this was free" rather than "nobody
+   said" — the same distinction stats.py refuses to collapse. */
+let statsCache = null, bookCache = null, statsTabName = "stats";
+
+function fmtMoney(v) {
+  if (typeof v !== "number") return null;
+  return v < 0.01 && v > 0 ? "$" + v.toFixed(4) : "$" + v.toFixed(2);
+}
+function fmtDur(ms) {
+  if (typeof ms !== "number" || ms <= 0) return null;
+  const s = Math.round(ms / 1000);
+  if (s < 90) return s + "s";
+  const m = Math.round(s / 60);
+  return m < 90 ? m + "m" : (m / 60).toFixed(1) + "h";
+}
+function fmtPct(v) {
+  return typeof v === "number" ? Math.round(v * 100) + "%" : null;
+}
+// One cell. `null` in, a dimmed em dash out — every column goes through
+// here so no renderer can decide on its own to print a hopeful 0.
+function statCell(value, cls) {
+  return value === null || value === undefined
+    ? '<td class="blank' + (cls ? " " + cls : "") + '">—</td>'
+    : "<td" + (cls ? ' class="' + cls + '"' : "") + ">" + esc(String(value)) + "</td>";
+}
+function statRow(row, isTotal) {
+  const prov = row.provider || row.key;
+  const dot = isTotal ? ""
+    : '<span class="dot" style="--who:var(--' + esc(String(prov)) + ',var(--muted))"></span>';
+  return "<tr" + (isTotal ? ' class="total"' : "") + ">" +
+    '<td class="name">' + dot + esc(String(row.label)) + "</td>" +
+    statCell(row.sessions ? String(row.sessions) : null) +
+    statCell(row.turns ? String(row.turns) : null) +
+    statCell(fmtMoney(row.cost_usd)) +
+    statCell(shortTokens(row.prompt_tokens)) +
+    statCell(shortTokens(row.output_tokens)) +
+    statCell(fmtPct(row.cache_hit)) +
+    statCell(fmtDur(row.wall_ms)) +
+    "</tr>";
+}
+function statTable(caption, rows, total) {
+  if (!rows.length && !total) return "";
+  return '<table class="st-table"><caption>' + esc(caption) + "</caption>" +
+    '<tr><th class="name">' + esc(caption === "By model" ? "Model" : "Provider") +
+    "</th><th>Chats</th><th>Turns</th><th>Cost</th><th>Prompt</th>" +
+    "<th>Output</th><th>Cached</th><th>Time</th></tr>" +
+    rows.map(r => statRow(r, false)).join("") +
+    (total ? statRow(total, true) : "") + "</table>";
+}
+function renderStats(p) {
+  statsCache = p || {};
+  const note = $("stNote");
+  if (p && p.error) {
+    note.hidden = false; note.textContent = p.error;
+    $("stTables").innerHTML = ""; $("stHead").textContent = "";
+    return;
+  }
+  note.hidden = true;
+  const counted = Number(p.sessions_counted) || 0;
+  const withUsage = Number(p.sessions_with_usage) || 0;
+  $("stHead").innerHTML = counted
+    ? "<b>" + counted + "</b> finished chat" + (counted === 1 ? "" : "s") +
+      " on disk, <b>" + withUsage + "</b> with seats that reported anything."
+    : "No finished chats to count yet — stats appear once a conversation ends.";
+  const total = p.totals && Number(p.totals.turns) ? p.totals : null;
+  $("stTables").innerHTML =
+    statTable("By provider", p.providers || [], total) +
+    statTable("By model", p.models || [], null);
+  // Say what was left out, rather than leaving it as an absence.
+  const stale = Number((p.totals || {}).superseded_sessions) || 0;
+  const cav = $("stCaveat");
+  cav.hidden = !stale;
+  cav.classList.toggle("show", !!stale);
+  if (stale) {
+    cav.textContent =
+      stale + " chat" + (stale === 1 ? "'s" : "s'") + " token counts are " +
+      "left out. GPT's CLI reports THREAD totals, and Alloy summed them " +
+      "until the 2026-08-27 fix — one real chat holds over half a " +
+      "billion tokens that way. Those records are kept as they were " +
+      "written rather than rewritten; their turns and costs still count " +
+      "here, only the token columns are withheld.";
+  }
+}
+function bookWhy(rule) {
+  const bits = [];
+  if (rule.pinned) bits.push("pinned by you");
+  const n = Number(rule.evidence_count) || 0;
+  if (n) bits.push("seen in " + n + " session" + (n === 1 ? "" : "s"));
+  if (rule.provenance_display) bits.push(String(rule.provenance_display));
+  if (rule.status === "dismissed") bits.push("dismissed");
+  return bits.join(" · ");
+}
+function renderPlaybook(p) {
+  bookCache = p || {};
+  const note = $("stNote");
+  if (p && p.error) {
+    note.hidden = false; note.textContent = p.error;
+    $("bookList").innerHTML = ""; $("bookHead").textContent = "";
+    return;
+  }
+  const s = p.summary || {}, rules = p.rules || [];
+  const counts = s.rules || {};
+  const sessions = Number(s.sessions_counted) || 0;
+  $("bookHead").innerHTML =
+    "Rules derived from <b>" + sessions + "</b> outcome" +
+    (sessions === 1 ? "" : "s") + ". <b>" + (Number(counts.active) || 0) +
+    "</b> active" +
+    (counts.pinned ? ", " + Number(counts.pinned) + " pinned" : "") +
+    (counts.dismissed ? ", " + Number(counts.dismissed) + " dismissed" : "") +
+    ". Active rules are quoted into every Supervisor plan.";
+  const list = $("bookList");
+  list.innerHTML = "";
+  if (!rules.length) {
+    const empty = document.createElement("div");
+    empty.id = "bookEmpty";
+    empty.textContent =
+      "No rules yet. They derive themselves once finished chats accumulate "
+      + "— a reason you tag counts immediately, a pattern has to recur.";
+    list.appendChild(empty);
+    return;
+  }
+  rules.forEach(rule => {
+    const row = document.createElement("div");
+    row.className = "book-row" + (rule.status === "dismissed" ? " dismissed" : "");
+    const text = document.createElement("div");
+    text.className = "book-text";
+    const dir = document.createElement("div");
+    dir.className = "book-directive";
+    // textContent, never innerHTML: a directive is derived from session
+    // data and carries whatever a reason tag said
+    dir.textContent = rule.directive || rule.heuristic_id || "";
+    const why = document.createElement("div");
+    why.className = "book-why";
+    why.textContent = bookWhy(rule);
+    text.appendChild(dir); text.appendChild(why);
+    const acts = document.createElement("div");
+    acts.className = "book-acts";
+    const pin = document.createElement("button");
+    pin.className = "btn-sm book-pin" + (rule.pinned ? " on" : "");
+    pin.textContent = rule.pinned ? "Pinned" : "Pin";
+    pin.title = rule.pinned
+      ? "Pinned — kept across every refresh, with your wording"
+      : "Pin — keep this rule and its wording across refreshes";
+    pin.onclick = () => setBookRule(rule.heuristic_id, {pinned: !rule.pinned});
+    const dis = document.createElement("button");
+    dis.className = "btn-sm";
+    dis.textContent = rule.status === "dismissed" ? "Restore" : "Dismiss";
+    dis.title = rule.status === "dismissed"
+      ? "Restore — let this rule steer plans again"
+      : "Dismiss — stop quoting this into Supervisor plans. It stays "
+        + "dismissed through every refresh.";
+    dis.onclick = () => setBookRule(rule.heuristic_id,
+                                    {dismissed: rule.status !== "dismissed"});
+    acts.appendChild(pin); acts.appendChild(dis);
+    row.appendChild(text); row.appendChild(acts);
+    list.appendChild(row);
+  });
+}
+async function setBookRule(id, change) {
+  const r = await pywebview.api.set_playbook_rule(
+    id, change.pinned === undefined ? null : change.pinned,
+    change.dismissed === undefined ? null : change.dismissed);
+  if (r && r.error) {
+    const note = $("stNote");
+    note.hidden = false; note.textContent = r.error;
+    return;
+  }
+  renderPlaybook(Object.assign({}, bookCache, {rules: (r && r.rules) || []}));
+}
+function statsTab(which) {
+  statsTabName = which;
+  $("stTabStats").classList.toggle("on", which === "stats");
+  $("stTabBook").classList.toggle("on", which === "book");
+  $("stPane").hidden = which !== "stats";
+  $("bookPane").hidden = which !== "book";
+}
+async function openStats() {
+  $("statsModal").classList.add("show");
+  statsTab(statsTabName);
+  $("stNote").hidden = true;
+  if (!statsCache) $("stHead").textContent = "Counting…";
+  if (!bookCache) $("bookHead").textContent = "Deriving…";
+  await pywebview.api.get_stats();
+  await pywebview.api.get_playbook();
+}
+function closeStats() { $("statsModal").classList.remove("show"); }
+$("statsBtn").onclick = openStats;
+$("stClose").onclick = closeStats;
+$("stTabStats").onclick = () => statsTab("stats");
+$("stTabBook").onclick = () => statsTab("book");
+$("statsModal").onclick = e => { if (e.target === $("statsModal")) closeStats(); };
+
 /* ---------- skills & connections ---------- */
 // Skills are folders holding SKILL.md, and the format is identical for all
 // three CLIs — so one skill written here installs verbatim everywhere. The
@@ -6457,7 +6738,7 @@ $("kbdModal").onclick = e => { if (e.target === $("kbdModal")) closeKbd(); };
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
     closeAccounts(); closeRole(); hideAsk(); closeSkills(); closeRooms();
-    closeContinuous(); closeKbd(); closeHooks();
+    closeContinuous(); closeKbd(); closeHooks(); closeStats();
     // false = refused, so Escape reverts the picker like Cancel does
     if ($("deskModal").classList.contains("show")) closeDeskModal(false);
     if ($("brwsModal").classList.contains("show")) closeBrwsModal(false);

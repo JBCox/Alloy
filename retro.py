@@ -315,6 +315,71 @@ def format_retro_report(records, playbook):
     return "\n".join(lines)
 
 
+def rules_for_display(playbook):
+    """EVERY rule, trimmed for a reader — dismissed ones included.
+
+    ``summarize``'s ``top_rules`` is the headline: active only, capped. A UI
+    that lets Josh un-dismiss something has to be able to show him what he
+    dismissed, so this one is uncapped and carries ``status``. Still trimmed
+    of ``provenance`` (the raw session-id list is bookkeeping, not display)
+    and ordered the way the playbook itself ranks: pinned, then evidence.
+    """
+    rules = [h for h in (playbook or {}).get("heuristics", [])
+             if isinstance(h, dict) and h.get("heuristic_id")]
+    rules.sort(key=lambda h: (h.get("status") == "dismissed",
+                              not h.get("pinned"),
+                              -int(h.get("evidence_count") or 0)))
+    return [{"heuristic_id": h.get("heuristic_id"),
+             "directive": h.get("directive") or "",
+             "evidence_count": int(h.get("evidence_count") or 0),
+             "source": h.get("source"),
+             "pinned": bool(h.get("pinned")),
+             "status": h.get("status") or "active",
+             "expiry": h.get("expiry"),
+             "provenance_display": h.get("provenance_display")
+             or provenance_label(h)}
+            for h in rules]
+
+
+def set_rule(sessions_dir, heuristic_id, pinned=None, dismissed=None,
+             directive=None):
+    """Apply Josh's editorial decision to ONE rule and persist it.
+
+    Returns the written playbook, or None when there is no such rule — the
+    caller reports that; this module never invents a heuristic, because a
+    rule with no derivation behind it is exactly what ``provenance`` exists
+    to make impossible.
+
+    Only the arguments actually passed are applied, so a caller toggling
+    `pinned` cannot silently un-dismiss. Editing the `directive` is allowed
+    ONLY on a pinned rule: ``merge_heuristics`` preserves the wording of a
+    pinned rule and overwrites an unpinned one on the next refresh, so
+    letting an edit land on an unpinned rule would look accepted and be
+    gone by morning.
+    """
+    book = read_playbook(sessions_dir)
+    if not isinstance(book, dict):
+        return None
+    target = None
+    for h in book.get("heuristics", []):
+        if isinstance(h, dict) and h.get("heuristic_id") == heuristic_id:
+            target = h
+            break
+    if target is None:
+        return None
+    if pinned is not None:
+        target["pinned"] = bool(pinned)
+    if dismissed is not None:
+        target["status"] = "dismissed" if dismissed else "active"
+    if directive is not None and target.get("pinned"):
+        text = str(directive).strip()[:400]
+        if text:
+            target["directive"] = text
+    book["updated"] = datetime.datetime.now().isoformat(timespec="seconds")
+    write_playbook(sessions_dir, book)
+    return book
+
+
 def run_retro(sessions_dir, now=None):
     """One full pass: scan → derive → merge → write, then report.
 

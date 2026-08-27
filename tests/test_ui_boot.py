@@ -358,11 +358,18 @@ const api = new Proxy({}, {
 });
 
 const savedTabs = [], autoResumeNoted = [], continued = [], apiCalls = [];
+const playbookCalls = [];    // W1.5: what set_playbook_rule was asked to do
+let playbookReply = null;    // set to {error} to drive the refusal path
 let interjectReply = null;   // set to {error} to drive the refusal path
 function apiReply(name, args) {
   apiCalls.push(name);
   switch (name) {
     case 'get_config': return JSON.parse(process.env.STUB_CONFIG);
+    case 'get_stats': return {ok: true};
+    case 'get_playbook': return {ok: true};
+    case 'set_playbook_rule':
+      playbookCalls.push(args);
+      return playbookReply || {ok: true, rules: []};
     case 'get_auth_status': return {
       providers: [
         {provider: 'claude', label: 'Claude', state: 'signed_in', seatable: true, color: '#D97757', email: null, detail: '', install_hint: '', can_logout: true},
@@ -1580,6 +1587,118 @@ if (topLevelError) {
                              kind: 'text/plain', size: 12}]});
     p.replay = arts();
   } catch (e) { more.artifactsError = (e && e.stack) || String(e); }
+
+  // ---- W1.5: stats + the playbook's first UI ------------------------------
+  // Driven through the REAL `stats` and `playbook` events. The rule the
+  // whole panel exists to hold: a number nobody reported is a BLANK, never
+  // a zero -- and a token count withheld because it predates the telemetry
+  // fix is STATED, not silently missing.
+  try {
+    const p = more.stats = {};
+    // The stub parses innerHTML FLAT, so a <tr> has no child <td>s at all.
+    // Read the table out of the element's own _html instead.
+    const cells = label => {
+      const html = String(byId['stTables']._html || '');
+      for (const chunk of html.split('<tr')) {
+        if (chunk.indexOf('>' + label + '</td>') < 0) continue;
+        const tds = chunk.match(/<td[^>]*>[\s\S]*?<\/td>/g) || [];
+        return tds.slice(1).map(td => td.replace(/<[^>]*>/g, ''));
+      }
+      return null;
+    };
+    const settle = () => new Promise(r => setTimeout(r, 0));
+    ctx.uiEvent({event: 'stats', payload: {
+      sessions_counted: 3, sessions_with_usage: 3,
+      totals: {key: 'all', label: 'All seats', sessions: 3, turns: 13,
+               cost_usd: 0.25, input_tokens: null, output_tokens: 42,
+               cached_tokens: null, wall_ms: 1200, cache_hit: null,
+               prompt_tokens: null, superseded_sessions: 1},
+      providers: [
+        {key: 'claude', label: 'claude', sessions: 2, turns: 9,
+         cost_usd: 0.25, input_tokens: 10, output_tokens: 42,
+         cached_tokens: 90, wall_ms: 1200, cache_hit: 0.9,
+         prompt_tokens: 100, superseded_sessions: 0},
+        {key: 'gemini', label: 'gemini', sessions: 1, turns: 4,
+         cost_usd: null, input_tokens: null, output_tokens: null,
+         cached_tokens: null, wall_ms: null, cache_hit: null,
+         prompt_tokens: null, superseded_sessions: 0},
+        {key: 'gpt', label: 'gpt', sessions: 1, turns: 3,
+         cost_usd: null, input_tokens: 559310306, output_tokens: 12,
+         cached_tokens: 4, wall_ms: null, cache_hit: 0,
+         prompt_tokens: 4000, superseded_sessions: 1},
+      ],
+      models: []}});
+    p.claudeCells = cells('claude');
+    p.geminiCells = cells('gemini');
+    p.zeroHit = (cells('gpt') || [])[5];
+    p.caveatShown = !byId['stCaveat'].hidden;
+    p.caveatText = String(byId['stCaveat'].textContent || '');
+    p.caveatNumbers = 'half a billion';
+    ctx.uiEvent({event: 'stats', payload: {
+      sessions_counted: 1, sessions_with_usage: 1,
+      totals: {key: 'all', label: 'All seats', sessions: 1, turns: 2,
+               cost_usd: 0.1, superseded_sessions: 0},
+      providers: [], models: []}});
+    p.caveatAfterClean = !byId['stCaveat'].hidden;
+    // ---- the playbook half
+    const bookRows = () => [...byId['bookList'].children]
+      .filter(r => String(r.className || '').indexOf('book-row') >= 0);
+    ctx.uiEvent({event: 'playbook', payload: {
+      summary: {sessions_counted: 7,
+                rules: {total: 3, active: 2, pinned: 1, dismissed: 1}},
+      rules: [
+        {heuristic_id: 'a', directive: 'Do A', evidence_count: 3,
+         source: 'human_reason', pinned: false, status: 'active',
+         provenance_display: 'you tagged this'},
+        {heuristic_id: 'b', directive: 'Do B', evidence_count: 2,
+         source: 'inferred_pattern', pinned: true, status: 'active',
+         provenance_display: 'seen twice'},
+        {heuristic_id: 'c', directive: 'Old one', evidence_count: 1,
+         source: 'inferred_pattern', pinned: false, status: 'dismissed',
+         provenance_display: 'seen once'},
+      ]}});
+    p.bookRows = bookRows().map(r => {
+      const d = r.querySelector('.book-directive');
+      return d ? String(d.textContent || '') : null;
+    });
+    p.bookDismissed = bookRows().map(
+      r => String(r.className || '').indexOf('dismissed') >= 0);
+    p.bookActions = bookRows().map(r => [...r.querySelectorAll('button')]
+      .map(b => String(b.textContent || '')));
+    // clicking routes to the bridge with THAT rule's id and nothing else.
+    // Re-seeded before each click because a successful call re-renders from
+    // whatever `rules` the bridge answered with -- an empty list here.
+    const seedOne = () => ctx.uiEvent({event: 'playbook', payload: {
+      summary: {}, rules: [{heuristic_id: 'a', directive: 'Do A',
+                            evidence_count: 1, pinned: false,
+                            status: 'active'}]}});
+    playbookCalls.length = 0;
+    seedOne();
+    bookRows()[0].querySelectorAll('button')[0].onclick();
+    await settle();
+    p.pinCall = playbookCalls[0] || null;
+    playbookCalls.length = 0;
+    seedOne();
+    bookRows()[0].querySelectorAll('button')[1].onclick();
+    await settle();
+    p.dismissCall = playbookCalls[0] || null;
+    // a bridge error is shown, not swallowed
+    playbookReply = {error: 'no such rule'};
+    seedOne();
+    bookRows()[0].querySelectorAll('button')[0].onclick();
+    await settle();
+    p.noteAfterError = String(byId['stNote'].textContent || '');
+    playbookReply = null;
+    ctx.uiEvent({event: 'playbook', payload: {summary: {}, rules: []}});
+    p.bookEmpty = String((byId['bookList'].querySelector('#bookEmpty') || {})
+      .textContent || '');
+    // tabs
+    ctx.statsTab('book');
+    const panes = () => [byId['stPane'].hidden, byId['bookPane'].hidden];
+    p.panes = [panes()];
+    ctx.statsTab('stats');
+    p.panes.push(panes());
+  } catch (e) { more.statsError = (e && e.stack) || String(e); }
 
   // ---- W1.2: the per-seat todo strip --------------------------------------
   // Driven through the REAL activity/message events. The named trap is a

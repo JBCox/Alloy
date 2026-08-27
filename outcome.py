@@ -470,6 +470,27 @@ def build_outcome(session_dir, workspace=None, ended=None):
                 su["input_tokens"] += int(u.get("input_tokens") or 0)
                 su["output_tokens"] += int(u.get("output_tokens") or 0)
                 su["total_tokens"] += int(u.get("total_tokens") or ((u.get("input_tokens") or 0) + (u.get("output_tokens") or 0)))
+                # Cached tokens and Alloy's own wall clock ride the row and
+                # were being dropped here — the same shape as the artifacts
+                # list the UI never read: the engine measured it and the
+                # SECOND reader threw it away. Keyed only when the CLI
+                # actually reported one, so a seat that reports neither has
+                # no key rather than a confident 0 (record_usage's rule).
+                for field in ("cached_tokens", "wall_ms"):
+                    if u.get(field) is not None:
+                        su[field] = int(su.get(field) or 0) + int(u[field])
+                # WHICH basis these counters were computed under. A SET, not
+                # a stamp, for the same reason relay's is: a chat continued
+                # across the 2026-08-27 telemetry fix genuinely mixes them,
+                # and a reader aggregating across sessions has to be able to
+                # tell a GPT total that was summed from cumulative counters
+                # from one that was differenced. Absent means 1 — the value
+                # everything already on disk was computed under.
+                basis = int(u.get("basis_version") or 1)
+                seen = su.setdefault("basis_versions", [])
+                if basis not in seen:
+                    seen.append(basis)
+                    seen.sort()
         dirs = _trailing_directives(text)
         if "ASK" in dirs:
             asked += 1

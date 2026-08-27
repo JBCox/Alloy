@@ -27,6 +27,8 @@ import export as export_mod
 import fork as fork_mod
 import outcome
 import relay
+import retro as retro_mod
+import stats as stats_mod
 from relay import (AGENT_TYPES, PROVIDERS, SESSIONS_DIR, HELP_TEXT,
                    MODES, DEFAULT_MODE, IMPLEMENTED_MODES, DEFAULT_CEILING,
                    OX_FREE_MODELS, OX_DEFAULT_MODEL, helper_spec,
@@ -1592,6 +1594,62 @@ class Api:
         if failed:
             return {"error": "; ".join(f"{p}: {e}" for p, e in failed.items())}
         return {"ok": True}
+
+    # ------------------------------------------------- stats + playbook --
+    # Both READ every session's outcome.json with no cap, so both follow the
+    # recheck_auth shape: answer {"ok": True} at once, work on a worker
+    # thread, and deliver the truth as an event. A bridge-thread scan of 300
+    # session folders would freeze the window.
+
+    def get_stats(self):
+        """Cross-session totals, per provider and per model."""
+        def work():
+            try:
+                payload = stats_mod.gather(relay.SESSIONS_DIR)
+            except Exception as e:                    # a stats page is
+                payload = {"error": relay.error_excerpt(e)}   # decoration
+            self.emit("stats", payload)
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True}
+
+    def get_playbook(self):
+        """The playbook, REFRESHED — scan, derive, merge, write.
+
+        Deliberately the full `/retro` pass rather than a read: the playbook
+        file is what `relay.playbook_block` interpolates into every
+        Supervisor plan, so a tab that only displayed a stale copy would
+        show Josh rules the planner is not actually using. `write_playbook`
+        is atomic with a unique temp name, so this racing a running /retro
+        is safe (last rename wins, which is the intended semantic).
+        """
+        def work():
+            try:
+                book, report, path = retro_mod.run_retro(relay.SESSIONS_DIR)
+                records = retro_mod.scan_outcomes(relay.SESSIONS_DIR)
+                payload = {"summary": retro_mod.summarize(records, book),
+                           "rules": retro_mod.rules_for_display(book),
+                           "report": report, "path": path,
+                           "updated": book.get("updated")}
+            except Exception as e:
+                payload = {"error": relay.error_excerpt(e)}
+            self.emit("playbook", payload)
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True}
+
+    def set_playbook_rule(self, heuristic_id, pinned=None, dismissed=None,
+                          directive=None):
+        """Josh's editorial decision on ONE rule. Bounded file I/O, so it
+        answers on the bridge thread like save_skill — no scan, no derive."""
+        try:
+            book = retro_mod.set_rule(relay.SESSIONS_DIR, heuristic_id,
+                                      pinned=pinned, dismissed=dismissed,
+                                      directive=directive)
+        except Exception as e:
+            return {"error": relay.error_excerpt(e)}
+        if book is None:
+            return {"error": "No rule with that id — refresh the playbook."}
+        return {"ok": True, "rules": retro_mod.rules_for_display(book),
+                "updated": book.get("updated")}
 
     # --------------------------------------------------------------- MCP --
     # Every one of these spends a subprocess for claude/codex, so the bridge
