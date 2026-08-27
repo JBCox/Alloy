@@ -57,7 +57,7 @@ class ParseTeamTests(unittest.TestCase):
     def test_rejects(self):
         for bad in ("claude | ",              # empty opener
                     "claude |x| y | z",       # too many parts
-                    "claude | go",            # one seat
+                    " | go",                  # no seats at all
                     "claude,grok | go",       # unknown provider
                     "claude,gpt | rounds=x mode=speaker | go",  # bad opt val
                     "claude,gpt | pace=fast | go"):             # bad opt
@@ -133,11 +133,18 @@ class TeamFlowTests(unittest.TestCase):
         self.assertFalse(saved_meta(state).get("children"))
 
     def test_invalid_team_spec_is_surfaced(self):
-        state, _ = self.run_team_conversation("[[TEAM: claude | solo ]]")
+        state, _ = self.run_team_conversation("[[TEAM: grok | nope ]]")
         a_seen = "\n\n".join(state["agents"][0].prompts
                              + saved_meta(state)["seats"][0]["pending"])
         self.assertIn("was not run", a_seen)
-        self.assertIn("at least two seats", a_seen)
+        self.assertIn("unknown provider", a_seen)
+
+    def test_a_one_seat_team_is_legal(self):
+        # Solo Alloy runs one seat, so a solo sub-session is the natural
+        # delegation shape and no longer refused.
+        slots, _opts, opener = parse_team("claude | do the thing")
+        self.assertEqual(len(slots), 1)
+        self.assertEqual(opener, "do the thing")
 
     def test_spawn_and_team_together_run_nothing(self):
         state, _ = self.run_team_conversation(

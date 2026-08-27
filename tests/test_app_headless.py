@@ -72,8 +72,9 @@ class HeadlessAppTests(unittest.TestCase):
 
     # ---- one-press stop / per-seat stop (2026-08-18) --------------------
     def _stopped_api(self):
-        """A finished run, so `_conv` is live and stoppable. Two seats: the
-        app refuses a solo conversation ("Pick at least two participants")."""
+        """A finished run, so `_conv` is live and stoppable. Two seats
+        because the per-seat stop tests need a seat to bench and one to keep
+        going -- a solo conversation is legal now (see test_solo.py)."""
         relay.AGENT_TYPES["claude"] = scripted_agent_class("Claude", ["c1"])
         relay.AGENT_TYPES["gpt"] = scripted_agent_class("GPT", ["g1"])
         api = app.Api()

@@ -50,8 +50,9 @@ class BriefTestCase(unittest.TestCase):
     def stub_synth(self, body="A large project about widgets."):
         calls = []
 
-        def fake(workspace, docs, spec=None):
+        def fake(workspace, docs, spec=None, solo=False):
             calls.append([d["name"] for d in docs])
+            self.last_solo = solo
             if isinstance(body, BaseException):
                 raise body
             return body
@@ -248,6 +249,19 @@ class SynthesisTests(BriefTestCase):
 
     def big(self, name="CLAUDE.md"):
         write(self.ws, name, "z" * (relay.BRIEF_MAX + 1000))
+
+    def test_the_brief_writer_is_told_how_many_seats_it_writes_for(self):
+        """The whole justification for the brief is the cross-vendor
+        asymmetry between seats; with one seat the asymmetry is between that
+        agent's CLI and the repo's docs instead. Only the audience sentence
+        moves, but it has to actually REACH synthesize_brief."""
+        self.stub_synth("Widgets, at length.")
+        self.big()
+        relay.project_brief(self.ws, self.sd)
+        self.assertFalse(self.last_solo, "default is the group audience")
+        os.remove(relay.brief_path(self.ws))
+        relay.project_brief(self.ws, self.sd, solo=True)
+        self.assertTrue(self.last_solo, "solo never reached the writer")
 
     def test_large_docs_synthesize_once_then_cache(self):
         calls = self.stub_synth("Widgets, at length.")

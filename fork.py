@@ -129,6 +129,16 @@ def fork_session(session_id, upto_message_id=None, sessions_dir=None):
         meta["updated"] = datetime.datetime.now().isoformat(timespec="seconds")
         for seat in meta.get("seats") or []:
             seat.pop("session_id", None)
+            # ...and mark it un-introduced, because it is. `introduced` is
+            # what suppresses the preamble on a seat's next turn, and a seat
+            # whose CLI session was just discarded has no memory of ever
+            # receiving one. Without this the fork is ALSO unresumable:
+            # continue_block treats introduced-without-a-session-id as an
+            # orphaned seat ("X's memory wasn't saved - view only") and
+            # rehydrate RAISES on it, so every fork of a chat that had taken a
+            # turn was permanently view-only. Verified 2026-08-27 against real
+            # sessions at one, two and three seats.
+            seat["introduced"] = False
         meta["fork_of"] = {"id": source_id,
                            "message_id": upto_message_id}
         if "children" in meta:

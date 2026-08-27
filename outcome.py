@@ -228,6 +228,13 @@ TERMINATION_REASONS = ("wrap", "moderator_done", "supervisor_done", "cap",
                        # mode. Never recorded as "fatal" — that means a dead
                        # CLI, and blending the two would lie in hard facts.
                        "starved",
+                       # "seat_count" is a refusal, not an outcome: the mode
+                       # cannot mean anything with this roster (a blind duel
+                       # over one answer, a reactive room with nobody to react
+                       # to). Distinct from "starved" on purpose — that one
+                       # means seats died, this one means the run was never
+                       # runnable and no seat was ever asked for a turn.
+                       "seat_count",
                        "ceiling", "stop", "fatal", "unknown",
                        # A blind-duel round ending on purpose: both answers
                        # are in and the human must vote before anything else
@@ -295,7 +302,14 @@ def _completion_facts(meta, ended_reason):
     if inferred != "unknown":
         precise = ((inferred == "wrap" and termination in
                     ("moderator_done", "supervisor_done")) or
-                   (inferred == "cap" and termination == "ceiling"))
+                   (inferred == "cap" and termination == "ceiling") or
+                   # run_free / run_battle return the loop's generic "starved"
+                   # and persist the precise reason. Without this line the
+                   # generic value overwrites it and hard_facts read "seats
+                   # died after double failures" for a run that was never
+                   # runnable and never asked anyone for a turn -- exactly the
+                   # conflation TERMINATION_REASONS' comment forbids.
+                   (inferred == "starved" and termination == "seat_count"))
         if not precise:
             termination = inferred
 

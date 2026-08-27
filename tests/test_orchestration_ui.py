@@ -64,8 +64,11 @@ class OrchestrationUiTests(unittest.TestCase):
     def test_hand_edited_axes_read_as_custom_on_the_pill(self):
         # presetForCurrentRecipe's custom verdict must reach the ONE visible
         # surface now: no row is highlighted and the label says Custom.
-        self.assertIn('known ? MODE_SHORT[value] : "Custom"', self.source)
+        self.assertIn('known ? modeShortName(value) : "Custom"', self.source)
         self.assertIn('"Custom"', self.source)
+        # modeShortName is only a solo-aware wrapper over the same table
+        self.assertIn('return (soloStage() && m && m.soloName) || MODE_SHORT[v];',
+                      self.source)
 
     def test_choosing_the_moderator_is_a_primary_control(self):
         # It used to be reachable only by opening Advanced and finding "Who

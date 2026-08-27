@@ -547,7 +547,10 @@ def test_playbook_feeds_the_planner():
        "rules are advisory — a stale heuristic must not override the goal")
 
     # and it actually lands in the composed planning prompt
+    voice = relay.SUPERVISOR_VOICE["team"]
     prompt = relay.SUPERVISOR_PROMPT.format(roster="r", playbook=block,
+                                            intro=voice["plan_intro"],
+                                            teamwork=voice["plan_teamwork"],
                                             goal="build a thing")
     ok("Verify claimed files" in prompt and "build a thing" in prompt,
        "the planner is given the learned rules alongside the goal")

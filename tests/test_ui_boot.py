@@ -1417,6 +1417,88 @@ if (topLevelError) {
       [...byId['feed'].querySelectorAll('.refusal-pill')].length === before;
   } catch (e) { more.refusalError = (e && e.stack) || String(e); }
 
+  // ---- ONE seat: Alloy as a harness for a single agent ---------------------
+  // Deliberately the LAST probe: it removes seat cards, and every earlier
+  // block assumes the three-seat boot roster.
+  try {
+    more.solo = {};
+    const cards = [...document.querySelectorAll('.seat')];
+    // the rail's own remove handler, not a shortcut past it
+    cards.slice(1).forEach(c => c.querySelector('.rm').onclick());
+    more.solo.seatsLeft = document.querySelectorAll('.seat').length;
+    more.solo.isSolo = ctx.soloStage();
+    ctx.renderModePick();
+    const rows = [...byId['modeOptList'].children].map(b => ({
+      mode: b.getAttribute('data-mode'),
+      name: b.querySelector('b').textContent,
+      desc: b.querySelector('.mode-desc').textContent,
+      off: !!b.disabled,
+    }));
+    more.solo.rows = rows;
+    // clicking a refused row must change nothing
+    const arena = [...byId['modeOptList'].children]
+      .find(b => b.getAttribute('data-mode') === 'arena');
+    const wasPreset = ctx.selectedPreset();
+    if (arena) arena.onclick();
+    more.solo.presetAfterRefusedClick = ctx.selectedPreset();
+    more.solo.presetWas = wasPreset;
+    ctx.normalizePolicyControls();
+    more.solo.policyReason = byId['policyReason'].textContent;
+    more.solo.modToggleHidden = !!byId['modToggleRow'].hidden;
+    ctx.syncRoundsCtl();
+    more.solo.roundsLabel = byId['roundsLabel'].textContent;
+    ctx.renderEmptyRoster();
+    more.solo.headline = byId['emptyH2'] ? byId['emptyH2'].textContent : null;
+    const stopBtn = document.querySelectorAll('.seat-stop')[0];
+    more.solo.stopTitle = stopBtn ? stopBtn.title : null;
+    more.solo.pillLabel = byId['modePickLabel'].textContent;
+    more.solo.refusals = {
+      openDiscussion: ctx.presetSeatRefusal('open_discussion', 1),
+      buildExecute: ctx.presetSeatRefusal('build_execute', 1),
+      keepImproving: ctx.presetSeatRefusal('keep_improving', 1),
+      arena: ctx.presetSeatRefusal('arena', 1),
+      liveRoom: ctx.presetSeatRefusal('live_room', 1),
+      panel: ctx.presetSeatRefusal('panel_review', 1),
+      zero: ctx.presetSeatRefusal('open_discussion', 0),
+      arenaAtTwo: ctx.presetSeatRefusal('arena', 2),
+    };
+    // a hand-tuned recipe reads as "custom" and has no preset rule of its
+    // own: the live mode has to answer for it
+    byId['modeSel'].value = 'free';
+    more.solo.customFree = ctx.presetSeatRefusal('custom', 1);
+    byId['modeSel'].value = 'battle';
+    more.solo.customBattle = ctx.presetSeatRefusal('custom', 1);
+    byId['modeSel'].value = 'free';
+    more.solo.namedWhileFree = ctx.presetSeatRefusal('open_discussion', 1);
+    byId['modeSel'].value = 'battle';
+    more.solo.namedWhileBattle = ctx.presetSeatRefusal('build_execute', 1);
+    byId['modeSel'].value = 'panel';
+    more.solo.customPanel = ctx.presetSeatRefusal('custom', 1);
+    byId['modeSel'].value = 'round_robin';
+    more.solo.customRoundRobin = ctx.presetSeatRefusal('custom', 1);
+    // a moderated solo room must keep the switch that turns it off, and the
+    // drawer must say what it costs
+    byId['floorSel'].value = 'moderated';
+    ctx.normalizePolicyControls('floorSel');
+    more.solo.modRowHiddenWhenModerated = !!byId['modToggleRow'].hidden;
+    more.solo.moderatedReason = byId['policyReason'].textContent;
+    // a reactive solo recipe must say it will not start
+    byId['floorSel'].value = 'fair';
+    ctx.normalizePolicyControls('floorSel');
+    more.solo.reactiveReason = byId['policyReason'].textContent;
+    // a roster change re-describes; it must not erase the badge explaining a
+    // move the user was just shown
+    ctx.applyPreset('open_discussion');
+    byId['completionSel'].value = 'moderator';
+    ctx.advancedPolicyChanged('completionSel');
+    more.solo.badgeBefore = byId['policyChanges'].textContent;
+    ctx.rosterChanged();
+    more.solo.badgeAfterRoster = byId['policyChanges'].textContent;
+  } catch (e) { more.soloError = (e && e.stack) || String(e); }
+  // Put the boot roster back: report() reads the LIVE DOM, so leaving the
+  // stage solo would hand every other test in this file a one-seat page.
+  try { ctx.addSeat('gpt'); ctx.addSeat('gemini'); } catch (e) {}
+
   report({bootRan: fns.length > 0, bootError, more});
 })();
 """
@@ -1438,6 +1520,115 @@ def boot(html_path, workdir):
             "harness failed (rc=%s)\nstdout: %s\nstderr: %s"
             % (out.returncode, out.stdout[-2000:], out.stderr[-2000:]))
     return json.loads(out.stdout)
+
+
+@unittest.skipUnless(NODE, "node not installed")
+class SoloStageUiTests(unittest.TestCase):
+    """One agent on the stage, driven through the REAL script.
+
+    Static source guards live in tests/test_solo.py; these are the ones only
+    an executing page can answer -- that the rail really reaches one seat,
+    that the mode menu repaints itself for that roster, and that a refused row
+    cannot be clicked into the state anyway."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.solo = boot(UI, cls._tmp.name)["solo"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_the_rail_really_reaches_one_seat(self):
+        self.assertEqual(self.solo["seatsLeft"], 1)
+        self.assertTrue(self.solo["isSolo"])
+
+    def test_the_modes_that_still_work_stay_offered(self):
+        # panel included: draft -> self-critique -> synthesis is a real
+        # technique, the engine runs it solo, and refusing it only in the UI
+        # meant one Josh-facing string promised a run another one refused.
+        by = {r["mode"]: r for r in self.solo["rows"]}
+        for mode in ("open_discussion", "build_execute", "keep_improving",
+                     "panel_review"):
+            self.assertFalse(by[mode]["off"], mode)
+
+    def test_the_modes_that_need_peers_say_why_and_cannot_be_picked(self):
+        by = {r["mode"]: r for r in self.solo["rows"]}
+        for mode in ("live_room", "arena"):
+            self.assertTrue(by[mode]["off"], mode)
+            self.assertIn("agents", by[mode]["desc"], mode)
+        self.assertEqual(self.solo["presetAfterRefusedClick"],
+                         self.solo["presetWas"],
+                         "a refused row must not change the recipe")
+
+    def test_the_offered_rows_read_for_one_agent(self):
+        by = {r["mode"]: r for r in self.solo["rows"]}
+        self.assertEqual(by["open_discussion"]["name"], "Work in Turns")
+        self.assertEqual(by["build_execute"]["name"], "Plan and Build")
+        self.assertEqual(by["panel_review"]["name"], "Draft, Critique, Finalise")
+        self.assertEqual(self.solo["pillLabel"], "Work in Turns")
+
+    def test_the_supporting_copy_stops_describing_a_crowd(self):
+        self.assertIn("One agent", self.solo["policyReason"])
+        self.assertNotIn("every AI", self.solo["policyReason"])
+        self.assertIn("Turns", self.solo["roundsLabel"])
+        self.assertNotIn("each seat speaks", self.solo["roundsLabel"])
+        # NOT "every tool Alloy has": desktop, browser and connectors reach
+        # claude seats only (relay.MCP_DELIVERING_PROVIDERS), so a headline
+        # keyed on seat COUNT would over-claim for a solo GPT/Gemini/Ox stage.
+        self.assertEqual(self.solo["headline"], "One agent. Your project.")
+        # ...and says what stopping the ONLY agent actually does: the
+        # sequential floor parks it and the run ends.
+        self.assertEqual(
+            self.solo["stopTitle"],
+            "Stop — cancel this turn; with one agent that also pauses the run")
+
+    def test_the_moderator_toggle_is_gone_at_one_seat(self):
+        self.assertTrue(self.solo["modToggleHidden"])
+
+    def test_the_refusal_table_agrees_with_the_menu(self):
+        r = self.solo["refusals"]
+        for key in ("openDiscussion", "buildExecute", "keepImproving",
+                    "arenaAtTwo", "panel"):
+            self.assertEqual(r[key], "", key)
+        for key in ("arena", "liveRoom"):
+            self.assertTrue(r[key], key)
+        self.assertEqual(r["zero"], "Pick at least one participant.")
+
+    def test_a_hand_tuned_custom_recipe_is_judged_by_its_mode(self):
+        self.assertTrue(self.solo["customFree"])
+        self.assertTrue(self.solo["customBattle"])
+        self.assertEqual(self.solo["customRoundRobin"], "")
+        # panel is NOT in the table: the engine runs it solo, so refusing it
+        # here would make one Josh-facing string promise what another refuses
+        self.assertEqual(self.solo["customPanel"], "")
+
+    def test_a_named_preset_never_inherits_another_modes_rule(self):
+        """The fallback is for "custom" only. Keying it on "has no rule"
+        instead made every rule-free preset inherit the live mode's rule, so
+        removing a seat while Talk Live was selected greyed out every row of
+        the pill -- including the three solo exists for -- each labelled with
+        Talk Live's reason, leaving no clickable way out."""
+        for key in ("namedWhileFree", "namedWhileBattle"):
+            self.assertEqual(self.solo[key], "", key)
+
+    def test_a_moderated_solo_room_keeps_its_off_switch_and_says_the_cost(self):
+        """Hiding the row hid the OFF switch without clearing the setting:
+        moderation kept running, its provider picker stayed on screen, and the
+        solo sentence denied the moderator existed."""
+        self.assertFalse(self.solo["modRowHiddenWhenModerated"])
+        self.assertIn("moderator", self.solo["moderatedReason"])
+        self.assertIn("per turn", self.solo["moderatedReason"])
+
+    def test_a_solo_reactive_recipe_says_it_will_not_start(self):
+        self.assertIn("will not start", self.solo["reactiveReason"])
+
+    def test_a_roster_change_keeps_the_badge_that_explains_a_move(self):
+        """orchestrationCfg's own comment states the rule: an anchorless
+        normalize wipes the badges that say what the app moved for you."""
+        self.assertTrue(self.solo["badgeBefore"])
+        self.assertEqual(self.solo["badgeAfterRoster"], self.solo["badgeBefore"])
 
 
 @unittest.skipUnless(NODE, "node not installed")

@@ -2035,7 +2035,7 @@
       <div id="feed" tabindex="0" aria-label="Conversation transcript">
         <div class="empty" id="emptyState">
           <div class="dots"><i></i><i></i><i></i></div>
-          <h2>Different metals. One alloy.</h2>
+          <h2 id="emptyH2">Different metals. One alloy.</h2>
           <p>Type your opening message below and hit Send — that starts the
              conversation. Anything you type after that joins as an interjection,
              and when a run ends, keep typing to continue it. Shift+Enter adds a
@@ -4587,6 +4587,31 @@ const PRESET_NOTES = Object.freeze({
   arena: "Exactly two seats answer unseen; you vote blind (A/B/tie/bad), identities reveal, and Elo accumulates.",
 });
 
+const PRESET_MIN_SEATS = Object.freeze({
+  live_room: {min: 2, why: "Needs 2+ agents — it works by agents reacting to each other."},
+  arena: {min: 2, why: "Needs exactly 2 agents — a blind A/B vote needs two answers."},
+});
+// Hand-edited axes read as "custom", which has no entry above -- so a recipe
+// tuned in the Advanced drawer to a two-seat-only mode would sail past Send
+// and be refused by the bridge instead. Fall back to the live mode when the
+// preset itself carries no rule; a KNOWN preset always wins, and the modes
+// with rules are never reachable under a preset that has none.
+const MODE_TO_PRESET = Object.freeze({free: "live_room", battle: "arena"});
+function presetSeatRefusal(preset, n) {
+  // The fallback is for "custom" ONLY -- a recipe with no preset of its own.
+  // Keying it on "has no rule" instead made every rule-free preset inherit
+  // whatever the live mode's rule was, so removing a seat while Talk Live was
+  // selected disabled every row of the pill, including the ones solo is for.
+  const rule = PRESET_RECIPES[preset]
+    ? PRESET_MIN_SEATS[preset]
+    : PRESET_MIN_SEATS[MODE_TO_PRESET[$("modeSel").value]];
+  if (n < 1) return "Pick at least one participant.";
+  return (rule && n < rule.min) ? rule.why : "";
+}
+// One agent is a supported shape, not a broken room: Alloy is also a harness
+// for a single agent. Everything the pill and the Advanced drawer say about
+// "everyone", "each other" and turn order has to change with it.
+function soloStage() { return enabledSeats().length === 1; }
 function selectedPreset() { return $("presetSel").value || "open_discussion"; }
 function setSelectedPreset(value) {
   if (value !== "custom" && !PRESET_RECIPES[value]) value = "open_discussion";
@@ -4594,7 +4619,7 @@ function setSelectedPreset(value) {
   // the composer pill is the one visible surface now (the old card grid is
   // gone): repaint its icon + name, "Custom" when the axes match no preset
   const known = value !== "custom";
-  $("modePickLabel").textContent = known ? MODE_SHORT[value] : "Custom";
+  $("modePickLabel").textContent = known ? modeShortName(value) : "Custom";
   $("modePickIcon").innerHTML =
     (MODE_PRESETS.find(m => m.v === value) || {}).icon || "";
 }
@@ -4606,19 +4631,26 @@ function setSelectedPreset(value) {
    restore paths and cfg keys are all untouched by the relocation. */
 const MODE_PRESETS = [
   {v: "open_discussion", name: "Discuss in Turns",
+   soloName: "Work in Turns",
+   soloDesc: "Give it a task and work through it turn by turn.",
    icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.5h11v7h-6l-3 2.8v-2.8h-2z"/></svg>',
    desc: "Ask questions and think together in an orderly conversation."},
   {v: "live_room", name: "Talk Live",
    icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 1.5 3.5 9H8l-.9 5.5L13 7H8z"/></svg>',
    desc: "Everyone responds whenever ready — faster, but less orderly."},
   {v: "panel_review", name: "Compare & Decide",
+   soloName: "Draft, Critique, Finalise",
+   soloDesc: "It drafts, critiques its own draft, then writes the final answer (3 calls).",
    icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v11M3 4.5h10M3 4.5l-1.6 3.6a2.1 2.1 0 0 0 3.2 0zM13 4.5l-1.6 3.6a2.1 2.1 0 0 0 3.2 0zM5.5 13.5h5"/></svg>',
    desc: "Get separate answers, critiques, and one final recommendation."},
   {v: "build_execute", name: "Build Together",
+   soloName: "Plan and Build",
+   soloDesc: "It plans the work, does it, and verifies the files it wrote.",
    icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 13.5v-4h4v4zM6 9.5v-4h4v4M9.5 5.5v-3h4v7h-4"/></svg>',
    desc: "Split real work and create verified files in your folder."},
   {v: "keep_improving", name: "Keep Improving",
    icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 1.5v3h-3"/></svg>',
+   soloDesc: "Works on your project non-stop, choosing its own next improvement, until you stop it.",
    desc: "Works on your project non-stop, inventing its own next improvements, until you stop it."},
   {v: "arena", name: "Arena Duel",
    icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13l7.5-7.5M13 13L5.5 5.5M4 2.5 2.5 4l2 2L6 4.5zM12 2.5l1.5 1.5-2 2L10 4.5z"/></svg>',
@@ -4629,10 +4661,17 @@ const MODE_SHORT = {open_discussion: "Discuss in Turns", live_room: "Talk Live",
                     build_execute: "Build Together",
                     keep_improving: "Keep Improving",
                     arena: "Arena Duel"};
+// The pill's own label follows the same rule as the menu rows.
+function modeShortName(v) {
+  const m = MODE_PRESETS.find(x => x.v === v);
+  return (soloStage() && m && m.soloName) || MODE_SHORT[v];
+}
 function renderModePick() {
   const cur = selectedPreset();
   const list = $("modeOptList");
   list.innerHTML = "";
+  const n = enabledSeats().length;
+  const solo = soloStage();
   for (const m of MODE_PRESETS) {
     const b = document.createElement("button");
     b.type = "button";
@@ -4645,10 +4684,20 @@ function renderModePick() {
     b.innerHTML = '<span class="mode-check">' + (on ? "✓" : "") + '</span>' +
       '<span class="mode-ico">' + m.icon + '</span>' +
       '<span class="mode-main"><b></b><span class="mode-desc"></span></span>';
-    b.querySelector("b").textContent = m.name;
-    b.querySelector(".mode-desc").textContent = m.desc;
+    b.querySelector("b").textContent = (solo && m.soloName) || m.name;
+    // A mode this roster cannot run says so IN PLACE OF its pitch, and stops
+    // being clickable -- an unavailable row that still reads like an offer is
+    // the over-claim this repo keeps paying for.
+    const why = presetSeatRefusal(m.v, n);
+    b.querySelector(".mode-desc").textContent =
+      why || (solo && m.soloDesc) || m.desc;
+    if (why) {
+      b.disabled = true;
+      b.classList.add("mode-off");
+      b.setAttribute("aria-disabled", "true");
+    }
     b.onclick = () => {
-      if ($("modePickBtn").disabled) return;
+      if ($("modePickBtn").disabled || why) return;
       applyPreset(m.v);
       closeModeMenu();
     };
@@ -4766,7 +4815,11 @@ function renderBackendAdjustments(changes) {
 }
 // Badges beside the controls that MOVED, plus one summary line. Nothing is
 // hidden and nothing is silently replaced: if a setting changed, it says so.
+let policyDescribeOnly = false;   // declared above its reader on purpose
 function showPolicyAdjustments(moved, anchor, workflow) {
+  // A roster change re-describes the recipe; it did not MOVE anything, so it
+  // must not clear the badges explaining a move the user was just shown.
+  if (policyDescribeOnly) return;
   POLICY_IDS.forEach(id => {
     const label = $(id).closest("label");
     if (!label) return;
@@ -4797,6 +4850,32 @@ function modeForPolicy() {
   if ($("floorSel").value === "nomination") return "speaker";
   if ($("floorSel").value === "moderated") return "moderator";
   return "round_robin";
+}
+const SOLO_POLICY_REASON = Object.freeze({
+  conversation: "One agent, one turn at a time. Everything you send goes "
+    + "straight to it and everything it says comes straight back.",
+  supervisor: "A manager splits the job into tasks, the agent works through "
+    + "them in your folder, and the manager checks the files before handing "
+    + "out the next wave.",
+  panel: "With one agent this becomes a draft, then a critique of that draft, "
+    + "then a final answer — all written by the same agent.",
+  battle: "Arena Duel needs two agents; with one there is nothing to vote "
+    + "between.",
+});
+// The floor still matters at one seat, and keying only on the workflow erased
+// it: a moderated solo room spends a real side call before every turn (which
+// can also end the run), and a reactive one will not start at all.
+function soloPolicyReason(workflow) {
+  if (workflow !== "conversation") return SOLO_POLICY_REASON[workflow]
+    || SOLO_POLICY_REASON.conversation;
+  if ($("concurrencySel").value === "reactive")
+    return "Talk Live needs two or more agents — with one it stops before "
+      + "the agent ever speaks, so this will not start.";
+  if ($("floorSel").value === "moderated")
+    return "One agent, plus a separate moderator AI that decides before every "
+      + "turn whether the work is finished — one extra billed call per turn, "
+      + "with only one agent for it to choose from.";
+  return SOLO_POLICY_REASON.conversation;
 }
 // anchor = the id of the control the user just touched. It is preserved; every
 // OTHER setting adjusts around it and the move is shown. Called with no anchor
@@ -4885,6 +4964,12 @@ function normalizePolicyControls(anchor) {
   $("modeSel").value = modeForPolicy();
   showPolicyAdjustments(POLICY_IDS.filter(id => id !== anchor && $(id).value !== before[id]),
                         anchor, workflow);
+  // Every branch above is written for a crowd ("they all answer the same
+  // question", "no one may get more than the maximum lead ahead of the
+  // others", "every message goes to every AI"). With a roster of one they are
+  // false or vacuous, and this sentence is the one place the Advanced drawer
+  // explains itself.
+  if (soloStage()) reason = soloPolicyReason(workflow);
   $("policyReason").textContent = reason;
   $("synthCtl").hidden = workflow !== "panel";
   syncModCtl(); updateSynthOptions(); updateCallEstimate();
@@ -5040,6 +5125,18 @@ function refreshSeatNames() {
   syncHistoryLens();
   updateSynthOptions();
   updateCallEstimate();
+  rosterChanged();
+}
+// Everything that reads the ROSTER rather than a single seat. Called from
+// refreshSeatNames (add/remove/rename) and from the Include checkbox, because
+// a solo stage has to change the composer's wording, not just its dots.
+// normalizePolicyControls is safe to call with no anchor: it re-describes the
+// current recipe and clears its own adjustment badges.
+function rosterChanged() {
+  setSelectedPreset(selectedPreset());
+  policyDescribeOnly = true;
+  try { normalizePolicyControls(); } finally { policyDescribeOnly = false; }
+  syncRoundsCtl();
 }
 
 function syncHistoryLens() {
@@ -5091,6 +5188,25 @@ $("historyLens").onchange = () => { applyHistoryLens(); stickBottom(true); };
 // its real provider color. Dynamic on purpose — the fixed wordmark trefoil
 // is the logo and never encodes a seat count (BRANDING.md).
 function renderEmptyRoster() {
+  const on = seats.filter(s => s.el.querySelector(".switch").checked);
+  const solo = on.length === 1;
+  // "Different metals. One alloy." is the app's thesis about being a
+  // multi-model room, and it is simply false on a solo stage — where it is
+  // also the first thing anyone reads. Written BEFORE the dots cluster is
+  // looked up, so a missing cluster cannot take the headline down with it.
+  const h2 = $("emptyH2");
+  if (h2) h2.textContent = solo
+    ? "One agent. Your project."
+    : "Different metals. One alloy.";
+  // The per-seat bench button promises the conversation survives; with one
+  // seat there is nothing left to survive (and the sequential floor parks the
+  // only seat, ending the run).
+  seats.forEach(x => {
+    const b = x.el && x.el.querySelector(".seat-stop");
+    if (b) b.title = solo
+      ? "Stop — cancel this turn; with one agent that also pauses the run"
+      : "Stop — bench only this agent; the conversation continues";
+  });
   const el = document.querySelector(".empty .dots");
   if (!el) {
     // normal once a conversation replaces the empty state — warn only on
@@ -5098,14 +5214,13 @@ function renderEmptyRoster() {
     if ($("emptyState")) console.warn("renderEmptyRoster: .empty .dots anchor missing");
     return;
   }
-  const on = seats.filter(s => s.el.querySelector(".switch").checked);
   el.innerHTML = (on.length ? on : seats)
     .map(s => `<i style="--rc:var(--${s.provider})"></i>`).join("");
   // the cluster is dots-only visually; give it a spoken/hovered meaning so
   // the empty state explains itself instead of decorating
   const names = (on.length ? on : seats).map(seatDisplayName).join(", ");
   const what = on.length
-    ? "In the room: " + names
+    ? (solo ? "Working with: " + names : "In the room: " + names)
     : "Default lineup (toggle seats to change): " + names;
   el.title = what;
   el.setAttribute("aria-label", what);
@@ -5162,6 +5277,7 @@ function addSeat(provider, forceId) {
     d.classList.toggle("off", !e.target.checked);
     renderEmptyRoster();
     updateSynthOptions(); updateCallEstimate();
+    rosterChanged();
   };
   d.querySelector(".rm").onclick = () => {
     seats = seats.filter(s => s !== seat);
@@ -5219,7 +5335,12 @@ function syncModCtl() {
   const workflow = $("workflowSel").value;
   // Only where the floor is actually a choice: a Panel answers as a whole and
   // a Build Together room is run by its supervisor by definition.
-  $("modToggleRow").hidden = workflow !== "conversation";
+  // Not OFFERED at one seat -- a moderated floor there spends a real CLI call
+  // every turn to choose between one candidate. But never hide a switch that
+  // is currently ON: doing that left moderation running, its provider picker
+  // on screen, and no way to turn either off.
+  $("modToggleRow").hidden = workflow !== "conversation"
+    || (soloStage() && $("floorSel").value !== "moderated");
   $("modOn").checked = $("floorSel").value === "moderated";
   $("modOn").disabled = seated;
   $("modCtl").hidden = !on;
@@ -6615,8 +6736,12 @@ async function sendSay() {
     return;
   }
   const enabled = seats.filter(s => s.el.querySelector(".switch").checked);
-  if (enabled.length < 2) {
-    addMsg("system", "relay", "Pick at least two participants.", "");
+  // ONE agent is a conversation. What is left is the per-mode rule, and it is
+  // the SAME rule the pill paints -- so what the menu will not let you pick,
+  // Send will not let you run, with the same sentence.
+  const seatWhy = presetSeatRefusal(selectedPreset(), enabled.length);
+  if (seatWhy) {
+    addMsg("system", "relay", seatWhy, "");
     return;
   }
   if (authBlocked(enabled.map(s => s.provider))) return;
@@ -7009,7 +7134,9 @@ function syncRoundsCtl() {
     $("roundsLabel").textContent = "Safety ceiling — hard stop after N turns";
     if (document.activeElement !== box) box.value = ceiling;
   } else {
-    $("roundsLabel").textContent = "Rounds — each seat speaks once per round";
+    $("roundsLabel").textContent = soloStage()
+      ? "Turns — how many turns the agent gets"
+      : "Rounds — each seat speaks once per round";
     if (document.activeElement !== box) box.value = rounds;
   }
   if ($("callEstimate")) updateCallEstimate();

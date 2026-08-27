@@ -2,7 +2,8 @@
 
 Claude (Claude Code CLI, Max), GPT (OpenAI Codex CLI, ChatGPT Pro), Gemini
 (Google Antigravity CLI `agy`, free Google login) and Ox (OpenCode CLI on
-OpenCode Zen's free models, no account at all) hold autonomous conversations.
+OpenCode Zen's free models, no account at all) hold autonomous conversations
+— **or one of them works alone, with Alloy as its harness** (§ Solo seat).
 **No API keys anywhere** — every agent authenticates through its official CLI's
 account login. Built 2026-08-16. Owner: Josh.
 
@@ -26,7 +27,7 @@ account login. Built 2026-08-16. Owner: Josh.
 | `ui/index.html` | Single-file UI (inline CSS/JS, local fonts only). A 224px chat-history rail lists saved sessions Claude-app-style: single-line rows (provider dots + ellipsized title; time/seats/view-only live in the tooltip) grouped under collapsible per-project headers — `session_summary` computes `project` via `relay.session_project` (basename of a CUSTOM working folder; the default in-session workspace ⇒ "" ⇒ the "No project" group), groups rank by their newest chat, collapse state persists best-effort in localStorage. Rows keep replay, active selection, dblclick-rename, two-step delete, and view-only legacy chats. The seat rail supports dynamic/duplicate seats with model + thinking pickers, rounds, working-folder picker, yolo toggle, and live thinking state; the seat-name heading is an editable input — the auto name ("Claude 2") is its *placeholder*, typed text becomes the seat's explicit label (`cfgFor` sends it as `label`, engine-side `assign_labels` takes it as-is and rejects duplicates), and `restoreSeats` writes a saved name into the box only when it differs from the auto placeholder so reopened auto-named seats keep renumbering; reopening restores original seat ids/models so events and captions remain truthful. No topic box: the first message typed into the chat bar starts the conversation (cfg key `opener`). After a run ends (`done` carries `can_continue`), the next non-`/` message calls `continue_chat`; messages starting `/` route to `api.command()`. Accounts live in a modal (`#acctModal`), opened by the sidebar-bottom `#acctBtn` button whose red badge counts seatable providers that are signed_out/not_installed; `renderAccounts` is registry-driven from `auth_status`. Roles are edited in a shared modal (`#roleModal`), opened from a slim per-card `.role-btn` showing the current role; role name + instructions live on the seat JS object (`seat.role`/`seat.roleInst` — `cfgFor`/`restoreSeats`/`roleApplied` all go through it, never through card inputs). Closing the modal commits only while un-seated; once a conversation exists (`setSeated`) the modal shows **Apply role change** instead — role edits cost a CLI turn, so they are never autosaved. `#seatList.locked` re-enables pointer events for `.role-btn` only. Message captions show the role from the stored row, never live seat config. The **mode picker is a composer-bar pill** (`#modePickBtn`/`#modePickMenu`, mirroring the permission pill; 2026-08-25 redesign): five modes — Discuss in Turns / Talk Live / Compare & Decide / Build Together / Keep Improving — one row each with icon + one-line description; a row click calls `applyPreset`, hand-edited axes read "Custom" with no row highlighted, and the pill locks once seated. The old five-card `#presetGrid` is GONE from the rail (`preset-card`/`preset-grid` must not reappear — test_orchestration_ui pins their absence); `#presetSel` stays the hidden state holder and all preset logic (`PRESET_RECIPES`/`presetForCurrentRecipe` incl. the `contOn` comparison/`applyPreset`'s contPrevPreset capture) is unchanged, only its visuals target the pill. The rail's **Conversation** group keeps only contextual controls, all locked once seated (`setSeated`) and restored truthfully when a chat is reopened: the hidden `#modeSel` (legacy compatibility recipe → cfg `mode`), `#modCtl` (moderator/supervisor provider+model+thinking picker → cfg `moderator`, defaults claude-haiku-4-5:low to match `build_moderator`, restored on reopen via `session_summary`'s `moderator` field with gemini slugs split back into family+level), the rounds stepper paired with `#untilDone` (checked ⇒ the same stepper becomes the safety-ceiling stepper via `syncRoundsCtl`, cfg `until_done`/`ceiling`), `#spawnSel` (helper budget) and `#teamSel` (team budget) → cfg `spawn: {tier1, max_helpers, max_teams}`. Typing indicators are a `Map` keyed by SEAT ID (`typingEls`, `showTyping(speakerId, provider, name)`/`hideTyping(seatId)`/`hideAllTyping()`) so parallel and free modes can show several seats thinking at once and duplicate-provider seats stay distinguishable; `addMsg` re-appends live indicators so they stay below new messages, and the round badge switches to `turn N/ceiling` for until-done runs. Message captions prefer the row's own `meta` (so helper rows read "helper for Claude"). Rail rows for spawned children show a ↳ prefix + "spawned by X" tooltip from `session_summary`'s `parent`. Composer extras: the box defaults to 96px min-height and `#sayGrip` (the grab bar above it) drags it taller — pointer-capture drag sets `sayMinH`, which `autoGrow` treats as the floor (the native corner grip also still works via the pointerup fallback); a 📎 button + paste handler queue attachments as base64 chips (`pendingAtt`) that ride with start/continue/interject and land in `<workspace>\attachments\` via `app.save_attachments` — message text gains `[Josh attached a file: <path>]` lines (`with_attachments`), so agents/transcript/replay all see them. Rails collapse from a `«` button ON each rail (`bindRail`); a collapsed rail is a 22px `.rail-reopen` strip whose click re-expands it — the `«` handler must stopPropagation or the same click bubbles to the strip listener and reopens instantly. Seat renaming has a ✎ button (`.rn`) that focuses the name input. Under the working-folder picker, `#projBrief` ("Share the folder's AI docs with every seat", cfg key `brief`) is locked by `setSeated` like the other conversation-level controls and restored from `session_summary`'s `brief` record, so a reopened chat truthfully shows whether its seats were ever given project context. **Skimmability**: `md()` peels TRAILING directives via `peelDirs` (a JS mirror of `peel_directives` — last-`[[`-anchored, end-only, ≤4) and renders them as `.dir-chip` pills ("asks Josh: …", "next: GPT", "wrap"); mid-reply mentions stay as raw text because they didn't fire; `==text==` renders as a seat-tinted `<mark>` (the preamble tells seats to mark at most one key line per reply). **Ask modal** (`#askModal` + `#askPill`): a `question` event opens a seat-colored modal — option chips answer instantly, `#askOther` is the free-text "Other" box (Enter sends), Skip answers empty; ✕/backdrop/Escape only HIDE it (the wait is engine-side) leaving the composer pill to reopen; `question_done` clears both unconditionally. **File & image viewing**: `addMsg` scans bodies (`findImageRefs` → `[{path, strict}]`: markdown image links + `[Josh attached a file: …]` + paths with ≥1 separator are STRICT (a load failure shows the quiet placeholder), a bare `name.png` in prose is LOOSE (a load failure removes the cell silently — a seat musing about "logo.png" must not leave a broken thumbnail), loose refs dedupe by basename so "saved as [x.png](C:\…\x.png)" yields ONE thumbnail. The drive letter must consume its own slash in that path regex — `(?:[A-Za-z]:)?` before `(?:[\w.\-]+[\\/])+` silently matched `C:\Users\x.png` starting at "Users", handing the bridge a relative path that resolved nowhere, i.e. every absolute path a seat reported — which is exactly how GPT reports the images it generates — rendered as "image no longer available") and renders `.img-thumb` strips via `fetchImage` (per-chat `imgCache`, cleared whenever the workspace boundary changes) — failures render a quiet `.img-missing` placeholder, never a broken tag; click opens `#lightbox` (full-res fetch). `#fileRail` (right side, same `bindRail` pattern) lists the working folder newest-first with thumbnails/type icons, click-to-preview, Open-in-OS; refreshes debounced on message events. Every `.msg` is `user-select: text` and carries a `.copy-btn` (clipboard API with execCommand fallback). **Skills & Connections** (`#skillModal`, `.modal.wide`, opened by `#skillBtn` above `#acctBtn`; add any new modal id to BOTH the `display:none` and `.show` selectors and to the one shared Escape listener): the Skills tab lists one row per skill NAME with a provider dot per CLI that has it (hollow = missing) and ⚠ when the copies diverge, an editor (name/description/body + per-provider checkboxes) whose **Save reconciles the ticked set** — ticking installs, unticking removes — and an `#skSyncBtn` "Install to GPT and Gemini" that just ticks the missing boxes and calls the same `saveSkill()`, so there is no second code path. `#skExtras` states the sidecar count BEFORE the click, since those files travel with it. The Connections tab is per-provider on purpose (the backends differ, and a merged list would invite a "sync everywhere" action that is actively wrong); the stdio Add button is a two-step arm showing the exact command that will run locally, disarmed whenever the command changes, and skipped entirely for http/sse where nothing executes. **Timestamps**: `addMsg(..., ts)` renders the row's `ts` as a right-aligned HH:MM (`.mtime`, full stamp in the tooltip); old rows without `ts` show nothing. **Live activity**: `activity` events append `.act-line`s (last ~6) to the seat's typing indicator (`typingActivity`); when the message lands, the ROW's persisted `activity` renders as a collapsed `.think-block` `<details>` ("X worked through N steps") above the body — replay included; everything escaped (command lines are arbitrary CLI text). **Live code viewer** (`#codePane` inside `#fileRail`): `kind:"edit"` activity marks the rail row `.editing` (provider-color border + ✎, ~6s expiry in the `editing` map) and auto-opens/refreshes the pane (`openCode`/`fetchCode` via `api.read_text`) — prev snapshot line-diffed (common prefix/suffix), changed band highlighted in the editing seat's color + scrolled into view, ~700ms poll only while a seat is mid-turn (catches Gemini, which has no stream) — the re-render guard compares CONTENT, not mtime, because the poll and the edit event race for the same write and a second render of identical text erases the highlight the first one just drew (caught only by driving the real UI, 2026-08-17), "follow" checkbox pins a file, non-image rail rows open here (OS-open fallback for binary). `resetEditing()` runs beside every `imgCache.clear()` — workspace boundary changes clear the map and close the pane. `scheduleFilesRefresh(ms)` takes a delay; edit activity uses 300ms. **Dictation**: `#micBtn` beside 📎 — hold to talk, a tap under 350 ms latches (click again to finish), Ctrl+Shift+Space toggles, Escape cancels; `onDictation` paints the button and `insertDictation` puts the text at the CARET in `#say` and never auto-sends. A soft outcome ("too short", "nothing heard") lives on the button for 4 s rather than littering the transcript with rows; only `error` becomes a system row. `applyDictationConfig` runs from the `pywebviewready` handler (TDZ rule) and leaves the button visible-but-disabled with the reason in its tooltip when the probe says no. **Alloy branding** (BRANDING.md): title/h1 "Alloy", wordmark = fixed trefoil (data-URI PNG from `branding/trefoil_v2.py`, never encodes seat count), empty-state h2 "Different metals. One alloy." with a DYNAMIC roster cluster (`renderEmptyRoster` — one dot per enabled seat, real provider colors), `--alloy` #F4B942 = app chrome (wordmark h1, Send, round badge, focus rings, checkboxes), `--josh` #C9B896 warm bone; provider colors stay participants-only. **Rounds are typable**: `#rVal` is a real `<input>` (not the old `<b>` written with `.textContent`) — `type="text"`+`inputmode`, never `type="number"` (WebView2 draws duplicate spinners and reports `""` for partial input, which makes clamp-on-blur lie). `commitRounds` clamps on commit and REPAINTS the clamped value so a refused number is visible; `syncRoundsCtl` skips the write while the box has focus, and the boot paint lives at the END of the script with `addSeat(…)`. `openChat` no longer pre-paints before `restoreOrchestration` restores the numbers. **Keep Improving** is a fifth preset card whose selection opens `#contModal`, the warning modal: check-in interval + the Automatic/Notify/Ask-permission radio, three independent limit rows (spend, hours, may-the-check-in-stop-it), the verification command and commit checkboxes, and an acknowledgement checkbox that is the ONLY thing enabling OK — whose wording changes when every limit is off, because a run nothing can stop is a different promise. Cancel/Escape/backdrop revert the preset rather than leaving it selected. `contOn`/`contCfg` are the single source of truth (`continuousCfg()` builds the payload, nulls meaning no limit); `#contSummary` states the configuration under the cards, `#contStrip` shows objective/wave/spend/next-check-in live, and a `notify` check-in adds a dismissible `#contBanner`. `restoreContinuous` puts a reopened chat back truthfully and `resetStage` clears it. **Narration rendering** (2026-08-26): `actLineHtml(a)` is the ONE renderer for a step - live indicator and finished row both - so the two cannot drift apart from the adapters. `ACT_ICONS` gives each kind a glyph (command deliberately has NONE, because its text already starts `$ `; the lookup uses `kind in ACT_ICONS`, not `||`, or an intentionally empty icon falls back to the generic dot). `say`/`reasoning` render as italic prose rather than monospace - they are sentences, not command lines - and a `result` is dimmer and indented under its call so "searching ... / found 3" reads as one step; a `result` starting "failed" turns red. The live log keeps `ACT_LOG_MAX` (14) lines and SCROLLS instead of dropping at 6, and the typing header gained `N steps - on this M:SS` (`dataset.steps`/`stepat`, incremented only for real steps - a progress tick is a stopwatch, the same rule the engine's sink follows), because total age alone cannot tell a seat grinding through 40 tool calls from one wedged on its first. **Relay-busy rows** (2026-08-25): `workingEls` (keyed by the engine's token id, so an open emitted before a chat had an id still pairs with a close emitted after) renders `.working` rows in the feed beside the typing indicators - alloy chrome, never a provider colour, because this is the APP working and not a participant - sharing the typing ticker for their age clocks and re-appended below each new message like `typingEls`. `WORK_GRACE_MS` (450) is the whole reason it is not noise: a row is not painted until it has been open that long, so a 40 ms moderator pick shows nothing and the 90-second plan stands out. `hideAllTyping` clears them (a spinner that outlives its run is worse than none), and `openChat` replays `r.working` the way it replays `r.thinking`. **Branching + rail extras** (2026-08-25): every persisted message row carries a ⑂ button (two-step arm) that forks the conversation up to and including that row via `api.fork_session` and opens the fork; every rail row gains ★ pin (`pinnedChats()` in localStorage, a "Pinned" group ranked just under "Needs input" — a question Josh must answer still outranks a chat he merely likes) and ⤓ export (`api.export_session` → `open_path` into the browser); rail tooltips show "branched from …" from `session_summary.fork_of` (additively allowlisted in RAIL_SUMMARY_FIELDS); `#soundBtn` toggles the engine's sound cues with the choice in localStorage. **Browser control** (2026-08-26) mirrors the desktop block one group down — `#browserMode` picker, `#browserSites`/`#browserSiteList`, `#browserNote`, the `#brwsModal` acknowledgement gate for the unattended rung (registered in all THREE places: the `display:none` list, the `.show` list, and the one Escape listener, with the same `.contains("show")` guard because closing REVERTS the picker), `browserPrev`/`restoreBrowser`/`browserSiteList`/`syncBrowserNote`, the two `.disabled = seated` lines, and the `browser`/`browser_sites` keys in BOTH cfg builders plus both restore call sites. Its own `browserPrev` on purpose — a shared revert target makes cancelling one modal move the other picker. Unlike the desktop allowlist, the site field shows at EVERY live rung, because with no sites Chrome reaches nothing. `#rungAdvisory` + `syncRungAdvisory()` state the honest ceiling under both pickers whenever the permission mode is Workspace or Full access. |
 | `launcher.ps1` | Console launcher (prompts for topic). ASCII-only on purpose. |
 | `sessions/` | One folder per conversation: `transcript.md` (human log), `messages.jsonl` (UI replay), `meta.json` (resumable state, **v2**), optional default `workspace/`, `project-context.md` (the exact shared-context text the seats were given, when the chat used a custom working folder), and `say.txt`. Old transcript-only folders remain listable as legacy/view-only; v1 metas stay continuable. Spawned teams (tier 3) are ordinary sessions in here too — child meta carries `parent: {id, seat, label}`, parent meta lists `children` (hints only: a child can be deleted). |
-| `tests/` | Token-free test suites, each a runnable script (`python tests/test_loop.py`): `test_loop` (shared loop), `test_scheduler` (meta v2 + resume), `test_modes` (directives, speaker, moderator), `test_until_done`, `test_parallel`, `test_free`, `test_spawn_tier1/_helpers/_teams`, `test_brief` (shared project context), `test_ask` ([[ASK]] questions to Josh), `test_bridge_files` (file/image viewing bridge: workspace confinement incl. `..`/absolute/junction escapes, MIME + size cap, thumbnails), `test_capabilities` (who-can-do-what routing), `test_skills` (skill authoring/sync + MCP management), `test_activity` (streaming runner via `python -c` children, adapter activity mapping for all three CLIs incl. the 2026-08-26 commentary and tool-result kinds, sink dedupe/cap/confinement AND the one-slot `say` hold that keeps a turn's final prose out of its own log, loop + persistence, read_text bridge), `test_app_headless` (real `app.Api` + fake window), `test_ui_boot` (EXECUTES `ui/index.html`'s inline script in node against a stub DOM — the only suite that can see a top-level JS throw, and the suite that drives a `dictation` event into the real composer; skips where node is absent), `test_dictation` (recorder state machine incl. the stop-during-open race, transcriber seam, probe honesty, bridge round trip), `test_continuous` (Keep Improving: policy normalization incl. all-limits-off, the unbounded ceiling, objective rollover, the closed remedy set, the three check-in actions incl. an unanswered one meaning SKIP, gate red/green/dirty/skip with `_gate_run`/`_git` stubbed, and the revival loop driven through a `_run_rounds` seam — a real continuous loop has no cap and would never return, which is exactly the property the revival layer exploits)), `test_watchdog` (the turn watchdog: a talking child outliving a window that would have killed it, the silence clock restarting on every line, stderr counting as liveness, the optional hard cap, per-adapter defaults, and probation reaching the ARMED window), `test_resilience` (what happens when the PROVIDER wobbles rather than Alloy breaking: `transient_error` classification, the backoff + probation window driven through the real loop, and `was_interrupted` — the killed-mid-run signal auto-resume keys on). `test_branching` (bridge level: real `Api.export_session`/`Api.fork_session` incl. the running-chat refusal, session_summary's `fork_of`, and the sound-cue path through the one emitter thread with `_play_cue` stubbed), `test_rooms` (saved room templates: store round trip/overwrite/trim-tie-break + bridge + UI markup guards), `test_hooks` (event hooks: config round trip, unknown-name rejection, env contract, timeout/swallow, emitter-thread non-blocking, wave_gate's new `gate` event), `test_auto_title` (the once-per-session title side call through the `LoopIO.auto_title` seam), `test_mention` (@-mention routing through `enqueue_josh_message` across all drain sites), `test_budget_bar` (usage event payload honesty, projection math edges, strip rendering), `test_working` (the relay's own busy indicator: the context manager's pairing/uniqueness/never-break contract, the CLI wording, and the real wired sites - moderator, planner, gate, auto-title, compact - each driven with a stubbed side agent), `test_desktop` (computer use: the five staleness refusals, LRU/expiry, RuntimeId re-resolution, both scroll paths agreeing via one shared table, type rollback incl. the failed-restore wording, coordinate-outside-rect, the self-approval refusal covering OBSERVERS too, password refusal + override, redaction, process-identity bracketing, truncation announcing itself, and a source grep proving no SendInput/SetForegroundWindow — all behind a FakeBackend, zero hardware), `test_desktop_mcp` (delivery: the four rungs, the allowlist, the approval channel's fail-closed paths, the argument fence proving the model cannot flip allow_password/strict_pixels, the meta round-trip, and a RED guard that a standing TURN verdict never answers a desktop request), `test_permissions` (the rung ladder AND — since 2026-08-26 — the app bridge: real `app.Api._conversation`/`_continue`/`open_session` with adapter subclasses whose only fake is `turn`, so the assertions read the SHIPPING `build_cmd`), `test_browser_mcp` (web use, behind a FakeVendor so no node and no Chrome: the fence argv incl. never-a-blocklist / empty-means-deny-all / the exact flag spelling, the site classifier's refusals and its resolution-based loopback detection, the self-test latching a session dead when the fence is absent, the reconciliation gate dropping a tool whose REQUIRED argument was renamed, the four rungs, the approval round trip, the argument fence, upload confinement, and the relay axis incl. the clamp and the advisory ceiling — twenty-three of its rules RED-verified by removing them and watching the suite fail, and a BRIDGE section driving the real app.Api). 1717 tests, no CLI calls, no tokens — `test_loop.py` exports the shared `FakeAgent`/`RecordingIO`/`build_state` helpers the others import. |
+| `tests/` | Token-free test suites, each a runnable script (`python tests/test_loop.py`): `test_loop` (shared loop), `test_scheduler` (meta v2 + resume), `test_modes` (directives, speaker, moderator), `test_until_done`, `test_parallel`, `test_free`, `test_spawn_tier1/_helpers/_teams`, `test_brief` (shared project context), `test_ask` ([[ASK]] questions to Josh), `test_bridge_files` (file/image viewing bridge: workspace confinement incl. `..`/absolute/junction escapes, MIME + size cap, thumbnails), `test_capabilities` (who-can-do-what routing), `test_skills` (skill authoring/sync + MCP management), `test_activity` (streaming runner via `python -c` children, adapter activity mapping for all three CLIs incl. the 2026-08-26 commentary and tool-result kinds, sink dedupe/cap/confinement AND the one-slot `say` hold that keeps a turn's final prose out of its own log, loop + persistence, read_text bridge), `test_app_headless` (real `app.Api` + fake window), `test_ui_boot` (EXECUTES `ui/index.html`'s inline script in node against a stub DOM — the only suite that can see a top-level JS throw, and the suite that drives a `dictation` event into the real composer; skips where node is absent), `test_dictation` (recorder state machine incl. the stop-during-open race, transcriber seam, probe honesty, bridge round trip), `test_continuous` (Keep Improving: policy normalization incl. all-limits-off, the unbounded ceiling, objective rollover, the closed remedy set, the three check-in actions incl. an unanswered one meaning SKIP, gate red/green/dirty/skip with `_gate_run`/`_git` stubbed, and the revival loop driven through a `_run_rounds` seam — a real continuous loop has no cap and would never return, which is exactly the property the revival layer exploits)), `test_watchdog` (the turn watchdog: a talking child outliving a window that would have killed it, the silence clock restarting on every line, stderr counting as liveness, the optional hard cap, per-adapter defaults, and probation reaching the ARMED window), `test_resilience` (what happens when the PROVIDER wobbles rather than Alloy breaking: `transient_error` classification, the backoff + probation window driven through the real loop, and `was_interrupted` — the killed-mid-run signal auto-resume keys on). `test_branching` (bridge level: real `Api.export_session`/`Api.fork_session` incl. the running-chat refusal, session_summary's `fork_of`, and the sound-cue path through the one emitter thread with `_play_cue` stubbed), `test_rooms` (saved room templates: store round trip/overwrite/trim-tie-break + bridge + UI markup guards), `test_hooks` (event hooks: config round trip, unknown-name rejection, env contract, timeout/swallow, emitter-thread non-blocking, wave_gate's new `gate` event), `test_auto_title` (the once-per-session title side call through the `LoopIO.auto_title` seam), `test_mention` (@-mention routing through `enqueue_josh_message` across all drain sites), `test_budget_bar` (usage event payload honesty, projection math edges, strip rendering), `test_working` (the relay's own busy indicator: the context manager's pairing/uniqueness/never-break contract, the CLI wording, and the real wired sites - moderator, planner, gate, auto-title, compact - each driven with a stubbed side agent), `test_desktop` (computer use: the five staleness refusals, LRU/expiry, RuntimeId re-resolution, both scroll paths agreeing via one shared table, type rollback incl. the failed-restore wording, coordinate-outside-rect, the self-approval refusal covering OBSERVERS too, password refusal + override, redaction, process-identity bracketing, truncation announcing itself, and a source grep proving no SendInput/SetForegroundWindow — all behind a FakeBackend, zero hardware), `test_desktop_mcp` (delivery: the four rungs, the allowlist, the approval channel's fail-closed paths, the argument fence proving the model cannot flip allow_password/strict_pixels, the meta round-trip, and a RED guard that a standing TURN verdict never answers a desktop request), `test_permissions` (the rung ladder AND — since 2026-08-26 — the app bridge: real `app.Api._conversation`/`_continue`/`open_session` with adapter subclasses whose only fake is `turn`, so the assertions read the SHIPPING `build_cmd`), `test_browser_mcp` (web use, behind a FakeVendor so no node and no Chrome: the fence argv incl. never-a-blocklist / empty-means-deny-all / the exact flag spelling, the site classifier's refusals and its resolution-based loopback detection, the self-test latching a session dead when the fence is absent, the reconciliation gate dropping a tool whose REQUIRED argument was renamed, the four rungs, the approval round trip, the argument fence, upload confinement, and the relay axis incl. the clamp and the advisory ceiling — twenty-three of its rules RED-verified by removing them and watching the suite fail, and a BRIDGE section driving the real app.Api). `test_solo` (**the solo seat**: the real loop at n=1 proving no turn is ever handed an empty prompt, the preamble's solo voice with a RED guard that the multi-AI sentence never returns, the one seat-count table shared by the CLI/bridge/loops, free and battle refusing by name in the ENGINE, resumption through continue_block/rehydrate/session_summary, the solo Supervisor wave, and a BRIDGE section driving the real `app.Api` — 39 rules RED-verified across three passes). 1800 tests, no CLI calls, no tokens — `test_loop.py` exports the shared `FakeAgent`/`RecordingIO`/`build_state` helpers the others import. |
 | `make_icon.py` / `ai-chat.ico` | Icon generator (Pillow) and the generated icon: the **Alloy trefoil** (BRANDING.md, approved 2026-08-16) — geometry lives in `branding/trefoil_v2.py` (parametric curve, crossings solved numerically, depth-sorted over-arcs; the over-arc redraw must outrun its erase band by more than the erase cap radius or a notch punches the glow), every .ico size regenerates from that one function, <32px uses `small_mark`'s heavier weights. `branding/trefoil-v2-comparison.png` is the approved proof sheet. Brand rename is UI-surface-only: repo/CLI/skills stay `ai-chat` on disk. |
 
 Also installed elsewhere: `ai-chat` skills in `~\.claude\skills\ai-chat\` and
@@ -47,6 +48,14 @@ claude-opus-4-8, claude-sonnet-5, claude-haiku-4-5 (aliases opus/sonnet/haiku ok
 Defaults: all three agents, 10 rounds, Opus 5 / gpt-5.6-sol(high) / gemini-3.7-flash-high.
 The app reads live model lists: GPT from `~\.codex\models_cache.json` (+ defaults
 from `config.toml`), Gemini from `agy models`; Claude list is pinned in app.py.
+
+**ONE `--agents` token runs Alloy as a harness for that single agent** (see
+§ Solo seat): `--agents claude`, `--agents ox:opencode/x-preview-f-free`. With
+one seat a "round" is simply a turn, `--start` is ignored, `--mode free` and
+`--mode battle` refuse by name, and the app hides Talk Live / Compare & Decide
+/ Arena Duel behind a stated reason. Everything else — permissions, computer
+use, web use, workstreams, the files rail, fork, export, usage, resume — is
+inherited unchanged.
 
 **Computer use and web use** are two further axes, each independent of
 `--permission` (that one bounds the WORKING FOLDER; these bound Josh's screen
@@ -222,7 +231,179 @@ instructions. In the app, each seat card's role button opens the shared role
 modal: edits there are free before a chat starts; once seated, only the modal's
 **Apply role change** button (one CLI turn) changes anything.
 
+## Solo seat — Alloy as a harness for ONE agent (2026-08-27)
+
+Josh: *"make it so that we can use a single agent of whoever we want. Pretty
+much just our own harness for whatever agent we want. Just like deepseek
+harness or traycer."* **No new mode**: the seat floor drops to one and the
+existing recipes adapt. Every `mode` value on disk is unchanged, so meta,
+replay, forks and saved rooms stay valid.
+
+```
+python relay.py "make this better" --turns 3 --agents claude:claude-haiku-4-5:low
+```
+
+- **The measurement that scoped it was WRONG, and a FakeAgent is why.** An
+  earlier probe drove the real `run_rounds` with one FakeAgent across six
+  modes and concluded five of them worked. They did not. A multi-seat backlog
+  is refilled by `commit_reply`'s fan-out to PEERS; with one seat nothing ever
+  fans in, so from turn 2 `compose_prompt` returned **the empty string** —
+  measured `[1106, 0, 0]` chars for a 3-turn run. Against a real CLI that is
+  `claude -p ""`, measured exit 1, *"Input must be provided either through
+  stdin or as a prompt argument when using --print"*. The loop reads that as a
+  provider failure, retries into the identical wall, parks the only seat and
+  prints "Every seat has failed twice this run" — so a solo chat took ONE
+  useful turn and died looking like a broken CLI. A FakeAgent answers happily
+  whatever it is handed, which is exactly why it saw nothing. `SOLO_CONTINUE`
+  (and `IDLE_CONTINUE`, its n>1 twin for a room whose peers all went quiet) is
+  the fix, and `parts` is now never empty on any path.
+- **Four seat floors, not two.** `relay.main()` and `app.Api._conversation`
+  were the obvious ones. `ui/index.html`'s `sendSay` is an INDEPENDENT copy
+  that fires before the bridge is ever called, and `relay.continue_block` is
+  the silent one — it feeds `session_summary`'s `can_continue`, which drives
+  `setSeated`, the composer's continue branch and the rail tooltip, and
+  `rehydrate` RAISES on it. Left at two, every solo chat would start fine and
+  then be permanently view-only, with typing into it silently starting a brand
+  new conversation. `parse_team` was a fifth (a solo seat spawning a solo
+  sub-session IS the sub-agent shape).
+- **`MODE_SEAT_LIMITS` + `seat_count_refusal(mode, n)` is the ONE table.** Only
+  two modes cannot mean anything at n=1: `battle` (a blind A/B vote over one
+  answer) and `free` (its coordinator pauses on its FIRST pass at fewer than
+  two live seats, so the run ends before the seat ever speaks). Both now refuse
+  UP FRONT and by name, in `main()`, in the bridge, and in `run_free` /
+  `run_battle` themselves — `run_battle` had NO engine-side guard at all, only
+  app.py's, so a CLI battle at n=1 ran the blind round and stopped for a vote
+  claiming two answers existed. Their reason is `termination_reason:
+  "seat_count"`, deliberately distinct from `starved`: starved means seats
+  died, seat_count means the run was never runnable and nobody was ever asked
+  for a turn.
+- **`panel` is a FRONT-END policy, not an engine invariant.** It runs solo
+  (draft → self-critique → synthesis is a real technique) so the engine allows
+  it; the app declines to sell "Compare & Decide" to a roster of one. The CLI
+  and the Advanced drawer still reach it. `moderator` is the same shape: hidden
+  at n=1 because it spends a real side call per turn to choose among one, but
+  reachable, and `MODERATOR_PROMPT_SOLO` tells it the truth (the pick is
+  forced; the only judgement left is whether the work is finished).
+- **The solo preamble is its own voice, not a patched group one.** The group
+  version was not merely padded — it opened *"You are Claude, in a live
+  multi-AI conversation with ."* (a sentence naming nobody), promised relayed
+  peer messages that never arrive, and then instructed the only participant to
+  *"talk to the other AI(s), not to him"*. `solo = not list(others)` swaps the
+  header, the human line, the workspace and privacy lines, the cap line
+  ("turns", and wrap when the WORK is done rather than when the topic is
+  exhausted), the ask block (asking Josh is the normal loop, not a rare
+  exception), the role block, and the reply-shape rule — "a few paragraphs at
+  most, no markdown headers" keeps a three-way transcript readable but fights a
+  harness whose deliverable is a plan or a file walkthrough. `order_line` is
+  simply ABSENT from the solo return, which is also how `[[NEXT]]` stops being
+  offered to a seat that could only ever nominate itself.
+- **`capability_note`'s block was suppressed at n=1 — and that silently
+  dropped `advisory_rung_note()`**, the honest admission that at `auto` or
+  `full` access the desktop and browser ladders are a guardrail rather than a
+  boundary. A solo harness is exactly the configuration that admission was
+  written for. The block is restored under its own header, without the
+  hand-it-over-to-a-peer rule, which has no referent.
+- **The Supervisor at n=1 is the flagship** (planner + one executor +
+  `wave_gate` + `gate_commit` — the Traycer shape). `SUPERVISOR_VOICE` is a
+  two-entry table filling `{intro}` and `{teamwork}` in ONE prompt template, so
+  rules 1/2/5/6 — the grammar and the do-not-ask-clarifying-questions lesson —
+  cannot drift between the shapes. The measured reason it matters: rule 4
+  ("one task per seat to start with") caps every solo wave at a SINGLE task,
+  degenerating the rolling manager into plan → one task → review → plan at one
+  billed supervisor call per task, exhausting `SUPERVISOR_MAX_WAVES` after ~6.
+  One owner does not mean one task: `workstreams.next_assignments` starts at
+  most one task per owner and `settle_workstream` immediately starts the next,
+  so a wave of several runs through in order under ONE review.
+- **Front-end wording follows the roster, not just the dots.** `rosterChanged()`
+  (called from `refreshSeatNames` and the Include checkbox) repaints the mode
+  pill's label, the Advanced drawer's recipe sentence and the rounds/turns
+  label, because a stage can go solo while the composer still offers "Discuss
+  in Turns" and describes what "every AI" will do. Unavailable modes are
+  **disabled with a stated reason**, never hidden — the browser work's rule
+  that a withholding is stated rather than left as an absence.
+- Live-verified 2026-08-27 end to end, three times: a 3-turn CLI run where a
+  real haiku seat created a.txt, b.txt and c.txt one per turn (turns 2 and 3
+  riding `SOLO_CONTINUE`) and wrapped on its own word; the same shape through
+  the APP BRIDGE with a real seat, reaching `started`, writing its file, and
+  reopening as continuable; and a re-run after the review fixes below.
+- **Then four adversarial lenses were pointed at it** (over-claim / the-control-
+  that-does-nothing / the-UI-is-one-inline-script / engine-correctness) and
+  they were right about a lot. **Two of the defects were mine and REGRESSED
+  SHIPPING MULTI-SEAT BEHAVIOUR**, which is the part worth remembering:
+  1. **A general guard met a caller for whom "empty" was correct.** The
+     never-hand-a-CLI-an-empty-prompt fix fired on every Panel critique and
+     synthesis turn, because panel commits with `fan_out=False` and
+     `_panel_prompt` supplies the whole prompt itself. So the flagship
+     multi-seat "Compare & Decide" preset began every critique with "the other
+     participants produced nothing" directly above those participants' drafts,
+     and offered `[[WRAP]]` one line above "Do not use [[WRAP]]". `filler=`
+     now says who owns the body. tests/test_panel.py could not see it: nothing
+     asserted what a phase prompt STARTS with.
+  2. **A fallback keyed on "has no rule" instead of "has no recipe".** The UI's
+     `presetSeatRefusal` gained a fallback so a hand-tuned "custom" recipe is
+     judged by its live mode — and because the three solo presets carry no
+     rule of their own, they inherited whichever rule the live mode had. The
+     ordinary gesture of removing a seat while Talk Live was selected greyed
+     out ALL SIX rows of the mode pill, each labelled with Talk Live's reason,
+     leaving no clickable way out.
+  The rest: a moderated solo room kept running with its OFF switch hidden and
+  a sentence denying the moderator existed; the empty-state headline claimed
+  "every tool Alloy has" on a stage keyed only on seat COUNT, which is false
+  for the three providers `MCP_DELIVERING_PROVIDERS` excludes; `seat_count`
+  never reached outcome.json because the loop's generic `starved` return
+  overwrote it; `[[TEAM: claude | mode=free | …]]` became parseable and the
+  refused child was still asked for a REPORT, handing the requester a forged
+  account of work that never happened; one refusal sentence explained an n=1
+  problem to someone who brought three seats; the solo workspace line said
+  "write files freely" at `read_only`; a roster change wiped the badges
+  explaining an adjustment the user had just been shown; and `panel_review`
+  was refused by the UI while the engine, the CLI and the drawer's own
+  sentence all allowed it — so it is now OFFERED under a solo name that says
+  what it does ("Draft, Critique, Finalise"). Every fix is RED-verified:
+  **39 rules across three passes.**
+- Not done on purpose: the Advanced drawer's static `<option>` labels ("Laps —
+  everyone speaks once per lap", "The AIs themselves") still read for a crowd.
+  That drawer is the expert surface and `#policyReason` above it now carries
+  the solo explanation.
+
 ## Hard-won gotchas (do not relearn these)
+
+- **A fork was never resumable, at any seat count** (found 2026-08-27 while
+  verifying a solo fork; reproduced at one, two and three seats). `fork.py`
+  clears every seat's `session_id` by design — the provider threads hold the
+  ORIGINAL conversation and resuming them from a diverged timeline would forge
+  continuity — but it left `introduced: True`. `continue_block` reads
+  introduced-without-a-session-id as an orphaned seat ("X's memory wasn't
+  saved — view only") and `rehydrate` RAISES on it, so every fork of a chat
+  that had taken a turn was permanently view-only and typing into it silently
+  started a brand new conversation. Clearing `introduced` is also required for
+  its own sake: it is what makes the next turn send the preamble, and a seat
+  with a brand-new CLI session has not had one. The lesson is the pairing —
+  `session_id` and `introduced` are two halves of "this seat has a live
+  thread", and anything that drops one must drop the other.
+
+- **A guard that is right everywhere can still be wrong at one caller.** The
+  never-hand-a-CLI-an-empty-prompt fix was correct for every dispatch loop and
+  wrong for `_panel_prompt`, which supplies the whole prompt body itself and
+  joins with `if p` — so an empty `compose_prompt` was LOAD-BEARING there, and
+  filling it regressed the shipping multi-seat panel with a sentence its own
+  payload contradicted. Before making a shared helper "never return empty",
+  enumerate its callers and ask which of them was RELYING on empty. And note
+  what let it ship: `tests/test_panel.py` asserted what its prompts CONTAIN,
+  never what they START with, so six passing tests saw nothing.
+
+- **A fake that tolerates the broken input is why the bug survived a
+  measurement.** Six modes were driven through the REAL `run_rounds` with one
+  FakeAgent and five reported "works". Every one of them was handing the seat
+  `""` from turn 2 (nothing fans in with no peers), which a real CLI rejects
+  outright — `claude -p ""` exits 1. The FakeAgent answered happily because it
+  never looks at its prompt, so the probe measured the loop's control flow and
+  called it a measurement of the product. Same family as the abort-seam stubs
+  that took `abort` and ignored it, and the fake vendor whose `call_tool` had
+  no `await` so every "concurrency" test was secretly sequential. The rule:
+  when a probe's verdict is "it works", ask what the fake would have done if
+  it did not — and assert on the ARTEFACT the real component consumes (here,
+  the prompt string), never only on the fact that a turn happened.
 
 - **A cfg key the UI sends and the app never reads is a control that does
   nothing, and nothing anywhere says so** (fixed 2026-08-26, had been
@@ -657,7 +838,7 @@ modal: edits there are free before a chat starts; once seated, only the modal's
   `/help` exists in the CLI, the opener nudge is `rnd == 1`-guarded, and the
   failed-twice/empty-reply skip paths save state in the app too (they didn't).
   `run_rounds(state, LoopIO())` with scripted fake agents = token-free loop
-  tests — see `tests/` (1717 tests across 60 suites, all runnable as plain scripts, or `python tests/run_all.py` for the lot).
+  tests — see `tests/` (1800 tests across 61 suites, all runnable as plain scripts, or `python tests/run_all.py` for the lot).
 - **Cost and token telemetry (truth over estimation).** `ClaudeAgent` and `CodexAgent`
   stream parsers extract `total_cost_usd`, input/output/cached tokens, and duration
   per turn (`last_usage`), resetting at the start of `Agent.turn`. On failed CLI error
@@ -1207,7 +1388,7 @@ mojibakes every em-dash in the file).
 
 ## Testing
 
-**Token-free first**: `tests/` holds 1717 tests across 60 suites (plus three
+**Token-free first**: `tests/` holds 1800 tests across 61 suites (plus three
 custom-runner suites — `test_outcome`, `test_retro`, `test_workstreams` — which print
 their own `N passed` line instead of unittest's `OK`; judge those by exit code), each suite a plain script
 (`python tests/test_loop.py` etc.) — FakeAgents drive the REAL loop via

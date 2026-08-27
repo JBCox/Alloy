@@ -109,6 +109,13 @@ class ForkTests(unittest.TestCase):
         self.assertIsNone(meta["parent"])
         self.assertEqual(len(meta["seats"]), 1)
         self.assertNotIn("session_id", meta["seats"][0])
+        # ...and un-introduced, because it is: `introduced` suppresses the
+        # preamble, and this seat's CLI session was just discarded. It also
+        # makes the fork RESUMABLE - continue_block reads
+        # introduced-without-a-session-id as an orphaned seat, so before this
+        # every fork of a chat that had taken a turn was permanently view-only
+        # and rehydrate raised on it.
+        self.assertIs(meta["seats"][0]["introduced"], False)
         self.assertEqual(meta["seats"][0]["label"], "Claude")
         self.assertFalse(os.path.exists(os.path.join(new_dir, "outcome.json")))
         self.assertFalse(os.path.exists(os.path.join(new_dir, "say.txt")))

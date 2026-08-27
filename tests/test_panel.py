@@ -126,6 +126,31 @@ class PanelTests(unittest.TestCase):
         rows = seat_rows(state)
         self.assertEqual(len(rows), 7)
 
+    def test_a_phase_prompt_starts_with_its_phase(self):
+        """_panel_prompt supplies the entire prompt body, so an EMPTY
+        compose_prompt is correct here -- panel commits with fan_out=False, so
+        every backlog is empty from the critique phase on, by design. A guard
+        added elsewhere to stop a solo seat being handed "" once filled these
+        prompts with "the other participants produced nothing" directly above
+        those participants' drafts, and offered [[WRAP]] one line above "Do
+        not use [[WRAP]]" -- in the shipping multi-seat preset."""
+        state = panel_state(
+            self.tmp,
+            [["A draft", "A critique"],
+             ["B draft", "B critique", "B synthesis"]],
+            labels=["A", "B"], synthesizer=1)
+        self.assertEqual(run_rounds(state, RecordingIO()), "wrapped")
+        for agent in state["agents"]:
+            for prompt in agent.prompts:
+                if relay.PANEL_CRITIQUE_PROMPT in prompt:
+                    self.assertTrue(prompt.startswith(
+                        relay.PANEL_CRITIQUE_PROMPT), prompt[:200])
+                if relay.PANEL_SYNTHESIS_PROMPT in prompt:
+                    self.assertTrue(prompt.startswith(
+                        relay.PANEL_SYNTHESIS_PROMPT), prompt[:200])
+                self.assertNotIn(relay.IDLE_CONTINUE, prompt)
+                self.assertNotIn(relay.SOLO_CONTINUE, prompt)
+
     def test_draft_and_critique_wrap_tokens_do_not_add_a_closing_lap(self):
         state = panel_state(
             self.tmp,

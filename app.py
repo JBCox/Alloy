@@ -1114,8 +1114,21 @@ class Api:
                 raise ValueError("A conversation is already running.")
         seatable = {p["id"] for p in Api._seatable_providers()}
         asked = [str(s) for s in payload.get("seats") or []]
-        providers = [s for s in asked if s in seatable] or \
-            [p["id"] for p in Api._seatable_providers()][:3]
+        # `seats` is now honoured down to ONE, because a solo run is a
+        # legitimate conversation. That also exposes the old fallback's
+        # dishonesty: a payload whose providers are NONE of them seatable used
+        # to become the default three-seat room and report started — the
+        # strict-payload culture this module was written in ("UNKNOWN KEYS
+        # REJECT", because a typo would look accepted and do nothing) applied
+        # to keys but not to values. Raising surfaces it to the calling script
+        # as HTTP 500, exactly like the already-running refusal above. A
+        # MIXED list still drops the unknown names and runs the known ones
+        # — that is a deliberate, tested contract, not the bug.
+        known = [s for s in asked if s in seatable]
+        if asked and not known:
+            raise ValueError("No seatable provider in %r. Seatable: %s."
+                             % (asked, ", ".join(sorted(seatable))))
+        providers = known or [p["id"] for p in Api._seatable_providers()][:3]
         seats = [{"id": i, "provider": p, "enabled": True}
                  for i, p in enumerate(providers)]
         cfg = {"opener": payload["topic"], "turns": payload.get("turns", 10),
@@ -2336,7 +2349,8 @@ class Api:
                 with relay.working(_AppIO(self, state.get("_run")), "compact",
                                    agent.name,
                                    label=f"Applying {agent.name}'s role change"):
-                    summary = compact_agent(agent)
+                    summary = compact_agent(
+                        agent, solo=len(state["agents"]) == 1)
             except Exception as e:
                 note = (f"{agent.name}'s role change failed "
                         f"({str(e)[:160]}) — it stays {old}.")
@@ -2485,8 +2499,14 @@ class Api:
             return {"ok": True, "stopped": 0,
                     "note": "That seat is not mid-turn."}
         names = ", ".join(agents[i].name for i in hit)
-        self.emit("status", {"text": f"Stopped {names} mid-turn; the rest of "
-                                     f"the conversation continues."})
+        # "the rest of the conversation continues" is the opposite of what
+        # happens with one seat: there is no rest, and the sequential floor
+        # parks the only seat and ends the run.
+        self.emit("status", {"text": (
+            f"Stopped {names} mid-turn; this turn is skipped."
+            if len(agents) == 1 else
+            f"Stopped {names} mid-turn; the rest of the conversation "
+            f"continues.")})
         return {"ok": True, "stopped": len(hit),
                 "seats": [slots[i] if i < len(slots) else i for i in hit]}
 
@@ -2612,8 +2632,15 @@ class Api:
                          if k in cfg.get("agents", {})]
         picked = [s for s in seats_cfg
                   if s.get("provider") in AGENT_TYPES and s.get("enabled")]
-        if len(picked) < 2:
-            self.emit("error", {"message": "Pick at least two participants."})
+        # ONE seat is a conversation: Alloy is a harness for a single agent as
+        # well as a room for several. The seat-count rules that remain live in
+        # relay.MODE_SEAT_LIMITS, so the bridge, the CLI and the loops all
+        # refuse with the same sentence for the same reason — a battle over
+        # one answer, a reactive room with nobody to react to. Zero always
+        # refuses.
+        refusal = relay.seat_count_refusal(mode, len(picked))
+        if refusal:
+            self.emit("error", {"message": refusal})
             self.emit("done", {"transcript": None})
             return
         slot_ids = [s.get("id", i) for i, s in enumerate(picked)]
@@ -2621,7 +2648,11 @@ class Api:
         battle_state = None
         if recipe["workflow"] == "battle":
             # A duel is two-boxing by definition: one answer can't be ranked
-            # and three makes the A/B vote a lie. Refuse at start, visibly.
+            # and three makes the A/B vote a lie. seat_count_refusal above
+            # owns BOTH bounds for mode "battle", so this is unreachable for
+            # any cfg the UI builds - it survives only as the backstop for a
+            # hand-made cfg whose legacy `mode` disagrees with its workflow,
+            # which is the one way the refusal above can be sidestepped.
             if len(picked) != 2:
                 self.emit("error", {"message": "A battle needs exactly two "
                                                "participants."})
@@ -2812,6 +2843,7 @@ class Api:
                                                moderator_spec,
                                                supervisor_spec),
                               enabled=cfg.get("brief", True),
+                              solo=len(picked) == 1,
                               on_status=brief_status_row,
                               io=_AppIO(self, state.get("_run")))
         if brief.get("status") != "off":

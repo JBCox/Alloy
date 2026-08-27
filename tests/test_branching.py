@@ -114,6 +114,15 @@ class BranchingTests(unittest.TestCase):
         self.assertTrue(os.path.isdir(d))
         s = r["session"]
         self.assertFalse(s["ended"], "a fork is continuable")
+        # ...and MEANS it. A fork discards every seat's CLI session id, and
+        # continue_block reads introduced-without-a-session-id as an orphaned
+        # seat -- so until fork.py also cleared `introduced`, every fork of a
+        # chat that had taken a turn came back "X's memory wasn't saved - view
+        # only", rehydrate raised on it, and typing into it silently started a
+        # brand new conversation. Caught 2026-08-27 while verifying solo
+        # forks; it was never solo-specific (reproduced at 1, 2 and 3 seats).
+        self.assertTrue(s["can_continue"], s.get("can_continue_reason"))
+        self.assertEqual(s.get("can_continue_reason") or "", "")
         self.assertEqual(s["fork_of"]["id"], "chat-b")
         self.assertEqual(s["fork_of"]["message_id"], "m1")
         self.assertIn("(fork)", s["title"])
