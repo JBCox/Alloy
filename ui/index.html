@@ -2698,7 +2698,8 @@
       Alloy has to be running: a window it was closed for is reported as missed,
       never started late. A scheduled run never takes the screen — it appears in
       the chat list and the jobs bar like any other conversation, and it is
-      skipped if another conversation is still going.</div>
+      skipped if another conversation is still going.
+      <span id="schedPoll"></span></div>
     <div id="schedRows"></div>
     <div id="schedEmpty" hidden>Nothing scheduled yet.</div>
     <div id="schedEditor">
@@ -10415,6 +10416,11 @@ async function startRoom(name) {
    and reports "" for partially typed values, which makes clamp-on-blur lie
    (the #rVal lesson). Times and intervals are validated on save instead. */
 let schedCache = [], schedRooms = [], schedRisk = null, schedEditId = null;
+// Carried through an edit rather than hardcoded true in the payload:
+// editing a PAUSED schedule silently re-armed it, which is the opposite
+// of what pausing means.
+let schedEditEnabled = true;
+let schedPoll = 0;           // the bridge's poll interval, in seconds
 const SCHED_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 function closeSched() { $("schedModal").classList.remove("show"); }
@@ -10427,6 +10433,7 @@ function schedBuildDays() {
     const lab = document.createElement("label");
     const cb = document.createElement("input");
     cb.type = "checkbox"; cb.value = String(i); cb.className = "sched-day";
+    cb.onchange = schedPaintAck;
     const span = document.createElement("span");
     span.textContent = name;
     lab.append(cb, span);
@@ -10472,11 +10479,23 @@ function schedPaintAck() {
     li.textContent = line;                  // never innerHTML: room-derived
     list.appendChild(li);
   }
-  $("schedAckText").textContent =
+  const text =
     "I understand this starts " + ($("schedRoom").value || "this room")
     + " " + schedRecurrenceText()
     + ", unattended, and that every run has the access listed above until I "
     + "delete this schedule.";
+  const ack = $("schedAck");
+  // The SENTENCE is what he agreed to. Change the room or the recurrence
+  // after ticking and it is a different sentence, so the tick has to be
+  // earned again — found live on 2026-08-27, where a box ticked against
+  // "every day at 01:00" saved "every Mon, Fri at 02:30".
+  if (ack.checked && ack.dataset.ackText && ack.dataset.ackText !== text) {
+    ack.checked = false;
+    schedNote("The schedule changed — read the access note and tick it "
+              + "again.");
+  }
+  ack.dataset.ackText = text;
+  $("schedAckText").textContent = text;
   const notes = $("schedNotes");
   notes.replaceChildren();
   for (const line of (schedRisk && schedRisk.notes) || []) {
@@ -10517,6 +10536,7 @@ function schedFillRooms(selected) {
 
 function schedClear() {
   schedEditId = null;
+  schedEditEnabled = true;
   $("schedEditH").textContent = "New schedule";
   $("schedName").value = "";
   $("schedPrompt").value = "";
@@ -10528,6 +10548,7 @@ function schedClear() {
   document.querySelectorAll("#schedDays .sched-day")
     .forEach(cb => { cb.checked = false; });
   $("schedAck").checked = false;
+  delete $("schedAck").dataset.ackText;
   schedNote("");
   schedFillRooms(schedRooms[0]);
   schedKindRows();
@@ -10536,6 +10557,7 @@ function schedClear() {
 
 function schedEdit(rec) {
   schedEditId = rec.id;
+  schedEditEnabled = !!rec.enabled;
   $("schedEditH").textContent = "Editing " + rec.name;
   $("schedName").value = rec.name || "";
   $("schedPrompt").value = rec.prompt || "";
@@ -10552,6 +10574,7 @@ function schedEdit(rec) {
   // is a grant nobody has agreed to yet.
   $("schedAck").checked = !!(rec.grants || []).length
                           && !(rec.ack_gap || []).length;
+  delete $("schedAck").dataset.ackText;
   schedNote("");
   schedFillRooms(rec.room);
   schedKindRows();
@@ -10642,8 +10665,12 @@ async function loadSched() {
     const r = await pywebview.api.get_schedules();
     schedCache = (r && r.schedules) || [];
     schedRooms = (r && r.rooms) || [];
-  } catch (e) { schedCache = []; schedRooms = []; }
+    schedPoll = (r && r.poll_seconds) || 0;
+  } catch (e) { schedCache = []; schedRooms = []; schedPoll = 0; }
   renderSchedRows();
+  const every = Number(schedPoll) || 0;
+  $("schedPoll").textContent = every
+    ? ("It checks every " + every + " seconds while Alloy is open.") : "";
   const keep = $("schedRoom").value;
   schedFillRooms(keep && schedRooms.includes(keep) ? keep : schedRooms[0]);
   schedPaintAck();
@@ -10674,7 +10701,7 @@ async function saveSched() {
     days: schedDaysPicked(),
     every_min: parseInt($("schedEvery").value, 10) || 0,
     start: $("schedStart").value.trim(),
-    enabled: true,
+    enabled: schedEditEnabled,
     ack: grants.length ? {grants: grants} : null,
   };
   let r;
@@ -10689,6 +10716,10 @@ $("schedBtn").onclick = openSched;
 $("schedClose").onclick = closeSched;
 $("schedModal").onclick = e => { if (e.target === $("schedModal")) closeSched(); };
 $("schedKind").onchange = () => { schedKindRows(); schedPaintAck(); };
+// Every field the acknowledgement's sentence quotes repaints it. Without
+// these the room picker was the ONLY thing that refreshed it.
+for (const id of ["schedAt", "schedEvery", "schedStart"])
+  $(id).oninput = schedPaintAck;
 $("schedRoom").onchange = schedLoadRisk;
 $("schedSave").onclick = saveSched;
 $("schedReset").onclick = schedClear;

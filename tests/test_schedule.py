@@ -139,6 +139,23 @@ class GrantPolicyTests(unittest.TestCase):
         self.assertFalse(any("waits for an answer" in n for n in notes2),
                          notes2)
 
+    def test_a_shell_rung_is_named_as_the_ceiling_on_the_other_ladders(self):
+        """relay.advisory_rung_note's admission, at the surface where a rung
+        is MOST likely to be read as the boundary. Full/auto permission
+        already grants a shell, so "click only in the apps I allowlisted" is
+        a description of what Alloy drives, not a fence around the seat."""
+        note = " ".join(sched.unattended_notes(
+            {"permission": "full", "desktop": "allowlist"}))
+        self.assertIn("already gives every seat a shell", note)
+        self.assertIn("command line", note)
+        note = " ".join(sched.unattended_notes(
+            {"permission": "auto", "browser": "full"}))
+        self.assertIn("already gives every seat a shell", note)
+        # ...and nothing to admit when neither ladder is even on
+        quiet = " ".join(sched.unattended_notes(
+            {"permission": "full", "desktop": "off", "browser": "off"}))
+        self.assertNotIn("shell", quiet)
+
     def test_a_permission_checkin_is_named_as_a_wait(self):
         notes = sched.unattended_notes({"continuous": True,
                                         "checkin_action": "permission"})
@@ -151,7 +168,8 @@ class ClockTests(unittest.TestCase):
     def test_hhmm_is_strict(self):
         self.assertEqual(sched.parse_hhmm("01:00"), (1, 0))
         self.assertEqual(sched.parse_hhmm(" 23:59 "), (23, 59))
-        for junk in ("1:00", "25:00", "01:60", "01-00", "0100", "", None, "aa:bb"):
+        for junk in ("1:00", "25:00", "01:60", "01-00", "0100", "", None,
+                     "aa:bb", "01:0", "1:0", "010:0"):
             self.assertIsNone(sched.parse_hhmm(junk), junk)
 
     def test_a_stamp_reads_back_with_or_without_seconds(self):
@@ -490,8 +508,8 @@ class AckTests(unittest.TestCase):
     def test_narrowing_the_room_is_silent_and_widening_is_not(self):
         rec = sched.normalize(spec(ack={"grants": ["permission_full",
                                                    "connectors"]}), now=NOW)
-        self.assertTrue(sched.ack_covers(rec, ["connectors"]))
-        self.assertTrue(sched.ack_covers(rec, []))
+        self.assertEqual(sched.ack_gap(rec, ["connectors"]), [])
+        self.assertEqual(sched.ack_gap(rec, []), [])
         self.assertEqual(sched.ack_gap(rec, ["desktop_full"]), ["desktop_full"])
 
     def test_a_schedule_with_no_ack_at_all_reports_every_grant(self):
@@ -500,6 +518,36 @@ class AckTests(unittest.TestCase):
         self.assertEqual(sched.ack_gap(rec, ["connectors", "browser_full"]),
                          ["connectors", "browser_full"])
         self.assertEqual(sched.ack_gap(None, ["connectors"]), ["connectors"])
+
+    def test_an_edit_keeps_what_already_happened(self):
+        """The caller sends a FORM, not a record. Without this, changing
+        the time of a nightly job silently reported it as having never
+        run -- measured before the fix: runs 1 -> 0, last_result wiped."""
+        rec = sched.save_schedule(self.path, spec(), now=NOW)
+        sched.record_result(self.path, rec["id"], "Started Nightly.",
+                            ran=True)
+        sched.save_schedule(self.path, spec(id=rec["id"], at="02:00"),
+                            now=NOW)
+        row = sched.read_schedules(self.path)["schedules"][0]
+        self.assertEqual(row["at"], "02:00")
+        self.assertEqual(row["runs"], 1)
+        self.assertEqual(row["last_result"], "Started Nightly.")
+        self.assertTrue(row["last_run"])
+        self.assertEqual(row["created"], rec["created"])
+
+    def test_re_arming_something_with_nothing_left_stays_off(self):
+        """A spent `once` switched back on used to report `enabled: true`
+        with an empty next_run -- a row promising a run that can never
+        come, which is exactly what `claim` disarms it to avoid."""
+        rec = sched.save_schedule(self.path,
+                                  spec(kind="once", start="2026-08-27 10:00"),
+                                  now=NOW)
+        at = datetime.datetime(2026, 8, 27, 10, 0, 5)
+        sched.claim(self.path, rec["id"], rec["next_run"], at)
+        back = sched.set_enabled(self.path, rec["id"], True, now=at)
+        self.assertFalse(back["enabled"])
+        self.assertEqual(back["next_run"], "")
+        self.assertIn("Nothing left to run", back["last_result"])
 
     def test_an_unknown_grant_in_a_stored_ack_is_dropped(self):
         rec = sched.normalize(spec(ack={"grants": ["permission_full", "moon"]}),
@@ -764,7 +812,9 @@ class BridgeTests(unittest.TestCase):
         self._room(**room)
         grants = api._room_grants("Nightly")
         ack = {"grants": grants} if grants else None
-        got = self._save(api, ack=ack)
+        # NOT the default 10: `turns` has to be shown travelling, and
+        # both sides default to 10, so asserting 10 proves nothing
+        got = self._save(api, ack=ack, turns=6)
         self.assertTrue(got.get("ok"), got)
         return got["schedule"]
 
@@ -830,7 +880,8 @@ class BridgeTests(unittest.TestCase):
         rec = self._armed(api)
         api._launch_schedule(rec)
         self.assertEqual(seen["cfg"]["opener"], "do the thing")
-        self.assertEqual(seen["cfg"]["turns"], rec["turns"])
+        self.assertEqual(rec["turns"], 6, "the fixture stopped being distinct")
+        self.assertEqual(seen["cfg"]["turns"], 6)
         self.assertEqual(seen["cfg"]["seats"][0]["provider"], "claude")
         self.assertEqual(seen["cfg"]["scheduled"]["name"], "Nightly")
         self.assertEqual(seen["cfg"]["scheduled"]["when"], "Every day at 01:00")
@@ -954,6 +1005,65 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("run now", row["last_result"])
         gate.set()
 
+    def test_run_now_does_not_consume_a_window_that_is_already_due(self):
+        """The sharp half of the rule. A run-now on a schedule that is NOT
+        yet due leaves the clock alone for free (its next occurrence is the
+        same one either way), so only a DUE schedule can tell a real
+        hands-off implementation from one that quietly claims the window."""
+        gate = self._gate()
+        relay.AGENT_TYPES["claude"] = gated_agent_class("Claude", gate)
+        api = self._api()
+        rec = self._armed(api)
+        # backdate the window by hand: the bridge has no clock to inject
+        path = app._schedule_path()
+        raw = json.load(open(path, encoding="utf-8"))
+        due_at = (datetime.datetime.now()
+                  - datetime.timedelta(minutes=1)).replace(
+                      microsecond=0).isoformat()
+        raw["schedules"][0]["next_run"] = due_at
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(raw, f)
+        got = api.run_schedule_now(rec["id"])
+        self.assertTrue(got["started"], got)
+        row = api.get_schedules()["schedules"][0]
+        self.assertEqual(row["next_run"], due_at,
+                         "Run now consumed the window the timer still owes")
+        self.assertEqual(row["misses"], 0)
+        gate.set()
+
+    def test_a_launch_that_blows_up_leaves_a_sentence_not_starting(self):
+        """`claim` advances the window FIRST, so a launch that raises has
+        already spent the night: the record must not sit on "starting…"
+        until the next occurrence."""
+        api = self._api()
+        rec = self._armed(api)
+
+        def boom(_rec, manual=False):
+            raise RuntimeError("disk on fire")
+
+        api._launch_schedule = boom
+        when = sched.parse_dt(rec["next_run"]) + datetime.timedelta(seconds=30)
+        fired = api._scheduler_tick(now=when)
+        self.assertEqual([f[1] for f in fired], [False])
+        row = api.get_schedules()["schedules"][0]
+        self.assertEqual(row["runs"], 0)
+        self.assertNotIn("starting", row["last_result"])
+        self.assertIn("Could not start", row["last_result"])
+
+    def test_run_now_announces_itself_like_the_timer_does(self):
+        """Same event, so a hook sees every fire attempt -- and `manual`
+        tells it which kind this was."""
+        api = self._api()
+        rec = self._armed(api)
+        self._room(permission="full")          # refused, so no CLI turn
+        api.run_schedule_now(rec["id"])
+        api._emit_q.join()
+        said = api._window.payloads("scheduled")
+        self.assertEqual(len(said), 1, said)
+        self.assertFalse(said[0]["started"])
+        self.assertTrue(said[0]["manual"])
+        self.assertNotIn("chat_id", said[0])
+
     # ---- the hook event --------------------------------------------------
     def test_scheduled_is_a_known_hook_event(self):
         self.assertIn("scheduled", relay.HOOK_EVENTS)
@@ -978,6 +1088,27 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("Started", seen[0][1]["AICHAT_DETAIL"])
         self.assertIn("Skipped", seen[1][1]["AICHAT_DETAIL"])
 
+
+    def test_the_scheduled_hook_never_borrows_the_chat_on_screen(self):
+        """W2.0's lesson one event over. A `scheduled` payload carries no
+        chat_id BY DESIGN, and the generic fallback then handed the script
+        whatever conversation Josh happened to be reading -- measured:
+        AICHAT_SESSION="some-other-chat". A hook acting on that would act on
+        the wrong chat, which is worse than acting on none."""
+        api = self._api()
+        relay.write_event_hooks({"scheduled": "echo hi", "done": "echo hi"})
+        api._hooks_cache = None
+        api._runs.focus("some-other-chat")
+        api._runs.focused().state = {"title": "the chat Josh is reading"}
+        seen = []
+        api._hook_worker = lambda name, cmd, env: seen.append(env)
+        api.run_event_hook("scheduled", {"name": "Nightly", "room": "R",
+                                         "started": False, "text": "N - x."})
+        self.assertEqual(seen[-1]["AICHAT_SESSION"], "")
+        self.assertEqual(seen[-1]["AICHAT_TITLE"], "Nightly")
+        # ...while an ordinary conversation event still falls back, as before
+        api.run_event_hook("done", {"text": "finished"})
+        self.assertEqual(seen[-1]["AICHAT_SESSION"], "some-other-chat")
 
 class SourceGuardTests(unittest.TestCase):
     """Three edits, one row: the trap the plan named, pinned."""

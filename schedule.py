@@ -22,12 +22,17 @@ says so, and the next occurrence is computed from NOW — so three days of
 downtime produce zero runs, never three. ``MISSED_GRACE_S`` is the width of
 "near enough": a poll that slipped, a laptop that slept for ten minutes.
 
-**Daily and weekly are WALL-CLOCK; interval is elapsed time.** "Every day at
-01:00" means the local clock reads 01:00, which on the two DST boundaries is
-not 86400 seconds after the last one. Computing it by adding a day of seconds
-would drift the job an hour twice a year, silently. "Every 90 minutes" means
-90 minutes of elapsed time and has no wall-clock opinion at all. Two kinds of
-arithmetic because they are two different questions.
+**Every time here is NAIVE LOCAL, and daily/weekly RE-ANCHOR rather than
+accumulate.** Naive local arithmetic is the right model for a desktop app on
+one machine: "01:00 daily" means the clock on the wall reads 01:00, and a
+naive datetime keeps that hour across a DST change for free. What it does NOT
+do is fix the two hours a year that are ambiguous or do not exist, and
+pretending otherwise would be the over-claim -- the grace window below is what
+covers them, and an `interval` schedule stretches by an hour on the one night
+the local clock repeats. Each occurrence is computed from the configured HH:MM
+(`_at_time`) rather than by adding to the last one, so a stored `next_run`
+that is wrong for any reason corrects itself instead of carrying its error
+forward forever.
 
 **The acknowledgement is re-checked against the room's CURRENT grants at fire
 time.** Rooms are saved by NAME and overwriting one is documented behaviour
@@ -146,6 +151,17 @@ def unattended_notes(axes):
     if axes.get("browser") == "ask":
         notes.append("Browser control is set to Ask. Seats will be able to "
                      "read pages, but every interaction will be denied.")
+    if (axes.get("permission") in ("auto", "full")
+            and (axes.get("desktop") not in (None, "", "off")
+                 or axes.get("browser") not in (None, "", "off"))):
+        # relay.advisory_rung_note's admission, at the surface where it
+        # matters most: a schedule is where a desktop or browser rung is
+        # MOST likely to be read as the boundary, and this is the exact
+        # combination where it is not one.
+        notes.append("Permission is %s, which already gives every seat a "
+                     "shell — so the desktop and browser lists bound what "
+                     "Alloy itself drives, not what a seat can do with a "
+                     "command line." % axes["permission"])
     if axes.get("continuous") and axes.get("checkin_action") == "permission":
         notes.append("Check-ins are set to Ask permission, which makes the "
                      "run WAIT at every check-in until you answer.")
@@ -389,10 +405,6 @@ def ack_gap(rec, grants):
     return [g for g in (grants or ()) if g not in have]
 
 
-def ack_covers(rec, grants):
-    return not ack_gap(rec, grants)
-
-
 # ------------------------------------------------------------------ store --
 # One JSON file, read-modify-written by two threads (the bridge saves edits,
 # the poller records fires). A single process lock is enough for THAT. Two
@@ -523,8 +535,21 @@ def save_schedule(path, spec, grants=(), now=None):
             "This room grants standing access that has not been acknowledged "
             "for this schedule: %s." % "; ".join(grant_sentences(gap)))
     with _LOCK:
-        rows = [r for r in read_schedules(path)["schedules"]
-                if r["id"] != rec["id"]]
+        existing = read_schedules(path)["schedules"]
+        # An EDIT must not erase what already happened. The caller sends a
+        # form, not a record, so runs / misses / the last outcome / the
+        # creation stamp are carried over from the row being replaced --
+        # otherwise changing the time of a nightly job silently reports it
+        # as having never run.
+        for old in existing:
+            if old["id"] != rec["id"]:
+                continue
+            for key in ("runs", "misses", "last_run", "last_result",
+                        "created"):
+                if not spec.get(key):
+                    rec[key] = old[key]
+            break
+        rows = [r for r in existing if r["id"] != rec["id"]]
         if len(rows) >= SCHEDULES_MAX:
             raise ValueError("There are already %d schedules." % SCHEDULES_MAX)
         rows.append(rec)
@@ -564,6 +589,12 @@ def set_enabled(path, sched_id, on, now=None):
             if nxt is None or nxt <= now:
                 nxt = next_occurrence(hit, now)
             hit["next_run"] = _fmt(nxt) if nxt else ""
+            if not hit["next_run"]:
+                # a spent `once` has nothing left to happen; letting it
+                # read as armed is the same lie `claim` disarms it to avoid
+                hit["enabled"] = False
+                hit["last_result"] = ("Nothing left to run — a one-off "
+                                      "that has already happened.")
         _write(path, _sorted(rows))
     return dict(hit)
 

@@ -1486,14 +1486,19 @@ class Api:
     # get_skills and save_tabs, so they answer synchronously. Nothing here
     # shells out.
 
+    @staticmethod
+    def _rooms_by_name():
+        """One read of the rooms store, as {name: cfg}. `get_schedules` used
+        to call `_room_cfg` per ROW, so listing 64 schedules meant 65 reads
+        of rooms.json on the bridge thread."""
+        return {r.get("name"): (r.get("cfg") or {})
+                for r in relay.list_rooms().get("rooms") or ()}
+
     def _room_cfg(self, name):
         """One saved room's cfg by name, or None. The rooms store is the ONE
         source: a schedule keeps the room's NAME, never a copy of its config,
         so editing a room edits every schedule that starts it."""
-        for row in relay.list_rooms().get("rooms") or ():
-            if row.get("name") == name:
-                return row.get("cfg") or {}
-        return None
+        return Api._rooms_by_name().get(name)
 
     @staticmethod
     def _room_axes(cfg):
@@ -1556,11 +1561,13 @@ class Api:
         one he agreed to.
         """
         rows = schedule_mod.read_schedules(_schedule_path())["schedules"]
-        rooms = [r.get("name") for r in relay.list_rooms().get("rooms") or ()]
+        rooms = Api._rooms_by_name()
         out = []
         for rec in rows:
             row = dict(rec)
-            grants = self._room_grants(rec["room"])
+            cfg = rooms.get(rec["room"])
+            grants = (None if cfg is None
+                      else schedule_mod.grants_for(Api._room_axes(cfg)))
             row["missing_room"] = grants is None
             row["grants"] = grants or []
             row["ack_gap"] = ([] if grants is None
@@ -1568,7 +1575,7 @@ class Api:
             row["ack_sentences"] = schedule_mod.grant_sentences(row["ack_gap"])
             row["describe"] = schedule_mod.describe(rec)
             out.append(row)
-        return {"ok": True, "schedules": out, "rooms": rooms,
+        return {"ok": True, "schedules": out, "rooms": sorted(rooms),
                 "poll_seconds": SCHEDULE_POLL_S}
 
     def save_schedule(self, spec):
@@ -1615,9 +1622,13 @@ class Api:
         """
         for rec in schedule_mod.read_schedules(_schedule_path())["schedules"]:
             if rec["id"] == sched_id:
-                ok, text = self._launch_schedule(rec, manual=True)
-                schedule_mod.record_result(_schedule_path(), sched_id, text,
-                                           ran=ok)
+                try:
+                    ok, text = self._launch_schedule(rec, manual=True)
+                    schedule_mod.record_result(_schedule_path(), sched_id,
+                                               text, ran=ok)
+                except OSError as exc:
+                    return {"error": error_excerpt(exc)}
+                self._announce_schedule(rec, ok, text, manual=True)
                 return {"ok": True, "started": ok, "text": text}
         return {"error": "No such schedule."}
 
@@ -1672,7 +1683,13 @@ class Api:
                 # surprise, not a service
                 self._announce_schedule(claimed, False, note)
                 continue
-            ok, text = self._launch_schedule(claimed)
+            try:
+                ok, text = self._launch_schedule(claimed)
+            except Exception as exc:
+                # the window is already spent (claim advances FIRST), so a
+                # launch that blew up must leave a sentence rather than a
+                # record stuck on "starting…" until the next occurrence
+                ok, text = False, "Could not start: %s" % error_excerpt(exc)
             schedule_mod.record_result(path, claimed["id"], text, ran=ok,
                                        now=now)
             self._announce_schedule(claimed, ok, text)
@@ -1722,7 +1739,7 @@ class Api:
         return True, ("Started %s%s." % (rec["room"],
                                          " (run now)" if manual else ""))
 
-    def _announce_schedule(self, rec, started, text):
+    def _announce_schedule(self, rec, started, text, manual=False):
         """One `scheduled` event per fire — started or not.
 
         A miss and a skip are exactly the events Josh wants a hook for, so
@@ -1735,6 +1752,8 @@ class Api:
         self.emit("scheduled", {
             "id": rec.get("id"), "name": rec.get("name"),
             "room": rec.get("room"), "started": bool(started),
+            # a hook has to be able to tell a timer from a button press
+            "manual": bool(manual),
             "text": "%s — %s" % (rec.get("name") or rec.get("room"), text),
         })
 
@@ -2767,6 +2786,22 @@ class Api:
                       or (payload.get("session") or {}).get("id")
                       or "")
         title = ""
+        if hook_name == "scheduled":
+            # A schedule is not a conversation event, and the fallback two
+            # lines down is the W2.0 bug in miniature: with no chat_id it
+            # would hand the script whatever chat Josh happens to be
+            # READING (measured: AICHAT_SESSION="some-other-chat"), and a
+            # hook that acts on AICHAT_SESSION would act on that one. The
+            # schedule names itself instead; if it started a chat, that
+            # chat emits its own `started` with its own identity.
+            env = hook_environment(hook_name, "",
+                                   str(payload.get("name") or
+                                       payload.get("room") or ""), detail)
+            worker = threading.Thread(target=self._hook_worker,
+                                      args=(hook_name, command, env),
+                                      daemon=True)
+            worker.start()
+            return worker
         try:
             run = (self._runs.get(session_id) if session_id
                    else self._runs.focused())

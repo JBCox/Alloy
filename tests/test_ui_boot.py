@@ -2787,7 +2787,8 @@ if (topLevelError) {
     ctx.closeHooks();
 
     // (b) the schedule list
-    schedReply = {ok: true, rooms: ['Quiet', 'Loud'], schedules: [
+    schedReply = {ok: true, poll_seconds: 30, rooms: ['Quiet', 'Loud'],
+                  schedules: [
       {id: 's1', name: 'Nightly', room: 'Quiet', prompt: 'go', turns: 6,
        kind: 'daily', at: '01:00', days: [], every_min: 0, start: '',
        enabled: true, next_run: '2026-08-28T01:00:00', last_run: '',
@@ -2814,6 +2815,9 @@ if (topLevelError) {
       .map(r => (r.children[0] || {}).textContent);
     p.roomOptions = byId['schedRoom'].options.map(o => o.value);
     p.emptyHidden = !!byId['schedEmpty'].hidden;
+    p.pollText = byId['schedPoll'].textContent;
+    // a PAUSED row must not be silently re-armed by an edit
+    p.editEnabledBefore = vm.runInContext('schedEditEnabled', ctx);
     // the second row's warning: it is armed against a room that has widened
     p.warnText = byId['schedRows'].children[1].children
       .filter(c => (c.className || '').indexOf('sched-foot') >= 0)
@@ -2837,6 +2841,14 @@ if (topLevelError) {
                                   {ack_gap: []});
     ctx.schedEdit(covered);
     p.ackWhenCovered = !!byId['schedAck'].checked;
+    p.editEnabledAfterPausedEdit = vm.runInContext('schedEditEnabled', ctx);
+    // ...and the PAYLOAD is the artefact the bridge consumes: asserting
+    // the variable alone cannot see a hardcoded `enabled: true` one line
+    // further down
+    const beforePaused = schedCalls.length;
+    await byId['schedSave'].onclick();
+    p.pausedEditPayload = schedCalls.length > beforePaused
+      ? schedCalls[schedCalls.length - 1][1].enabled : 'not saved';
 
     // (d) the kind rows follow the picker
     ctx.schedClear();
@@ -2872,8 +2884,31 @@ if (topLevelError) {
     byId['schedAck'].checked = true;
     await byId['schedSave'].onclick();
     const call = schedCalls[schedCalls.length - 1];
+    p.savedEnabled = call[1].enabled;
     p.savedName = call[0];
     p.savedSpec = call[1];
+
+    // (f) changing the recurrence AFTER ticking un-earns the tick: the
+    // sentence is what he agreed to, and it no longer says the same
+    // thing. Found live 2026-08-27 -- a box ticked against "every day
+    // at 01:00" saved "every Mon, Fri at 02:30".
+    // saveSched kicks off schedClear()/loadSched() without awaiting them,
+    // so let those settle and paint once before ticking: the guard keys
+    // on the sentence that was LAST PAINTED, and a form nobody has
+    // painted yet has no sentence to differ from
+    await new Promise(r => setTimeout(r, 5));
+    ctx.schedPaintAck();
+    byId['schedAck'].checked = true;
+    p.ackTextBeforeChange = byId['schedAckText'].textContent;
+    byId['schedAt'].value = '04:45';
+    byId['schedAt'].oninput();
+    p.ackAfterTimeChange = !!byId['schedAck'].checked;
+    p.ackTextAfterChange = byId['schedAckText'].textContent;
+    p.changeNote = byId['schedNote'].textContent;
+    // ...and a repaint that changes NOTHING must not un-tick it
+    byId['schedAck'].checked = true;
+    byId['schedAt'].oninput();
+    p.ackAfterNoChange = !!byId['schedAck'].checked;
 
     // (f) an innocuous room hides the block again
     riskReply = {ok: true, grants: [], sentences: [], notes: []};
@@ -2882,7 +2917,6 @@ if (topLevelError) {
     p.grantsHiddenAgain = !!byId['schedGrants'].hidden;
 
     ctx.closeSched();
-    p.closedByEscape = null;
 
     // (g) the `scheduled` event reaches the banner — the ONLY thing on screen
     // that ever mentions a run that did not happen
@@ -4337,6 +4371,36 @@ class UiBootTests(unittest.TestCase):
         self.assertEqual(p["savedSpec"]["ack"], {"grants": ["permission_full"]})
         self.assertEqual(p["savedSpec"]["room"], "Loud")
         self.assertEqual(p["savedSpec"]["prompt"], "do the thing")
+
+    def test_the_poll_interval_is_shown_rather_than_only_published(self):
+        """`poll_seconds` had no reader at all: "Alloy has to be running"
+        without its resolution is half the fact."""
+        self.assertIn("every 30 seconds", self._sched()["pollText"])
+
+    def test_editing_a_paused_schedule_does_not_silently_re_arm_it(self):
+        """The payload used to hardcode `enabled: true`, so opening a paused
+        row, changing one word and saving armed it — the opposite of what
+        pausing means."""
+        p = self._sched()
+        self.assertTrue(p["editEnabledBefore"])
+        self.assertFalse(p["editEnabledAfterPausedEdit"])
+        self.assertIs(p["pausedEditPayload"], False,
+                      "the saved payload re-armed a paused schedule")
+        # ...and a fresh form still saves armed
+        self.assertTrue(p["savedEnabled"])
+
+    def test_changing_the_recurrence_un_earns_the_acknowledgement(self):
+        """The sentence is what he agreed to. Found live: the room picker was
+        the only thing that repainted it, so a box ticked against "every day
+        at 01:00" saved "every Mon, Fri at 02:30"."""
+        p = self._sched()
+        self.assertIn("01:00", p["ackTextBeforeChange"])
+        self.assertIn("04:45", p["ackTextAfterChange"])
+        self.assertFalse(p["ackAfterTimeChange"],
+                         "the tick survived a recurrence change")
+        self.assertIn("read the access note", p["changeNote"])
+        self.assertTrue(p["ackAfterNoChange"],
+                        "an identical repaint un-ticked the box")
 
     def test_a_scheduled_event_reaches_the_banner(self):
         """The only thing on screen that ever mentions a run that did NOT
