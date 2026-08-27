@@ -151,11 +151,17 @@ class HeadlessAppTests(unittest.TestCase):
         once. Restored by hand.)
         """
         old_dir, old_tabs = relay.SESSIONS_DIR, relay.TABS_FILE
+        old_mem = relay.MEMORY_DIR
         relay.SESSIONS_DIR = self.tmp
         relay.TABS_FILE = os.path.join(self.tmp, "tabs.json")
+        # MEMORY_DIR is a SIBLING of sessions/, so it needs its own line: a
+        # bridge test left pointing at the real one reads Josh's notes into
+        # its preambles and writes structural ones back.
+        relay.MEMORY_DIR = os.path.join(self.tmp, "memory")
 
         def restore():
             relay.SESSIONS_DIR, relay.TABS_FILE = old_dir, old_tabs
+            relay.MEMORY_DIR = old_mem
         self.addCleanup(restore)
 
     def _set_completion(self, run, completion):

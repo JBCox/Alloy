@@ -18,8 +18,22 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import atexit  # noqa: E402  (below the path insert, like the relay import)
+
 import relay
 from relay import Agent, LoopIO, SessionStore, make_log, run_rounds
+
+# Every preamble now reads Alloy's memory store, and relay.MEMORY_DIR points
+# at the REAL one. That is the relay.SESSIONS_DIR gotcha one directory over:
+# a suite left pointing at it would read Josh's own notes into its preambles
+# (so a passing test starts failing the day he runs /remember) and, once
+# archive_objective writes structural notes, would WRITE to it too. This
+# module is imported by every loop-shaped suite, so redirecting here makes
+# them all hermetic at once; a suite that needs memory patches MEMORY_DIR to
+# its own temp dir on top. tests/test_memory.py pins that this stays here.
+_MEM_SANDBOX = tempfile.mkdtemp(prefix="alloy-test-memory-")
+relay.MEMORY_DIR = _MEM_SANDBOX
+atexit.register(shutil.rmtree, _MEM_SANDBOX, ignore_errors=True)
 
 
 class FakeAgent(Agent):

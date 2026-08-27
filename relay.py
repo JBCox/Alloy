@@ -36,6 +36,7 @@ import uuid
 
 # local: outcome records (imported by NAME to avoid shadowing — a child-team
 # call site already binds a local variable called `outcome`)
+import memory as memory_store
 from outcome import write_outcome
 import retro
 import workstreams
@@ -5101,7 +5102,27 @@ BRIEF_NAME = "AI-CHAT.md"
 # the prompt as ONE argv element, so preamble growth is genuinely bounded — a
 # fat context block plus a parallel-mode backlog is how a seat starts failing
 # every round with an unexplained OSError. Keep this budget small.
-BRIEF_MAX = 4000            # chars of project context injected into a preamble
+# PREAMBLE_CONTEXT_MAX is the SHARED ceiling for everything a preamble injects
+# from outside the conversation: the project brief and Alloy's memory together.
+# It is set to exactly what BRIEF_MAX used to be, and BRIEF_MAX is cut by the
+# same amount memory is guaranteed, so **the worst-case injected CONTENT does
+# not grow at all** now that memory ships. Measured 2026-08-27 on this machine:
+# the largest preamble Alloy could build before memory was 9,098 chars (three
+# seats, a full 4,000-char verbatim brief, ask + delegation + until-done), and
+# with memory at its floor the same preamble measures 9,361 -- the whole +263
+# is the memory block's own framing prose, because the CONTENT it carries was
+# already being spent by the brief. No chat shape can now inject more
+# outside-context than a fully-briefed one already could.
+#
+# The plan's phrasing was "so total injected context FALLS". It cannot fall
+# while a new block is added; what it can do is HOLD, and that is what these
+# three numbers buy. BRIEF_MAX + MEMORY_MIN_SHARE == PREAMBLE_CONTEXT_MAX is
+# the load-bearing identity -- it is what makes memory's floor FREE rather
+# than something that has to trim the brief at render time -- and a test pins
+# it so the three cannot drift apart.
+PREAMBLE_CONTEXT_MAX = 4000  # brief + memory content, together
+MEMORY_MIN_SHARE = 500       # memory's slice when the brief fills its own cap
+BRIEF_MAX = 3500            # chars of project context injected into a preamble
 BRIEF_DOC_MAX = 2500        # per-doc share of that budget when quoting
 BRIEF_READ_MAX = 1_000_000  # refuse to read anything larger
 BRIEF_MARK = "<!-- ai-chat:sources"
@@ -5692,6 +5713,149 @@ def brief_drift(brief, workspace):
     out += [f"{n} removed" for n in sorted(set(was) - set(now))]
     out += [f"{n} added" for n in sorted(set(now) - set(was))]
     return out
+
+
+# ------------------------------------------------------------- memory ------
+# Notes that outlive one conversation. The store is memory.py (standalone,
+# stdlib only, imported here as `memory_store` so the word `memory` stays free
+# for the record every caller passes around). MEMORY_DIR is a SIBLING of
+# sessions/, never a child: list_sessions treats every directory under
+# SESSIONS_DIR as a chat, so sessions/memory/ would ship a phantom rail row
+# that the two-step delete would rmtree.
+#
+# relay owns the path, exactly like SESSIONS_DIR, and every call passes it
+# explicitly -- fork.py's lesson is that a module keeping its own default is
+# how two halves of the app end up disagreeing about where the data lives.
+MEMORY_DIR = os.path.join(BASE_DIR, "memory")
+
+
+def memory_scope_for(session_dir, workspace):
+    """Which memory scope one chat reads and writes: (scope, project label).
+
+    A chat with a CUSTOM working folder gets that project's scope; anything
+    running in its own session folder gets `global`. Deliberately not gated
+    any harder than that: injection that only worked for project chats would
+    be silently off in Alloy's DEFAULT chat shape while /remember still wrote,
+    and a feature that is invisible where most people meet it reads as broken.
+
+    session_dir is passed through SESSIONS_DIR when it is missing rather than
+    allowed to reach session_project as "": os.path.abspath("") is the CWD,
+    which in this process is the Alloy repo itself, so an absent session dir
+    would make a chat pointed AT this repo look like a scratch chat.
+    """
+    project = session_project(session_dir or SESSIONS_DIR, workspace or "")
+    if not project:
+        return memory_store.GLOBAL_SCOPE, ""
+    return memory_store.project_key(workspace), project
+
+
+def memory_scope(state):
+    """memory_scope_for over a live loop state."""
+    return memory_scope_for(getattr(state.get("store"), "dir", "") or "",
+                            state.get("workspace") or "")
+
+
+def memory_record(state, root=None):
+    """What this chat may see, read FRESH. Never raises.
+
+    Read at compose time rather than snapshotted at run start, because
+    /remember can land mid-run and a seat that is introduced two turns later
+    should get the note Josh just wrote. It costs one small file read per
+    seat's FIRST turn, which is the only time a preamble is built.
+
+    `status` mirrors the brief's vocabulary on purpose: "none" renders
+    nothing, and "failed" is DECLARED rather than rendered as nothing -- a
+    seat told there are no notes, when there are notes it could not read,
+    will happily re-decide something Josh already settled.
+    """
+    scope, label = memory_scope(state)
+    try:
+        got = memory_store.collect(root or MEMORY_DIR, scope)
+    except Exception as e:                       # memory is decoration for
+        return {"status": "failed", "scope": scope, "label": label,   # the
+                "entries": [], "truncated": False,                    # run
+                "error": error_excerpt(e)}
+    if got.get("error"):
+        return {"status": "failed", "scope": scope, "label": label,
+                "entries": [], "truncated": bool(got.get("truncated")),
+                "error": got["error"]}
+    return {"status": "ok" if got["entries"] else "none", "scope": scope,
+            "label": label, "entries": got["entries"],
+            "truncated": bool(got.get("truncated")), "error": None}
+
+
+def brief_content_len(brief):
+    """How much of the shared context budget the project brief actually spent.
+
+    The CONTENT, not the rendered block: the block's framing prose is fixed
+    overhead that exists whether or not memory ships, and charging memory for
+    it would let a long framing sentence quietly starve the other feature.
+
+    There is deliberately NO status check. The first version had one, spelled
+    ("quoted", "digest", "ok"), and it was wrong twice over: the SYNTHESIZED
+    path sets fresh/written/updated/readonly (measured from project_brief, not
+    guessed), so a digest brief would have been charged zero and let memory
+    take the whole shared budget on top of it -- 7,500 chars where 4,000 was
+    the promise. And it was redundant anyway: off/none/failed all leave both
+    fields empty by construction, on the fresh path (project_brief's own
+    initializer) and on the resumed one (write_project_context writes no
+    sidecar without a body, so read_project_context finds none).
+    """
+    b = brief or {}
+    return len((b.get("quotes") or b.get("digest") or "").strip())
+
+
+def memory_budget(brief):
+    """Memory's share of PREAMBLE_CONTEXT_MAX, given what the brief spent.
+
+    BRIEF_MAX + MEMORY_MIN_SHARE == PREAMBLE_CONTEXT_MAX, so the remainder is
+    never below the floor and the brief is never trimmed to make room. The
+    max() is not that guarantee -- it is what keeps this honest if a caller
+    hands in a brief built under an older, larger BRIEF_MAX (a chat resumed
+    across this change does exactly that).
+    """
+    return max(MEMORY_MIN_SHARE, PREAMBLE_CONTEXT_MAX - brief_content_len(brief))
+
+
+def memory_preamble_block(mem, budget=None, solo=False):
+    """The remembered-notes section of a preamble, or '' when there is none.
+
+    Every line carries WHO wrote it and WHEN, and the closing sentence says
+    what that attribution means, because these notes are mixed by RANK rather
+    than grouped: Josh's own words and a seat's month-old claim sit next to
+    each other, and a seat that cannot tell them apart will treat a guess as
+    a settled fact. Same posture as the brief block -- framed as reference
+    material, never as instructions.
+
+    `solo` swaps only the reassurance about the OTHER seats, for the same
+    reason brief_preamble_block does: with one seat, "everyone was given the
+    same notes" is advice about nobody.
+    """
+    mem = mem or {}
+    status = mem.get("status")
+    if status == "failed":
+        return ("Alloy keeps notes between sessions, and this time it could "
+                "not read them (%s). Assume nothing: something may well have "
+                "been recorded that you are not seeing.\n\n"
+                % (mem.get("error") or "unknown error"))
+    if status != "ok" or not mem.get("entries"):
+        return ""
+    lines, shown, total = memory_store.render_lines(
+        mem["entries"], budget if budget is not None else MEMORY_MIN_SHARE)
+    where = (("this project (%s)" % mem["label"]) if mem.get("label")
+             else "your work with Josh generally")
+    shared = "" if solo else " Every participant was given these same notes."
+    tail = ""
+    if shown < total:
+        tail = " Showing %d of %d, highest-value first." % (shown, total)
+    if mem.get("truncated"):
+        tail += (" The notes file was too large to read in full, so there may "
+                 "be more.")
+    return ("What Alloy remembers about %s, from earlier sessions:\n%s\n"
+            "Notes marked Josh are his own words. The others are what a seat "
+            "or a past run believed at the time -- leads, not facts, so check "
+            "one before you rely on it.%s%s\n\n"
+            % (where, "\n".join(lines), shared, tail))
 
 
 def brief_preamble_block(brief, agent=None, solo=False):
@@ -7202,7 +7366,7 @@ def fatal_seat_error(agent, exc):
 
 def preamble(agent, others, topic, turns, workspace, roster=None,
              mode=DEFAULT_MODE, until_done=False, ceiling=None, spawn=None,
-             brief=None, ask=False, plan=None, routing=None):
+             brief=None, ask=False, plan=None, routing=None, memory=None):
     """`roster` is the full seat list IN TURN ORDER. Without it the roster line
     would read agent-first and so come out in a different order for every
     recipient — for a role team the order is information ("researcher speaks,
@@ -7215,7 +7379,12 @@ def preamble(agent, others, topic, turns, workspace, roster=None,
     `brief` is project_brief()'s result and is the ONLY thing that switches on
     the project-folder wording — deliberately not the `workspace` path, so any
     caller that passes no brief (tests, older call sites) still gets exactly
-    the preamble it always got."""
+    the preamble it always got.
+
+    `memory` is memory_record()'s result and follows the same rule: absent
+    means no block at all, so every caller that predates it keeps its exact
+    bytes. The two share PREAMBLE_CONTEXT_MAX, and memory is charged only for
+    what the brief's CONTENT spent."""
     other_names = " and ".join(a.name for a in others)
     # SOLO. Alloy runs one seat as a harness for a single agent, and the
     # multi-AI preamble is not merely padded there — it is false in a way that
@@ -7536,6 +7705,7 @@ def preamble(agent, others, topic, turns, workspace, roster=None,
             f"{role_block}"
             f"{topic_line}"
             f"{brief_preamble_block(brief, agent, solo=True)}"
+            f"{memory_preamble_block(memory, memory_budget(brief), solo=True)}"
             f"{cap_block}"
             f"{plan_block}"
             f"{spawn_block}"
@@ -7570,6 +7740,7 @@ def preamble(agent, others, topic, turns, workspace, roster=None,
         f"{role_block}"
         f"{topic_line}"
         f"{brief_preamble_block(brief, agent)}"
+        f"{memory_preamble_block(memory, memory_budget(brief))}"
         f"{cap_block}"
         f"{plan_block}"
         f"{spawn_block}"
@@ -8268,6 +8439,7 @@ def compose_prompt(state, i, backlog_override=None, filler=True):
                               spawn=state.get("spawn"),
                               plan=state.get("plan"),
                               brief=state.get("brief"),
+                              memory=memory_record(state),
                               ask=bool(state.get("ask")),
                               routing=orchestration(state)["routing"]))
         # parallel/free round 1 with no opener: EVERY seat opens

@@ -35,10 +35,12 @@ def _sandbox_relay_paths():
     file read relay's OWN module globals, not app's — patching only the app
     constant still writes the real sessions/ (it did, once; restored by hand)."""
     root = tempfile.mkdtemp(prefix="aichat-archive-test-")
-    old = (app.SESSIONS_DIR, relay.SESSIONS_DIR, relay.TABS_FILE)
+    old = (app.SESSIONS_DIR, relay.SESSIONS_DIR, relay.TABS_FILE,
+           relay.MEMORY_DIR)
     app.SESSIONS_DIR = root
     relay.SESSIONS_DIR = root
     relay.TABS_FILE = os.path.join(root, "tabs.json")
+    relay.MEMORY_DIR = os.path.join(root, "memory")
     return root, old
 
 
@@ -71,6 +73,7 @@ class TestArchive(unittest.TestCase):
         self.addCleanup(setattr, app, "SESSIONS_DIR", self.old[0])
         self.addCleanup(setattr, relay, "SESSIONS_DIR", self.old[1])
         self.addCleanup(setattr, relay, "TABS_FILE", self.old[2])
+        self.addCleanup(setattr, relay, "MEMORY_DIR", self.old[3])
 
     def _api(self):
         api = app.Api()
