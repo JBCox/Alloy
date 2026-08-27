@@ -682,6 +682,51 @@ if (topLevelError) {
     more.cont.onAfterSwitch = ctx.continuousCfg() !== null;
   } catch (e) { more.contError = (e && e.stack) || String(e); }
 
+  // ---- desktop control: the acknowledgement, and the revert on refusal ----
+  try {
+    more.desk = {};
+    const sel = byId['desktopMode'];
+    more.desk.bootValue = String(sel.value);
+    // a harmless rung needs no ceremony
+    sel.value = 'ask'; sel.onchange();
+    more.desk.askOpensNothing =
+      !(byId['deskModal'].className || '').includes('show');
+    more.desk.askNote = String(byId['desktopNote'].textContent || '');
+    more.desk.appsHiddenForAsk = !!byId['desktopApps'].hidden;
+    sel.value = 'allowlist'; sel.onchange();
+    more.desk.appsShownForAllowlist = !byId['desktopApps'].hidden;
+    // ...but the unattended rung must stop and ask
+    sel.value = 'full'; sel.onchange();
+    more.desk.fullOpensModal =
+      (byId['deskModal'].className || '').includes('show');
+    more.desk.okDisabledBeforeAck = !!byId['deskOk'].disabled;
+    // cancelling is a REFUSAL: the picker goes back, it does not stay on full
+    byId['deskCancel'].onclick();
+    more.desk.valueAfterCancel = String(sel.value);
+    more.desk.closedAfterCancel =
+      !(byId['deskModal'].className || '').includes('show');
+    // ticking the box is the only thing that unlocks OK
+    sel.value = 'full'; sel.onchange();
+    byId['deskAck'].checked = true; byId['deskAck'].onchange();
+    more.desk.okAfterAck = !!byId['deskOk'].disabled;
+    byId['deskOk'].onclick();
+    more.desk.valueAfterOk = String(sel.value);
+    more.desk.closedAfterOk =
+      !(byId['deskModal'].className || '').includes('show');
+    more.desk.fullNote = String(byId['desktopNote'].textContent || '');
+    // the payload the engine actually receives
+    byId['desktopAppList'].value = ' Notepad$ , , calc\\.exe ';
+    more.desk.apps = ctx.desktopAppList();
+    // a reopened chat shows what it RAN with, and an unknown value is off
+    ctx.restoreDesktop('allowlist', ['Notepad$']);
+    more.desk.restored = String(sel.value);
+    more.desk.restoredApps = String(byId['desktopAppList'].value);
+    ctx.restoreDesktop(undefined, undefined);
+    more.desk.restoredLegacy = String(sel.value);
+    ctx.restoreDesktop('sudo-everything', []);
+    more.desk.restoredJunk = String(sel.value);
+  } catch (e) { more.deskError = (e && e.stack) || String(e); }
+
   // ---- the rounds box, typed the way a user types it ---------------------
   // It used to be a <b> written with textContent; now it is a real input, so
   // the clamp and the focus guard are behaviour only an executing suite sees.
@@ -1583,6 +1628,47 @@ class UiBootTests(unittest.TestCase):
         self.assertIsNone(limits.get("spend_usd"))
         self.assertIsNone(limits.get("hours"))
         self.assertFalse(limits.get("watchdog_may_stop"))
+
+    def test_desktop_control_is_off_until_explicitly_chosen(self):
+        self.assertIsNone(self.report.get("deskError"),
+                          self.report.get("deskError"))
+        d = self.report.get("desk") or {}
+        self.assertEqual(d.get("bootValue"), "off")
+        # the harmless rungs need no ceremony, and say what they mean
+        self.assertTrue(d.get("askOpensNothing"))
+        self.assertIn("waits for you", d.get("askNote") or "")
+        self.assertTrue(d.get("appsHiddenForAsk"))
+        self.assertTrue(d.get("appsShownForAllowlist"))
+
+    def test_the_unattended_rung_needs_an_acknowledgement(self):
+        d = self.report.get("desk") or {}
+        self.assertTrue(d.get("fullOpensModal"))
+        self.assertTrue(d.get("okDisabledBeforeAck"),
+                        "OK must be locked until the box is ticked")
+        self.assertFalse(d.get("okAfterAck"), "ticking it unlocks OK")
+        self.assertEqual(d.get("valueAfterOk"), "full")
+        self.assertTrue(d.get("closedAfterOk"))
+        self.assertIn("No prompts", d.get("fullNote") or "")
+
+    def test_cancelling_unattended_desktop_reverts_the_picker(self):
+        """Backing out is a REFUSAL. Leaving the control reading 'Unattended'
+        after Cancel would be the app claiming a consent it never got — the
+        same lesson the Keep Improving warning already taught."""
+        d = self.report.get("desk") or {}
+        self.assertEqual(d.get("valueAfterCancel"), "allowlist",
+                         "cancel must restore the PREVIOUS rung")
+        self.assertTrue(d.get("closedAfterCancel"))
+
+    def test_the_desktop_payload_and_restore_are_honest(self):
+        d = self.report.get("desk") or {}
+        self.assertEqual(d.get("apps"), ["Notepad$", "calc\\.exe"],
+                         "blank entries dropped, each pattern trimmed")
+        self.assertEqual(d.get("restored"), "allowlist")
+        self.assertEqual(d.get("restoredApps"), "Notepad$")
+        # a chat saved before this existed, and a value we do not recognise,
+        # both read as OFF — never as a grant
+        self.assertEqual(d.get("restoredLegacy"), "off")
+        self.assertEqual(d.get("restoredJunk"), "off")
 
     def test_cancelling_the_warning_puts_the_mode_back(self):
         """Backing out is a refusal. It used to re-apply Keep Improving and

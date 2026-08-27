@@ -2506,10 +2506,30 @@ class Api:
         until_done = bool(cfg.get("until_done"))
         ceiling = max(1, int(cfg.get("ceiling") or DEFAULT_CEILING)) \
             if until_done else None
-        yolo = bool(cfg.get("yolo"))
+        # PERMISSION RUNG — the same resolution relay's own CLI does
+        # (`normalize_permission(args.permission, "full" if args.yolo else …)`):
+        # the named rung wins, `yolo` survives ONLY as the legacy spelling of
+        # "full", and anything unrecognised falls back to DEFAULT_PERMISSION
+        # rather than granting more than was asked for. Until 2026-08-26 this
+        # read `yolo` alone, so the composer's permission pill was decorative
+        # in the app: "Read only" and "Ask first" both arrived here as False
+        # and every seat ran at the "auto" default (claude --permission-mode
+        # acceptEdits, codex workspace-write, opencode --auto). Only "Full
+        # access" ever differed, and only through the legacy key.
+        permission = relay.normalize_permission(
+            cfg.get("permission"),
+            "full" if cfg.get("yolo") else relay.DEFAULT_PERMISSION)
+        yolo = permission == "full"
         # Connected apps (MCP) — Josh's real Gmail/Drive/Calendar/M365/ERP.
         # Explicit per-conversation opt-in; never inferred from yolo.
         connectors = bool(cfg.get("connectors"))
+        # Desktop control — a separate axis from `permission`, because that
+        # one bounds the workspace and this one bounds Josh's actual screen.
+        # normalize_desktop reads anything it does not recognise as OFF, so a
+        # typo or a stale cfg key cannot hand a seat the mouse.
+        desktop = relay.normalize_desktop(cfg.get("desktop"))
+        desktop_allowlist = [str(p) for p in (cfg.get("desktop_allowlist") or ())
+                             if str(p).strip()]
         mode, recipe, orchestration_adjustments = _app_orchestration_config(
             cfg, turns, until_done=until_done, ceiling=ceiling)
         if mode not in MODES:
@@ -2629,12 +2649,13 @@ class Api:
             agents = []
             for s, label in zip(picked, labels):
                 agents.append(AGENT_TYPES[s["provider"]](
-                    workspace, yolo=yolo,
+                    workspace, yolo=yolo, permission=permission,
                     model=s.get("model") or None, effort=s.get("effort") or None,
                     name=label,
                     role=s.get("role") or None,
                     role_instructions=s.get("role_instructions") or None,
-                    connectors=connectors))
+                    connectors=connectors,
+                    desktop=desktop, desktop_allowlist=desktop_allowlist))
             providers = [s["provider"] for s in picked]
 
             # Full opener text is the title — the rail ellipsizes in CSS and uses
@@ -2646,7 +2667,13 @@ class Api:
                 "agents": agents, "slot_ids": slot_ids, "providers": providers,
                 "transcript": store.transcript, "workspace": workspace,
                 "topic": topic or opener, "title": title_src, "created": store.created,
-                "yolo": yolo, "connectors": connectors,
+                "yolo": yolo, "permission": permission,
+                # Per-conversation "always allow <tool>" grants Josh gives at
+                # the ask-first modal; run_rounds appends to this and
+                # SessionStore.save persists it.
+                "permission_grants": [],
+                "connectors": connectors,
+                "desktop": desktop, "desktop_allowlist": desktop_allowlist,
                 "turns": turns, "store": store, "ended": False,
                 "pending": {i: [] for i in range(len(agents))},
                 "introduced": [False] * len(agents),
@@ -2853,13 +2880,19 @@ class Api:
         store.save(state)
         with open(state["transcript"], "a", encoding="utf-8") as f:
             f.write("\n---\n*paused — reply in the app to continue*\n")
-        summary = session_summary(self._session_dir)
-        rec = outcome.read_outcome(self._session_dir) or {}
+        # store.dir, NOT self._session_dir: that property resolves to the
+        # FOCUSED run, so a Josh who switched tabs mid-run would get this
+        # chat's `done` event carrying the other chat's directory, summary and
+        # feedback. The run was deliberately bound above for exactly this
+        # reason; these three reads were the last ones still leaking.
+        session_dir = store.dir
+        summary = session_summary(session_dir)
+        rec = outcome.read_outcome(session_dir) or {}
         self._set_status(run, "stopped" if outcome_kind == "stopped"
                          else "failed" if outcome_kind == "fatal" else "done",
                          outcome=outcome_kind)
         self.emit("done", {"transcript": state["transcript"],
-                           "session_dir": self._session_dir,
+                           "session_dir": session_dir,
                            "session": summary,
                            "feedback": rec.get("human_feedback") or {},
                            # read back from what was actually persisted rather

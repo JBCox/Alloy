@@ -120,6 +120,11 @@ class TestBattleLoop(unittest.TestCase):
         self.assertEqual(b["phase"], relay.BATTLE_AWAITING)
         self.assertEqual(b["slots"], [0, 1])
         self.assertEqual(state.get("termination_reason"), "battle_vote")
+        # battle_ready names its chat: the UI gates the vote bar on it, so a
+        # background duel must never be able to paint over another transcript
+        ready = [p for e, p in io.events if e == "battle_ready"]
+        self.assertEqual(len(ready), 1)
+        self.assertEqual(ready[0]["session"], state["store"].id)
         # THE isolation contract: neither seat's queue ever received the peer
         with open(os.path.join(state["store"].dir, "messages.jsonl"),
                   encoding="utf-8") as f:

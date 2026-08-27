@@ -105,11 +105,90 @@ class ConnectorGateTests(CapabilityBase):
     def test_yolo_needs_no_allowlist_at_all(self):
         self.assertIsNone(self.allowlist(ClaudeAgent(self.tmp, yolo=True)))
 
+    def fenced(self, agent):
+        """(strict flag present, the --mcp-config payload or None)."""
+        cmd = [str(c) for c in agent.build_cmd("hi")]
+        payload = None
+        if "--mcp-config" in cmd:
+            payload = cmd[cmd.index("--mcp-config") + 1]
+        return ("--strict-mcp-config" in cmd), payload
+
+    def test_connectors_off_fences_mcp_at_EVERY_rung(self):
+        """RED GUARD — the shipped `full` rung leaked every connected server.
+
+        `--allowedTools` gates MCP only in the `auto` branch. `full` emits
+        --dangerously-skip-permissions, which bypasses every permission check
+        including MCP, so a Full-access seat held Josh's real Gmail, Drive,
+        Calendar, M365 and Epicor servers regardless of the Connected-apps
+        checkbox — in runs that go unattended for hours. Verified live
+        2026-08-26: without the fence a haiku seat at `full` listed
+        mcp__claude_ai_Corvaer_Epicor__* tools; with it, NONE.
+
+        The fence has to hold at every rung, so this asserts every rung.
+        """
+        for rung in ("read_only", "ask", "auto", "full"):
+            with self.subTest(rung=rung):
+                strict, payload = self.fenced(
+                    ClaudeAgent(self.tmp, permission=rung))
+                self.assertTrue(
+                    strict,
+                    f"{rung} must pass --strict-mcp-config when connectors "
+                    f"are off")
+                self.assertEqual(json.loads(payload), {"mcpServers": {}})
+
+    def test_connectors_on_does_not_fence(self):
+        for rung in ("auto", "full"):
+            with self.subTest(rung=rung):
+                strict, _ = self.fenced(
+                    ClaudeAgent(self.tmp, permission=rung, connectors=True))
+                self.assertFalse(strict)
+
+    def test_fence_is_a_whitelist_not_a_blacklist(self):
+        """A --disallowedTools built from claude_mcp_prefixes() fails OPEN:
+        the helper returns [] on any probe failure, and an empty blacklist
+        grants everything — the gate would vanish exactly when the probe
+        breaks. The fence must not depend on the probe at all."""
+        relay._CLAUDE_MCP = []          # simulate a dead probe
+        strict, payload = self.fenced(ClaudeAgent(self.tmp, permission="full"))
+        self.assertTrue(strict)
+        self.assertEqual(json.loads(payload), {"mcpServers": {}})
+
     def test_capability_note_only_claims_connectors_when_on(self):
         self.assertNotIn("connected apps",
                          ClaudeAgent(self.tmp).capability_note())
         self.assertIn("connected apps",
                       ClaudeAgent(self.tmp, connectors=True).capability_note())
+
+    def test_notes_do_not_promise_writes_the_rung_removes(self):
+        """Peers route work by these sentences, so a rung that cannot write
+        must not say it can. At read_only claude gets
+        --disallowedTools=Write,Edit,NotebookEdit,Bash (which, unlike
+        --allowedTools, really removes them) and codex gets
+        sandbox_mode="read-only"."""
+        for cls in (ClaudeAgent, relay.CodexAgent):
+            with self.subTest(cls=cls.__name__):
+                ro = cls(self.tmp, permission="read_only").capability_note()
+                self.assertNotIn("writing files", ro)
+                self.assertIn("read-only", ro)
+                for rung in ("auto", "full"):
+                    note = cls(self.tmp, permission=rung).capability_note()
+                    self.assertIn("writing files", note)
+                    self.assertIn("running shell commands", note)
+        # claude's shell really is gone at read_only; codex's is only fenced
+        self.assertNotIn("running shell commands",
+                         ClaudeAgent(self.tmp,
+                                     permission="read_only").capability_note())
+
+    def test_no_seat_claims_a_browser_codex_exec_does_not_expose(self):
+        """`codex features list` reports browser_use and computer_use as
+        `stable true`, and neither is exposed in exec (print) mode — measured
+        2026-08-26 by asking codex exec to enumerate its own tools inside
+        Alloy's sandbox. Reading the feature flags and concluding GPT can
+        browse is the trap; this pins the measurement."""
+        for rung in ("read_only", "auto", "full"):
+            note = relay.CodexAgent(self.tmp, permission=rung).capability_note()
+            self.assertNotIn("browser", note.lower())
+            self.assertNotIn("computer use", note.lower())
 
     def test_note_no_longer_denies_shell_or_skills(self):
         # the earlier note claimed non-yolo "CANNOT run shell commands";

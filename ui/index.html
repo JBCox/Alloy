@@ -564,6 +564,8 @@
     border: 1px solid var(--alloy); border-radius: 9px; padding: 7px 12px;
     font-size: 12.5px; color: var(--text);
   }
+  #battleBar[hidden] { display: none !important; }
+  #askPill[hidden] { display: none !important; }
   .vote-btn {
     background: var(--surface2); color: var(--text);
     border: 1px solid var(--line); border-radius: 7px; padding: 4px 12px;
@@ -721,7 +723,7 @@
     font: 11px "Cascadia Mono", Consolas, monospace; padding: 1px 7px;
   }
   #acctModal, #roleModal, #askModal, #skillModal, #contModal, #kbdModal,
-  #hooksModal, #roomsModal {
+  #hooksModal, #roomsModal, #deskModal {
     position: fixed; inset: 0; z-index: 50; display: none;
     align-items: flex-start; justify-content: center; padding-top: 9vh;
     background: rgba(10,8,14,.6);
@@ -744,7 +746,11 @@
   #roomHint { color: var(--danger); font-size: 11px; min-height: 15px; margin-bottom: 4px; }
   #roomEmpty { color: var(--muted); font-size: 12px; padding: 10px 0 4px; }
   #acctModal.show, #roleModal.show, #askModal.show, #skillModal.show,
-  #contModal.show, #kbdModal.show, #hooksModal.show, #roomsModal.show { display: flex; }
+  #contModal.show, #kbdModal.show, #hooksModal.show, #roomsModal.show,
+  #deskModal.show { display: flex; }
+  #deskModal .modal { width: min(560px, 94vw); border-left: 3px solid var(--danger); }
+  #deskModal ul { margin: 10px 0 0; padding-left: 18px; line-height: 1.65; }
+  #deskModal li { margin-bottom: 4px; }
   .hook-row { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
   .hook-row label {
     width: 120px; flex: none; font-family: Bahnschrift, sans-serif;
@@ -877,6 +883,9 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .conn-empty { font-size: 11.5px; color: var(--muted); padding: 3px 2px 6px; }
+  .conn-gate { font-size: 11.5px; color: var(--muted); line-height: 1.5;
+    border-left: 2px solid var(--alloy); padding: 6px 10px; margin: 0 0 12px;
+    background: rgba(244,185,66,.06); border-radius: 0 4px 4px 0; }
   .conn-add { margin-top: 6px; display: grid; gap: 6px; }
   .conn-add input, .conn-add select, .conn-add textarea {
     background: var(--surface); color: var(--text); border: 1px solid var(--line);
@@ -1954,6 +1963,18 @@
         <input type="checkbox" id="connectors"> Connected apps (Gmail, Drive, Calendar…)
       </label>
       <div class="yolo-note" id="connNote">Seats can act in those accounts unattended — including sending mail. Skills, shell and document building work without this.</div>
+      <label class="check-div" for="desktopMode">Desktop control — your screen, not the folder</label>
+      <select id="desktopMode" title="Locked once the conversation starts">
+        <option value="off" selected>Off — seats cannot see your screen</option>
+        <option value="ask">Ask every time</option>
+        <option value="allowlist">Allowed apps only</option>
+        <option value="full">Unattended — no prompts</option>
+      </select>
+      <div id="desktopApps" hidden>
+        <input id="desktopAppList" type="text" spellcheck="false"
+               placeholder="Notepad$, \.exe$ — window title or program, comma separated">
+      </div>
+      <div class="yolo-note" id="desktopNote" hidden></div>
     </div>
 
     <button id="skillBtn" title="Write skills once and give them to every seat; manage MCP servers">
@@ -2217,6 +2238,35 @@
       <button class="btn-sm" id="roleDone">Done</button>
       <button id="roleApplyBtn" hidden
         title="Uses one agent turn: the seat compacts its context so it keeps its memory and wakes up in the new role">Apply role change</button>
+    </div>
+  </div>
+</div>
+
+<div id="deskModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Unattended desktop control</h2>
+      <button class="close" id="deskClose" title="Cancel" aria-label="Cancel">✕</button>
+    </div>
+    <div id="contWarn">
+      <b>The seats will use your screen with no prompt, including while you are away.</b>
+      This is not the working folder — it is the actual desktop this app is running on.
+      <ul>
+        <li>They can read any window's contents, click, type and press keys.</li>
+        <li>Nothing pauses to ask you, and a Keep Improving run can do this for hours.</li>
+        <li>The pointer never moves and windows are never brought to the front,
+            so you may not notice it happening.</li>
+        <li>Alloy still refuses its own windows and password fields — those two
+            hold at every setting and cannot be turned off.</li>
+      </ul>
+    </div>
+    <label class="check-row" style="margin-top:14px">
+      <input type="checkbox" id="deskAck">
+      I understand these seats can use my desktop unattended.
+    </label>
+    <div class="modal-foot">
+      <button class="btn-sm" id="deskCancel">Cancel</button>
+      <button class="btn-sm primary" id="deskOk" disabled>Turn it on</button>
     </div>
   </div>
 </div>
@@ -3916,15 +3966,20 @@ window.uiEvent = packet => {
   } else if (event === "webhook_status") {
     paintWebhook(payload);
   } else if (event === "battle_ready") {
-    // Answers are in. Build the mask context from the payload's slot order
+    // Answers are in. Update the mask context from the payload's slot order
     // (lower slot = A, same rule as relay.battle_seats) if the open chat
-    // didn't already establish it, and show the vote bar for the focused chat.
-    if (!battleCtx) {
+    // already established it via syncBattleUI. The bar visibility is
+    // controlled solely by syncBattleUI (on open) and revealBattle (on vote).
+    // A battle_ready from ANY OTHER chat must not paint here.
+    if (payload.session && payload.session !== activeId) return;
+    if (battleCtx) {
       const letters = {};
       (payload.slots || []).forEach((sid, idx) => {
         letters[String(sid)] = idx === 0 ? "A" : "B";
       });
-      battleCtx = {masked: true, revealed: false, letters};
+      battleCtx.letters = letters;
+      battleCtx.masked = true;
+      battleCtx.revealed = false;
     }
     $("seatList")?.classList.add("battle-blind");
     $("battleBar").hidden = false;
@@ -5317,6 +5372,11 @@ function setSeated(on) {
   if (seated) closePermMenu(); else renderPermPick();
   if (seated) closeModeMenu(); else renderModePick();
   $("connectors").disabled = seated;
+  // Desktop control is conversation-level like the rest of this group: the
+  // seats' CLIs were handed the server (or not) at launch, so changing it
+  // mid-chat would show a promise the running seats cannot honour.
+  $("desktopMode").disabled = seated;
+  $("desktopAppList").disabled = seated;
   if (!seated) normalizePolicyControls();
 }
 
@@ -5755,6 +5815,18 @@ function renderConns(payload) {
   mcpCache = payload && payload.providers || {};
   const pane = $("connPane");
   pane.innerHTML = "";
+  // Installing a server is not the same as a seat being able to reach it,
+  // and the gap used to be invisible: the "Connected apps" checkbox is the
+  // switch, and until it is on, Alloy fences MCP off for every seat at every
+  // permission level. Saying so here beats letting Josh add a server and
+  // wonder why nobody used it.
+  const gate = document.createElement("div");
+  gate.className = "conn-gate";
+  gate.textContent = "Installed here ≠ available to a seat. Seats reach "
+    + "these servers only while “Connected apps” is ticked for the "
+    + "conversation — with it off, Alloy passes --strict-mcp-config and "
+    + "no seat sees any server, at any permission level.";
+  pane.appendChild(gate);
   skProviders.forEach(p => {
     const row = mcpCache[p.id] || {servers: [], error: null};
     const box = document.createElement("div");
@@ -5915,6 +5987,8 @@ document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
     closeAccounts(); closeRole(); hideAsk(); closeSkills(); closeRooms();
     closeContinuous(); closeKbd(); closeHooks();
+    // false = refused, so Escape reverts the picker like Cancel does
+    if ($("deskModal").classList.contains("show")) closeDeskModal(false);
     closeModeMenu();                   // the composer's own popover
     if ($("findBar") && !$("findBar").hidden) findClose();
     if (micOn) micStop(true);          // a live mic is the one thing Escape must kill
@@ -6516,6 +6590,8 @@ async function sendSay() {
     // Compatibility for older app.py versions and saved config readers.
     yolo: permissionMode === "full",
     connectors: $("connectors").checked, workspace: customFolder,
+    desktop: $("desktopMode").value,
+    desktop_allowlist: desktopAppList(),
     brief: $("projBrief").checked,
     mode: orchestration.legacy_mode,
     orchestration,
@@ -7012,6 +7088,79 @@ function renderPermPick() {
     list.appendChild(b);
   }
 }
+/* ---------- desktop control ---------- */
+/* A separate axis from the permission pill: that one bounds the working
+   folder, this one bounds Josh's actual screen. `full` is the only rung
+   behind an acknowledgement, and Cancel REVERTS the picker rather than
+   leaving it showing something he did not agree to — the same lesson the
+   Keep Improving modal already taught. */
+const DESKTOP_NOTES = {
+  off: "",
+  ask: "Seats may read any window; every click or keystroke waits for you.",
+  allowlist: "Windows matching the patterns below go straight through. "
+           + "Everything else still asks.",
+  full: "No prompts at all, including while you are away. Alloy still refuses "
+      + "its own windows and password fields.",
+};
+let desktopPrev = "off";
+
+function desktopAppList() {
+  return ($("desktopAppList").value || "").split(",")
+    .map(s => s.trim()).filter(Boolean);
+}
+function syncDesktopNote() {
+  const mode = $("desktopMode").value;
+  const note = DESKTOP_NOTES[mode] || "";
+  $("desktopNote").textContent = note;
+  $("desktopNote").hidden = !note;
+  $("desktopApps").hidden = mode !== "allowlist";
+}
+/* Put the control back to what a chat or room actually ran with. Anything
+   unrecognised — including a missing key from a chat saved before desktop
+   control existed — reads as OFF, matching relay.normalize_desktop: the one
+   direction that must never happen by accident is a reopened chat quietly
+   holding the screen. */
+function restoreDesktop(mode, apps) {
+  const known = ["off", "ask", "allowlist", "full"];
+  const value = known.includes(mode) ? mode : "off";
+  $("desktopMode").value = value;
+  desktopPrev = value;
+  $("desktopAppList").value = (apps || []).join(", ");
+  syncDesktopNote();
+}
+function openDeskModal() {
+  $("deskAck").checked = false;
+  $("deskOk").disabled = true;
+  $("deskModal").classList.add("show");
+}
+function closeDeskModal(accepted) {
+  $("deskModal").classList.remove("show");
+  if (!accepted) {
+    // Refused: put the picker back where it was. Leaving it on "Unattended"
+    // after Cancel would be the app claiming consent it did not get.
+    $("desktopMode").value = desktopPrev;
+    syncDesktopNote();
+  }
+}
+$("desktopMode").onchange = () => {
+  const mode = $("desktopMode").value;
+  if (mode === "full") { openDeskModal(); return; }
+  desktopPrev = mode;
+  syncDesktopNote();
+};
+$("deskAck").onchange = () => { $("deskOk").disabled = !$("deskAck").checked; };
+$("deskOk").onclick = () => {
+  if (!$("deskAck").checked) return;
+  desktopPrev = "full";
+  closeDeskModal(true);
+  syncDesktopNote();
+};
+$("deskCancel").onclick = () => closeDeskModal(false);
+$("deskClose").onclick = () => closeDeskModal(false);
+$("deskModal").onclick = e => {
+  if (e.target === $("deskModal")) closeDeskModal(false);
+};
+
 function openPermMenu() {
   renderPermPick();
   $("permPickMenu").hidden = false;
@@ -7735,6 +7884,7 @@ async function openChat(id, findQuery, findExcerpt) {
   // truthful for chats that ran before this existed, and for ones that opted
   // out: no brief record means the seats were never given project context
   $("projBrief").checked = !!s.brief;
+  restoreDesktop(s.desktop, s.desktop_allowlist);
   const helpers = (s.spawn || {}).max_helpers || 0;
   $("spawnSel").value = [0, 3, 10].includes(helpers) ? String(helpers) : "10";
   const teams = (s.spawn || {}).max_teams || 0;
@@ -7868,6 +8018,8 @@ function resetStage() {
   // this; it keeps running in its own tab.
   canContinue = false; running = false;
   $("stopBtn").hidden = true;
+  syncBattleUI(null);   // a fresh stage has no duel — never inherit the last
+                        // chat's vote bar (reported 2026-08-26)
   transcriptPath = null; workspacePath = null;
   convProviders = []; clearFatal();
   renderWorkstreams([]);
@@ -7926,6 +8078,8 @@ function roomCfgFromStage() {
   return {
     permission: $("permissionMode").value,
     connectors: $("connectors").checked,
+    desktop: $("desktopMode").value,
+    desktop_allowlist: desktopAppList(),
     workspace: customFolder,
     brief: $("projBrief").checked,
     mode: orchestration.legacy_mode,
@@ -7955,6 +8109,7 @@ function applyRoomToStage(room) {
   $("permissionMode").value = cfg.permission || "ask";
   syncPermissionNote();
   $("connectors").checked = !!cfg.connectors;
+  restoreDesktop(cfg.desktop, cfg.desktop_allowlist);
   setFolder(cfg.workspace || null);
   $("projBrief").checked = !!cfg.brief;
   restoreModerator(cfg.mode === "supervisor" ? cfg.supervisor : cfg.moderator);

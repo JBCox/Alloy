@@ -204,12 +204,15 @@ class RoomsUIMarkupTests(unittest.TestCase):
             cls.html = f.read()
 
     def test_modal_id_is_in_both_css_selector_groups(self):
+        # Both patterns check that the rooms id is IN its group, not that it
+        # is the LAST id in it — every later modal (event hooks, desktop
+        # control) legitimately joins the same two groups, and pinning the
+        # tail made this suite fail for the crime of someone adding one.
         self.assertRegex(
-            self.html, r"#acctModal,\s*#roleModal[^{]*#roomsModal\s*\{")
-        # #hooksModal (event hooks) legitimately sits in the same group, so the
-        # rooms id only has to be IN the .show list, not directly after kbd's.
+            self.html, r"#acctModal,\s*#roleModal[^{]*#roomsModal[^{]*\{")
         self.assertRegex(
-            self.html, r"#contModal\.show,\s*#kbdModal\.show,[^{]*#roomsModal\.show\s*\{")
+            self.html,
+            r"#contModal\.show,\s*#kbdModal\.show,[^{]*#roomsModal\.show[^{]*\{")
 
     def test_escape_listener_closes_the_rooms_modal(self):
         m = self.html.index('e.key === "Escape"')

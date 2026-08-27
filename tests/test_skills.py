@@ -12,6 +12,7 @@ import os
 import shutil
 import sys
 import tempfile
+import types
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -346,6 +347,116 @@ class GeminiMcpFileTests(unittest.TestCase):
         relay._CLAUDE_MCP = ["mcp__stale"]
         relay.remove_mcp("gemini", "ctx7")
         self.assertIsNone(relay._CLAUDE_MCP)
+
+
+class McpArgvShapeTests(unittest.TestCase):
+    """Each CLI's `mcp add` grammar, pinned against its own --help.
+
+    The shipped code emitted `-e KEY=VALUE` for EVERY cli-backed provider.
+    claude documents `-e, --env`, but codex documents `--env` only, so every
+    env-carrying server registered with GPT was rejected at the flag. Verified
+    2026-08-26 against `claude mcp add --help` and `codex mcp add --help`.
+    """
+
+    def setUp(self):
+        self.calls = []
+        self._old = relay._run_mcp
+
+        def fake(argv, timeout=60):
+            self.calls.append([str(a) for a in argv])
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        relay._run_mcp = fake
+
+    def tearDown(self):
+        relay._run_mcp = self._old
+
+    def test_codex_uses_the_long_env_flag_it_documents(self):
+        self.assertIsNone(relay.add_mcp("gpt", "srv", "node",
+                                        args=["s.js"], env={"K": "v"}))
+        argv = self.calls[0]
+        self.assertIn("--env", argv)
+        self.assertNotIn("-e", argv)
+        self.assertEqual(argv[argv.index("--env") + 1], "K=v")
+        # codex's documented shape: `mcp add [OPTIONS] <NAME> -- <COMMAND>...`
+        self.assertEqual(argv[-4:], ["srv", "--", "node", "s.js"])
+
+    def test_claude_keeps_user_scope_and_accepts_the_same_flag(self):
+        self.assertIsNone(relay.add_mcp("claude", "srv", "node",
+                                        env={"K": "v"}))
+        argv = self.calls[0]
+        # -s user or the server is invisible to seats run anywhere else
+        self.assertEqual(argv[argv.index("-s") + 1], "user")
+        self.assertIn("--env", argv)
+
+
+class OpenCodeMcpTests(unittest.TestCase):
+    """opencode has NO `mcp remove` and its `mcp add` takes no command
+    positional, so writes go to opencode.json in its own dialect — verified
+    against the installed @opencode-ai/sdk types (McpLocalConfig /
+    McpRemoteConfig) and `opencode mcp --help`."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ai-chat-ox-mcp-")
+        self.path = os.path.join(self.tmp, "opencode.json")
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"$schema": "https://opencode.ai/config.json",
+                       "model": "opencode/x-preview-f-free",
+                       "permission": "allow"}, f)
+        self._old = relay.PROVIDERS["ox"]["mcp"]
+        relay.PROVIDERS["ox"]["mcp"] = dict(
+            self._old, write={"path": self.path, "dialect": "opencode"})
+        self.shelled = []
+        self._old_run = relay._run_mcp
+        relay._run_mcp = lambda argv, timeout=60: self.shelled.append(argv)
+
+    def tearDown(self):
+        relay.PROVIDERS["ox"]["mcp"] = self._old
+        relay._run_mcp = self._old_run
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def cfg(self):
+        with open(self.path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_local_server_uses_opencodes_own_dialect(self):
+        self.assertIsNone(relay.add_mcp("ox", "desk", "python",
+                                        args=["desktop_mcp.py"],
+                                        env={"TOKEN": "x"}))
+        spec = self.cfg()["mcp"]["desk"]
+        # `mcp`, not `mcpServers`; command is ONE array; env key is `environment`
+        self.assertEqual(spec["type"], "local")
+        self.assertEqual(spec["command"], ["python", "desktop_mcp.py"])
+        self.assertEqual(spec["environment"], {"TOKEN": "x"})
+        self.assertNotIn("args", spec)
+        self.assertNotIn("env", spec)
+
+    def test_writes_never_shell_out(self):
+        relay.add_mcp("ox", "desk", "python")
+        relay.remove_mcp("ox", "desk")
+        # `opencode mcp remove` does not exist; shelling out would report its
+        # usage text as the error while changing nothing.
+        self.assertEqual(self.shelled, [])
+
+    def test_unrelated_settings_survive(self):
+        relay.add_mcp("ox", "desk", "python")
+        cfg = self.cfg()
+        self.assertEqual(cfg["model"], "opencode/x-preview-f-free")
+        self.assertEqual(cfg["permission"], "allow")
+        self.assertEqual(cfg["$schema"], "https://opencode.ai/config.json")
+
+    def test_remote_server_is_remote_not_http(self):
+        relay.add_mcp("ox", "ctx", None, transport="http",
+                      url="https://example.com/mcp")
+        spec = self.cfg()["mcp"]["ctx"]
+        self.assertEqual(spec["type"], "remote")
+        self.assertEqual(spec["url"], "https://example.com/mcp")
+
+    def test_remove_takes_it_back_out(self):
+        relay.add_mcp("ox", "desk", "python")
+        self.assertIsNone(relay.remove_mcp("ox", "desk"))
+        self.assertEqual(self.cfg().get("mcp"), {})
+        self.assertEqual(relay.remove_mcp("ox", "desk"), "No such server.")
 
 
 class BridgeTests(SkillsBase):

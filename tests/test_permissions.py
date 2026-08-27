@@ -13,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import relay
+import app
 
 
 class PermissionProfileTests(unittest.TestCase):
@@ -201,6 +202,47 @@ class StandingTurnVerdictTests(unittest.TestCase):
         self.assertTrue(verdict["allow"])
         self.assertEqual(asked, ["Edit"])
 
+    def test_watcher_hands_the_callback_a_CALLABLE_abort(self):
+        """RED GUARD — this exact bug shipped and nothing could see it.
+
+        Every consumer of the abort seam CALLS it: `_AppIO.ask_human` and
+        `CLIIO.ask_human` both evaluate `abort and abort()`, and `ask_abort`
+        calls `abort()`. The watcher used to hand over the `threading.Event`
+        itself, which is truthy but NOT callable — so the TypeError landed in
+        `_watch_approvals`' blanket except and was answered as DENY, with the
+        reason "Alloy approval failed ('Event' object is not callable)".
+        Result: every mid-turn approval in the app silently auto-denied while
+        the modal flashed open and shut.
+
+        The old stubs all took `abort` and ignored it, which is precisely why
+        six passing tests proved nothing. This one uses the argument the way
+        the real consumers do.
+        """
+        captured = {}
+
+        def on_approval(req, abort=None):
+            captured["callable"] = callable(abort)
+            captured["abort"] = abort
+            # byte-for-byte what the real front ends do with it
+            captured["during_turn"] = bool(abort and abort())
+            return True, "yes"
+
+        a = relay.ClaudeAgent(self.tmp, permission="ask",
+                              on_approval=on_approval)
+        self._queue(a, "r-abort", "Write")
+        verdict = self._drain_one(a, "r-abort")
+
+        self.assertTrue(captured.get("callable"),
+                        "the watcher must pass a CALLABLE abort, not the Event")
+        self.assertFalse(captured["during_turn"],
+                         "abort must read False while the turn is still live")
+        # _drain_one sets the stop event before returning, so the same callable
+        # must now report the turn is over — proving it is wired to the Event
+        # and not just any no-op lambda.
+        self.assertTrue(captured["abort"]())
+        self.assertTrue(verdict["allow"])
+        self.assertNotIn("approval failed", verdict["reason"])
+
     def test_verdict_does_not_survive_the_turn(self):
         class Stub(relay.ClaudeAgent):
             def build_cmd(self, message):
@@ -371,6 +413,180 @@ class ApprovalHubTests(unittest.TestCase):
                 self.tmp)
             self.assertNotEqual(req["risk"], "high", f"Did not expect high risk for: {cmd}")
 
+class FakeWindow:
+    """Enough window for Api.emit; the events themselves are not the subject
+    here — the AGENTS are."""
+
+    def evaluate_js(self, script):
+        pass
+
+
+def scripted_from(cls, reply):
+    """A REAL adapter subclass whose turn is canned.
+
+    Deliberately not a hand-written FakeAgent: the whole question here is what
+    `build_cmd` emits, so the class under test has to be the shipping one.
+    Only `turn` is replaced, which is the one method that would spend tokens.
+    The session id is re-captured exactly as the real `parse()` does, or
+    `continue_block` rightly rules the chat unresumable.
+    """
+
+    class Scripted(cls):
+        def turn(self, message, on_activity=None):
+            self.session_id = f"fake-session-{self.uid}"
+            return reply
+
+    return Scripted
+
+
+class AppBridgePermissionTests(unittest.TestCase):
+    """The composer's permission pill, end to end through the real app.Api.
+
+    Everything above this line tests relay, and relay was always right. The
+    APP was not, and had no coverage here at all: `Api._conversation` read
+    only the legacy `yolo` key, so a cfg of permission="read_only" or "ask"
+    arrived as False, `Agent.__init__` fell back to DEFAULT_PERMISSION, and
+    two of the four rungs on Josh's pill did nothing whatsoever — the seat ran
+    at "auto" and meta.json recorded "auto", so even the reopened chat agreed
+    with itself. It looked healthy from every angle a relay-only suite can
+    see, which is the whole argument for testing the bridge and not just the
+    engine.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="alloy-app-permissions-")
+        self._old_app_dir = app.SESSIONS_DIR
+        self._old_relay_dir, self._old_tabs = relay.SESSIONS_DIR, relay.TABS_FILE
+        # relay's OWN globals, not just the app's: session_path() and
+        # write_tabs() read relay's, so a test that redirects only
+        # app.SESSIONS_DIR still writes the real sessions/tabs.json.
+        app.SESSIONS_DIR = relay.SESSIONS_DIR = self.tmp
+        relay.TABS_FILE = os.path.join(self.tmp, "tabs.json")
+        self._old_types = dict(relay.AGENT_TYPES)
+        relay.AGENT_TYPES["claude"] = scripted_from(relay.ClaudeAgent, "c1")
+        relay.AGENT_TYPES["gpt"] = scripted_from(relay.CodexAgent, "g1")
+
+    def tearDown(self):
+        app.SESSIONS_DIR = self._old_app_dir
+        relay.SESSIONS_DIR, relay.TABS_FILE = self._old_relay_dir, self._old_tabs
+        relay.AGENT_TYPES.clear()
+        relay.AGENT_TYPES.update(self._old_types)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _start(self, **cfg):
+        """One real conversation with two scripted seats (the app refuses a
+        solo room), driven through the same `_conversation` the Send button
+        reaches."""
+        api = app.Api()
+        api._window = FakeWindow()
+        api._conversation(dict(
+            {"opener": "hi", "turns": 1,
+             "seats": [{"id": 0, "provider": "claude", "enabled": True},
+                       {"id": 1, "provider": "gpt", "enabled": True}]},
+            **cfg))
+        api._emit_q.join()
+        self.assertIsNotNone(api._conv, "the conversation never started")
+        return api
+
+    def _meta(self, api):
+        with open(os.path.join(api._conv["store"].dir, "meta.json"),
+                  encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_read_only_cfg_reaches_the_seats_and_their_command_lines(self):
+        api = self._start(permission="read_only")
+        agents = api._conv["agents"]
+        self.assertEqual([a.effective_permission() for a in agents],
+                         ["read_only", "read_only"])
+        claude = agents[0].build_cmd("hello")
+        # The real plan-mode pair: --permission-mode plan is Claude's own
+        # read-only mode, and --disallowedTools actually REMOVES the write
+        # tools (--allowedTools would merely auto-approve them).
+        self.assertIn("--permission-mode", claude)
+        self.assertEqual(claude[claude.index("--permission-mode") + 1], "plan")
+        self.assertIn("--disallowedTools=Write,Edit,NotebookEdit,Bash", claude)
+        self.assertNotIn("--dangerously-skip-permissions", claude)
+        # Not a claude-shaped accident: the rung reached the other seat too.
+        self.assertIn('sandbox_mode="read-only"', agents[1].build_cmd("hello"))
+
+    def test_ask_first_cfg_reaches_the_seats_and_wires_the_approval_channel(self):
+        """`ask` needs more than a flag: run_rounds hangs the approval
+        callback off any seat whose permission is "ask" and NULLS it for every
+        other rung, and `effective_permission` collapses "ask" to read-only
+        when that channel is missing (a gate nobody is listening to must fail
+        closed). An "ask" that survives both is proof the pill reached the
+        engine, not merely the constructor."""
+        api = self._start(permission="ask")
+        agents = api._conv["agents"]
+        self.assertEqual([a.permission for a in agents], ["ask", "ask"])
+        for a in agents:
+            self.assertTrue(callable(a.on_approval),
+                            f"{a.name} has no approval channel")
+            self.assertEqual(a.effective_permission(), "ask")
+        claude = agents[0].build_cmd("hello")
+        self.assertIn("--settings", claude, "approval hook not installed")
+
+    def test_meta_records_the_rung_the_chat_actually_ran_with(self):
+        api = self._start(permission="read_only")
+        self.assertEqual(api._conv["permission"], "read_only")
+        meta = self._meta(api)
+        self.assertEqual(meta["permission"], "read_only")
+        self.assertFalse(meta["yolo"])
+        self.assertEqual(
+            relay.session_summary(api._conv["store"].dir)["permission"],
+            "read_only")
+
+    def test_legacy_yolo_cfg_is_still_the_full_rung(self):
+        """Older saved configs — and the UI's own compatibility key — say
+        `yolo: true` and nothing else."""
+        api = self._start(yolo=True)
+        agents = api._conv["agents"]
+        self.assertEqual([a.permission for a in agents], ["full", "full"])
+        self.assertIn("--dangerously-skip-permissions",
+                      agents[0].build_cmd("hello"))
+        self.assertEqual(self._meta(api)["permission"], "full")
+
+    def test_the_full_rung_keeps_the_legacy_yolo_spelling_truthful(self):
+        """The other direction: a named "full" must still read as yolo to
+        every old reader (state, meta, Agent.yolo), or the two spellings of
+        one fact drift apart."""
+        api = self._start(permission="full")
+        self.assertTrue(api._conv["yolo"])
+        self.assertTrue(all(a.yolo for a in api._conv["agents"]))
+        self.assertTrue(self._meta(api)["yolo"])
+
+    def test_an_unrecognised_rung_falls_back_and_never_grants_more(self):
+        api = self._start(permission="wishful-thinking")
+        self.assertEqual(api._conv["permission"], relay.DEFAULT_PERMISSION)
+        self.assertEqual([a.permission for a in api._conv["agents"]],
+                         ["auto", "auto"])
+
+    def test_continuing_a_chat_keeps_the_rung_it_started_with(self):
+        """`_continue` never rebuilds agents, so the rung rides the state —
+        but the pill is locked once seated, and a continue that quietly reset
+        it to the default would be the same bug one turn later."""
+        api = self._start(permission="read_only")
+        api._continue({"opener": "again", "turns": 1})
+        api._emit_q.join()
+        self.assertEqual(api._conv["permission"], "read_only")
+        self.assertEqual([a.effective_permission() for a in api._conv["agents"]],
+                         ["read_only", "read_only"])
+        self.assertEqual(self._meta(api)["permission"], "read_only")
+
+    def test_reopening_a_chat_restores_the_rung(self):
+        """The third leg: a new process rebuilds the seats from meta through
+        relay.rehydrate. That side was always correct — it was simply fed a
+        meta that said "auto" no matter what Josh had picked."""
+        api = self._start(permission="read_only")
+        session_id = os.path.basename(api._conv["store"].dir)
+        reopened = app.Api()
+        reopened._window = FakeWindow()
+        result = reopened.open_session(session_id)
+        self.assertTrue(result.get("ok"))
+        self.assertEqual(result["session"]["permission"], "read_only")
+        self.assertEqual(reopened._conv["permission"], "read_only")
+        self.assertEqual([a.permission for a in reopened._conv["agents"]],
+                         ["read_only", "read_only"])
 
 if __name__ == "__main__":
     unittest.main()

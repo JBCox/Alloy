@@ -48,6 +48,8 @@ CONTRACT — read this before changing anything:
 import datetime
 import json
 import os
+import time
+import uuid
 
 import outcome
 
@@ -208,13 +210,49 @@ def merge_heuristics(existing, candidates, now=None):
 
 
 def write_playbook(sessions_dir, playbook):
+    """Replace the playbook atomically.
+
+    Two hazards, and the playbook is exposed to both because — unlike
+    outcome.json, which is one file per session — there is exactly ONE of it
+    for the whole app:
+
+    * A FIXED "<path>.tmp" is a shared name. Two writers (a finishing run and
+      the app's own refresh) truncate each other's temp file mid-write and
+      then both rename it into place, so the survivor can be a spliced file.
+      A unique suffix makes the two writes independent; last rename wins,
+      which is the intended semantic.
+    * On Windows a concurrent READER without FILE_SHARE_DELETE blocks the
+      rename with a transient PermissionError — the hazard relay._atomic_write
+      and outcome._atomic_write already learned about.
+
+    It matters because playbook_block() is interpolated straight into
+    SUPERVISOR_PROMPT: a corrupt playbook degrades the planner of a run that
+    may be unattended for hours.
+    """
     os.makedirs(sessions_dir, exist_ok=True)
     path = os.path.join(sessions_dir, PLAYBOOK_FILE)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(playbook, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, path)
-    return path
+    tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(playbook, f, ensure_ascii=False, indent=1)
+        for delay in (0, 0.05, 0.15, 0.3):
+            if delay:
+                time.sleep(delay)
+            try:
+                os.replace(tmp, path)
+                return path
+            except PermissionError:
+                continue
+        os.replace(tmp, path)
+        return path
+    finally:
+        # A failed write must not leave its scratch file behind: this dir is
+        # the session rail's own folder and every stray name is visible there.
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
 
 
 def summarize(records, playbook):

@@ -553,6 +553,97 @@ def normalize_permission(value, default=DEFAULT_PERMISSION):
                                    _PERMISSION_ALIASES.get(key, default))
 
 
+# ------------------------------------------------- desktop control ------
+# A separate axis from the permission ladder above, because it is a different
+# promise: `permission` bounds what a seat does to the WORKSPACE, this bounds
+# what it does to Josh's screen. Off by default, and off is the reading of
+# anything unrecognised — the whole point of a ladder is that you cannot climb
+# it by accident.
+DESKTOP_RUNGS = {
+    "off": {
+        "label": "Off",
+        "blurb": "Seats cannot see or touch the desktop. (Default.)",
+    },
+    "ask": {
+        "label": "Ask every time",
+        "blurb": ("Seats may look at windows freely; every click, keystroke "
+                  "and scroll waits for you and expires with the observation "
+                  "it was asked about."),
+    },
+    "allowlist": {
+        "label": "Allowed apps",
+        "blurb": ("As Ask, except windows matching patterns you set up front "
+                  "proceed without asking. Anything else still asks."),
+    },
+    "full": {
+        "label": "Unattended",
+        "blurb": ("Seats act on the desktop with no prompt, including "
+                  "overnight. Alloy still refuses its own windows and "
+                  "password fields."),
+    },
+}
+DESKTOP_ORDER = ("off", "ask", "allowlist", "full")
+DEFAULT_DESKTOP = "off"
+# The MCP server name. Tools reach the model as mcp__<this>__<tool>, so it is
+# part of the allowlist spelling and must not drift.
+DESKTOP_SERVER = "alloy_desktop"
+_DESKTOP_ALIASES = {
+    "none": "off", "no": "off", "disabled": "off", "false": "off", "": "off",
+    "on": "ask", "ask-first": "ask", "ask_first": "ask", "prompt": "ask",
+    "approve": "ask", "supervised": "ask",
+    "allow-list": "allowlist", "allow_list": "allowlist",
+    "apps": "allowlist", "allowed": "allowlist", "allowed-apps": "allowlist",
+    "unattended": "full", "yolo": "full", "always": "full", "true": "full",
+}
+
+
+def normalize_desktop(value, default=DEFAULT_DESKTOP):
+    """Anything a human, a saved meta or a CLI flag can carry -> one rung.
+
+    Never raises, and an unrecognised value is OFF rather than `default`-if-
+    that-were-permissive: the failure mode to avoid is a typo granting the
+    screen. Booleans are accepted so `--desktop` can be a bare switch.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return "full" if value else "off"
+    key = str(value).strip().lower().replace(" ", "_")
+    if key in DESKTOP_RUNGS:
+        return key
+    return _DESKTOP_ALIASES.get(key.replace("_", "-"),
+                                _DESKTOP_ALIASES.get(key, "off"))
+
+
+def desktop_enabled(agent):
+    """True when this seat should be handed the desktop server at all."""
+    return normalize_desktop(getattr(agent, "desktop", None)) != "off"
+
+
+def desktop_capability_clause(agent):
+    """The capability_note fragment for desktop control — [] when off.
+
+    Same hard contract as the rest of that note: it describes what build_cmd
+    ACTUALLY hands this seat. Only providers whose adapter delivers the server
+    may say this, so it is spelled once here rather than copied into each
+    adapter, where it would drift into a claim somebody's build_cmd does not
+    honour. The wording names the ceiling too — a peer deciding who should
+    take a task needs to know a click will stop and wait for Josh.
+    """
+    if not desktop_enabled(agent):
+        return []
+    rung = normalize_desktop(agent.desktop)
+    seeing = ("SEEING AND CONTROLLING WINDOWS ON JOSH'S DESKTOP (read a "
+              "window's controls, click, type, scroll, press keys)")
+    if rung == "full":
+        return [seeing + " with no prompt"]
+    if rung == "allowlist":
+        return [seeing + " — apps Josh listed go straight through, anything "
+                "else waits for him"]
+    return [seeing + " — every click or keystroke waits for Josh to approve "
+            "it, so do not plan a long unattended sequence of them"]
+
+
 # The four answers an approval modal offers. Order is the button order, and
 # "once" comes first on purpose: the safe answer should be the easy one.
 PERMISSION_ANSWERS = ("Allow once", "Allow rest of turn",
@@ -716,8 +807,23 @@ class Agent:
 
     def __init__(self, workspace, yolo=False, model=None, effort=None, name=None,
                  role=None, role_instructions=None, connectors=False,
-                 permission=None, on_approval=None, lean=False, turn_cap=None):
+                 permission=None, on_approval=None, lean=False, turn_cap=None,
+                 desktop=None, on_desktop_approval=None,
+                 desktop_allowlist=None):
         self.workspace = workspace
+        # DESKTOP CONTROL — a SEPARATE axis from `permission`, deliberately.
+        # The permission ladder is about the workspace; this one is about
+        # Josh's actual screen, and the two are not the same promise. It is
+        # also why `on_desktop_approval` is its own callback: the tool-approval
+        # path short-circuits on `_turn_verdict`, so a "rest of this turn" said
+        # to an unrelated Bash prompt would otherwise silently pre-approve
+        # every click and keystroke that followed it.
+        self.desktop = normalize_desktop(desktop)
+        self.on_desktop_approval = on_desktop_approval
+        # Patterns Josh set up front, matched against a window's title or exe.
+        # Config, not a runtime button: the thing a standing grant must never
+        # be is something a waiting run can talk him into.
+        self.desktop_allowlist = list(desktop_allowlist or ())
         # PERMISSION LEVEL. The single source of truth for what this seat may
         # do; `yolo` survives only as the legacy way of saying "full" and as a
         # read-only property below, so every existing caller, saved meta and
@@ -837,6 +943,91 @@ class Agent:
         os.makedirs(d, exist_ok=True)
         return d
 
+    # ------------------------------------------------- desktop control ----
+    def desktop_dir(self):
+        """The desktop server's OWN request dir — never `approval_dir()`.
+
+        Separate directories mean separate watchers mean separate verdicts:
+        the tool-approval path answers from `_turn_verdict` when Josh has said
+        "rest of this turn", and a click on his screen must never inherit an
+        answer he gave about a file write.
+        """
+        d = os.path.join(tempfile.gettempdir(), "alloy-desktop", self.uid)
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def desktop_server_spec(self):
+        """The MCP server definition for this seat, or None when off.
+
+        `python.exe`, never `sys.executable`: the app runs as pythonw.exe, a
+        GUI-subsystem binary with no usable stdio, and this server speaks
+        JSON-RPC over exactly that. Handing the CLI a pythonw path is a server
+        that connects and then says nothing at all.
+        """
+        if not desktop_enabled(self):
+            return None
+        exe = sys.executable or ""
+        base, name = os.path.split(exe)
+        if name.lower() == "pythonw.exe":
+            console = os.path.join(base, "python.exe")
+            if os.path.isfile(console):
+                exe = console
+        env = {
+            "ALLOY_DESKTOP_RUNG": normalize_desktop(self.desktop),
+            "ALLOY_DESKTOP_APPROVAL_DIR": self.desktop_dir(),
+            "ALLOY_DESKTOP_SEAT": self.name or "a seat",
+            # TOLD, not inferred: the server is a grandchild of the seat CLI,
+            # so climbing its own ancestry would find the CLI and stop. Alloy's
+            # own windows must be refused by pid, not by an exe-name accident.
+            "ALLOY_APP_PID": str(os.getpid()),
+        }
+        if self.desktop_allowlist:
+            env["ALLOY_DESKTOP_ALLOWLIST"] = json.dumps(
+                list(self.desktop_allowlist))
+        return {"command": exe,
+                "args": [os.path.join(BASE_DIR, "desktop_mcp.py")],
+                "env": env}
+
+    def _watch_desktop(self, stop):
+        """Answer desktop approval requests for the duration of one turn.
+
+        A near-twin of `_watch_approvals`, and deliberately NOT a shared
+        function: this one consults no standing verdict and offers no
+        session-scoped grant, which are exactly the two things that would turn
+        "allowed once" into a licence. Same fail-closed rule — every path
+        writes an answer, because a seat blocked on a question nobody will
+        answer burns the turn.
+        """
+        d = self.desktop_dir()
+        while not stop.is_set():
+            try:
+                names = [n for n in os.listdir(d) if n.endswith(".req")]
+            except OSError:
+                names = []
+            for name in sorted(names):
+                path = os.path.join(d, name)
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        req = json.load(fh)
+                    os.remove(path)
+                except (OSError, ValueError):
+                    continue
+                req["seat"] = self.name
+                allow, reason = False, "Alloy could not ask Josh; declining."
+                try:
+                    verdict = (self.on_desktop_approval(req, stop.is_set)
+                               if self.on_desktop_approval else None)
+                    if isinstance(verdict, tuple):
+                        allow, reason = bool(verdict[0]), (verdict[1] or reason)
+                    elif verdict is not None:
+                        allow = bool(verdict)
+                        reason = ("Josh approved this." if allow
+                                  else "Josh declined this.")
+                except Exception as e:
+                    allow, reason = False, f"Alloy approval failed ({e})."
+                self._write_answer(d, req, allow, reason)
+            stop.wait(0.2)
+
     def _watch_approvals(self, stop):
         """Poll this seat's request dir and answer each request via on_approval.
 
@@ -870,7 +1061,15 @@ class Agent:
                                        "Josh denied the rest of this turn.")
                     continue
                 try:
-                    verdict = self.on_approval(req, stop) if self.on_approval else None
+                    # `stop.is_set`, never `stop`: every consumer of the abort
+                    # seam CALLS it (`abort and abort()`), and an Event is
+                    # truthy but not callable — so passing the Event itself
+                    # raised TypeError into the blanket except below and
+                    # answered DENY. That silently broke every mid-turn
+                    # approval in the app, and no suite saw it because the
+                    # stubs all ignore the argument.
+                    verdict = (self.on_approval(req, stop.is_set)
+                               if self.on_approval else None)
                     if isinstance(verdict, tuple):
                         allow, reason = bool(verdict[0]), (verdict[1] or reason)
                     elif verdict is not None:
@@ -1007,6 +1206,17 @@ class Agent:
             approvals = threading.Event()
             threading.Thread(target=self._watch_approvals, args=(approvals,),
                              daemon=True).start()
+        # A SECOND watcher, on its own event and its own directory. It runs at
+        # every permission rung, because desktop control is a separate axis:
+        # `on_approval` is nulled for any seat whose permission is not "ask"
+        # (see run_rounds), so hanging desktop off that one would deny every
+        # click at read_only, auto AND full — i.e. everywhere real work
+        # happens — and read as broken hardware rather than as a policy.
+        desktop_stop = None
+        if normalize_desktop(self.desktop) in ("ask", "allowlist"):
+            desktop_stop = threading.Event()
+            threading.Thread(target=self._watch_desktop, args=(desktop_stop,),
+                             daemon=True).start()
         try:
             rc, stdout, stderr = self._run_streaming(cmd, env, on_line)
         except TurnCancelled:
@@ -1038,6 +1248,8 @@ class Agent:
             # a survivor would answer the NEXT turn's requests on stale state.
             if approvals is not None:
                 approvals.set()
+            if desktop_stop is not None:
+                desktop_stop.set()
             self._turn_approved = False
             self._turn_denial_reason = ""
             self._turn_verdict = None
@@ -1368,6 +1580,46 @@ class ClaudeAgent(Agent):
                 # parallelism within a turn, never new effective capability.
                 "--allowedTools=" + ",".join(allowed),
             ]
+        # ---- MCP reachability: one decision, all four combinations --------
+        # This lives out here, past the rung branch, because MCP reachability
+        # is NOT a property of the rung. `--allowedTools` gates MCP only in
+        # the `auto` branch; `full` emits --dangerously-skip-permissions,
+        # which bypasses every permission check including MCP. That is how a
+        # Full-access seat used to hold every connected server no matter what
+        # the Connected-apps checkbox said — blast radius Josh's real
+        # Gmail/Drive/Calendar/M365/Epicor, in runs unattended for hours.
+        #
+        # A whitelist, never a blacklist. The tempting fix is
+        # --disallowedTools=<claude_mcp_prefixes()>, and it fails OPEN: that
+        # helper returns [] on any probe failure, and an empty blacklist
+        # grants everything — the gate would vanish exactly when the probe
+        # broke. --strict-mcp-config can only fail closed.
+        #
+        # Desktop control rides the same mechanism, which is the neat part: a
+        # config naming exactly one server IS a whitelist of one. The
+        # definition travels per invocation, so there is no `claude mcp add`,
+        # no mutation of Josh's ~/.claude.json, and the grant is scoped to
+        # this conversation for free — his own terminal `claude` sessions
+        # never see it. Verified live 2026-08-26: the init event reported
+        # mcp_servers [('alloy_desktop','connected')] and exactly one mcp__
+        # tool, while an empty config reported zero servers and zero tools out
+        # of the 8 servers / 59 mcp__ tools this machine otherwise has.
+        spec = self.desktop_server_spec()
+        extra = {DESKTOP_SERVER: spec} if spec else {}
+        if not self.connectors:
+            # Whitelist: exactly the desktop server, which may be none at all.
+            cmd += ["--strict-mcp-config",
+                    "--mcp-config", json.dumps({"mcpServers": extra})]
+        elif extra:
+            # Connectors ON: Josh asked for his real servers, so this ADDS to
+            # them rather than replacing them. No --strict-mcp-config here, or
+            # the connectors he switched on would silently disappear.
+            cmd += ["--mcp-config", json.dumps({"mcpServers": extra})]
+        if extra:
+            for i, part in enumerate(cmd):
+                if str(part).startswith("--allowedTools="):
+                    cmd[i] = part + ",mcp__" + DESKTOP_SERVER
+                    break
         return cmd
 
     @staticmethod
@@ -1560,12 +1812,24 @@ class ClaudeAgent(Agent):
         # Skill (only MCP tools came back denied). An earlier version of this
         # note said non-yolo "cannot run shell commands" — false, and the
         # worst kind of false, since peers route work by these sentences.
-        can = ["web search", "running shell commands",
-               "reading and writing files in the shared folder",
-               "using its Skills (which is how it builds real Word, PDF, "
-               "Excel and PowerPoint files)"]
+        # ...but the rung still decides what build_cmd hands over, and at
+        # read_only it emits --disallowedTools=Write,Edit,NotebookEdit,Bash,
+        # which (unlike --allowedTools) really does REMOVE those tools. A note
+        # claiming shell and writes there sends peers handing work to a seat
+        # that cannot take it — the exact failure this contract exists to stop.
+        writes = PERMISSION_LEVELS[self.effective_permission()]["writes"]
+        can = ["web search"]
+        if writes:
+            can += ["running shell commands",
+                    "reading and writing files in the shared folder"]
+        else:
+            can.append("reading and searching files in the shared folder "
+                       "(read-only for now: no shell, no writes)")
+        can.append("using its Skills (which is how it builds real Word, PDF, "
+                   "Excel and PowerPoint files)")
         if self.connectors:
             can.append("its connected apps over MCP")
+        can += desktop_capability_clause(self)
         return (f"{', '.join(can)}. CANNOT generate images "
                 f"(no image tool exists on this CLI)")
 
@@ -1803,10 +2067,26 @@ class CodexAgent(Agent):
         return ()
 
     def capability_note(self):
-        can = ["web search", "running shell commands",
-               "reading and writing files in the shared folder",
-               "building real Word, PDF, Excel and PowerPoint files with its "
-               "bundled document plugins"]
+        # Rung-aware for the same reason claude's is: at read_only build_cmd
+        # emits sandbox_mode="read-only", so a write claim is false there.
+        # Measured 2026-08-26 — `codex exec`'s real tool list in Alloy's own
+        # sandbox is: functions.exec/wait/request_user_input, collaboration.*,
+        # apply_patch, shell_command, create_goal/get_goal/update_goal,
+        # update_plan, view_image, image_gen__imagegen, web__run, and the
+        # mcp resource readers. NOTE what is absent: browser_use and
+        # computer_use are reported `stable true` by `codex features list`
+        # and are NOT exposed in exec (print) mode at all, so neither this
+        # note nor anything else may claim GPT can drive a browser.
+        writes = PERMISSION_LEVELS[self.effective_permission()]["writes"]
+        can = ["web search"]
+        if writes:
+            can += ["running shell commands",
+                    "reading and writing files in the shared folder"]
+        else:
+            can.append("reading and searching files in the shared folder "
+                       "(read-only for now: no writes)")
+        can.append("building real Word, PDF, Excel and PowerPoint files with "
+                   "its bundled document plugins")
         if codex_image_gen_enabled():
             # verified end-to-end through this exact adapter, 2026-08-17:
             # the PNG lands in the shared workspace, non-yolo included
@@ -2543,8 +2823,20 @@ PROVIDERS = {
                login_strip_env=False,
                skills_dir=os.path.join(HOME, ".config", "opencode", "skill"),
                # `opencode mcp list` prints the same "<name>: <target>" line
-               # shape claude does.
-               mcp=dict(kind="cli", argv=["opencode", "mcp"], fmt="lines"),
+               # shape claude does — but `mcp add` takes NO command positional
+               # (only --url/--env/--header) and there is no `mcp remove` at
+               # all, so writes cannot go through the CLI. Verified against
+               # `opencode mcp --help` and the installed SDK's own types
+               # (@opencode-ai/sdk types.gen.d.ts): servers live in
+               # opencode.json under `mcp`, in a dialect of their own —
+               # local = {type, command: [argv...], environment: {}},
+               # remote = {type, url, headers: {}}. Hence read via CLI, write
+               # via file.
+               mcp=dict(kind="cli", argv=["opencode", "mcp"], fmt="lines",
+                        write=dict(path=os.path.join(HOME, ".config",
+                                                     "opencode",
+                                                     "opencode.json"),
+                                   dialect="opencode")),
                install_hint="npm install -g opencode-ai"),
 }
 
@@ -2838,6 +3130,58 @@ def _mcp_file(pid):
     return meta.get("path") if meta.get("kind") == "file" else None
 
 
+def _mcp_env_flag(pid):
+    """The flag this CLI spells environment variables with.
+
+    `--env` is the long form BOTH claude (`-e, --env`) and codex (`--env`
+    only) document, so it is the default and `-e` is nobody's requirement.
+    The old code emitted `-e` unconditionally, which codex does not accept."""
+    meta = (PROVIDERS.get(pid) or {}).get("mcp") or {}
+    return meta.get("env_flag", "--env")
+
+
+def _mcp_write_target(pid):
+    """(path, dialect) when this provider's WRITES go to a config file.
+
+    Reading and writing are not always the same channel: opencode lists
+    happily over its CLI but has no way to add a local server or remove one
+    from it, so its writes go to opencode.json instead."""
+    meta = (PROVIDERS.get(pid) or {}).get("mcp") or {}
+    w = meta.get("write") or {}
+    if w.get("path"):
+        return w["path"], w.get("dialect", "mcpServers")
+    if meta.get("kind") == "file":
+        return meta.get("path"), meta.get("dialect", "mcpServers")
+    return None, None
+
+
+def _mcp_root_key(dialect):
+    return "mcp" if dialect == "opencode" else "mcpServers"
+
+
+def _mcp_spec(dialect, command, args, env, transport, url):
+    """One server entry in the dialect this provider actually reads."""
+    if dialect == "opencode":
+        if transport in ("http", "sse"):
+            # opencode knows only local/remote; an sse URL is still remote.
+            spec = {"type": "remote", "url": url or "", "enabled": True}
+        else:
+            spec = {"type": "local",
+                    "command": [command or ""] + list(args or []),
+                    "enabled": True}
+            if env:
+                spec["environment"] = dict(env)
+        return spec
+    if transport in ("http", "sse"):
+        return {"type": transport, "url": url or ""}
+    spec = {"type": "stdio", "command": command or ""}
+    if args:
+        spec["args"] = list(args)
+    if env:
+        spec["env"] = dict(env)
+    return spec
+
+
 def _read_mcp_json(path):
     try:
         with open(path, encoding="utf-8") as f:
@@ -2949,9 +3293,24 @@ def add_mcp(provider, name, command, args=None, env=None, transport="stdio",
     args = list(args or [])
     env = dict(env or {})
     argv = _mcp_cli(provider)
-    path = _mcp_file(provider)
+    # A write target outranks the CLI: opencode lists over its CLI but cannot
+    # add a local server through it at all.
+    path, dialect = _mcp_write_target(provider)
     try:
-        if argv:
+        if path:
+            data = _read_mcp_json(path)
+            root = _mcp_root_key(dialect)
+            servers = data.setdefault(root, {})
+            if not isinstance(servers, dict):
+                return f"{os.path.basename(path)} has an unreadable {root} section."
+            servers[name] = _mcp_spec(dialect, command, args, env,
+                                      transport, url)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            # read-modify-write: unrelated servers — and every unrelated
+            # setting in a shared config file like opencode.json — must
+            # survive untouched.
+            _atomic_write(path, json.dumps(data, indent=2))
+        elif argv:
             cmd = argv + ["add"]
             if provider == "claude":
                 # `claude mcp add` defaults to scope=local, i.e. only for the
@@ -2962,27 +3321,12 @@ def add_mcp(provider, name, command, args=None, env=None, transport="stdio",
                 cmd += ["--transport", transport, name, url]
             else:
                 for k, v in env.items():
-                    cmd += ["-e", f"{k}={v}"]
+                    cmd += [_mcp_env_flag(provider), f"{k}={v}"]
                 cmd += [name, "--", command] + args
             r = _run_mcp(cmd, timeout=120)
             if r.returncode != 0:
                 return error_excerpt((r.stderr or r.stdout or "").strip()
                                      or f"exited {r.returncode}")
-        elif path:
-            data = _read_mcp_json(path)
-            servers = data.setdefault("mcpServers", {})
-            if transport in ("http", "sse"):
-                servers[name] = {"type": transport, "url": url or ""}
-            else:
-                spec = {"type": "stdio", "command": command or ""}
-                if args:
-                    spec["args"] = args
-                if env:
-                    spec["env"] = env
-                servers[name] = spec
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            # read-modify-write: unrelated servers must survive untouched
-            _atomic_write(path, json.dumps(data, indent=1))
         else:
             return "That provider has no MCP support."
     except Exception as e:
@@ -2993,21 +3337,25 @@ def add_mcp(provider, name, command, args=None, env=None, transport="stdio",
 
 def remove_mcp(provider, name):
     argv = _mcp_cli(provider)
-    path = _mcp_file(provider)
+    # Same precedence as add_mcp, and for the same reason: opencode has no
+    # `mcp remove` subcommand at all, so a CLI-first order would shell out to
+    # a command that does not exist and report its usage text as the error.
+    path, dialect = _mcp_write_target(provider)
     try:
-        if argv:
+        if path:
+            data = _read_mcp_json(path)
+            root = _mcp_root_key(dialect)
+            servers = data.get(root) or {}
+            if not isinstance(servers, dict) or name not in servers:
+                return "No such server."
+            servers.pop(name)
+            data[root] = servers
+            _atomic_write(path, json.dumps(data, indent=2))
+        elif argv:
             r = _run_mcp(argv + ["remove", name], timeout=60)
             if r.returncode != 0:
                 return error_excerpt((r.stderr or r.stdout or "").strip()
                                      or f"exited {r.returncode}")
-        elif path:
-            data = _read_mcp_json(path)
-            servers = data.get("mcpServers") or {}
-            if name not in servers:
-                return "No such server."
-            servers.pop(name)
-            data["mcpServers"] = servers
-            _atomic_write(path, json.dumps(data, indent=1))
         else:
             return "That provider has no MCP support."
     except Exception as e:
@@ -3310,6 +3658,12 @@ class SessionStore:
             # additive like brief/ask: old code ignoring this merely reopens
             # the chat without connectors, never with them on by surprise
             "connectors": bool(state.get("connectors")),
+            # Additive for the same reason, and with a sharper edge: an old
+            # build reading this meta reopens the chat with desktop control
+            # OFF. The one direction that must never happen by accident is a
+            # reopened chat quietly holding the screen.
+            "desktop": normalize_desktop(state.get("desktop")),
+            "desktop_allowlist": list(state.get("desktop_allowlist") or ()),
             "turns": state["turns"],
             "rnd": state["rnd"],
             "max": state["max"],
@@ -4719,6 +5073,10 @@ def session_summary(session_dir, meta=None):
             "full" if meta.get("yolo") else DEFAULT_PERMISSION),
         "permission_grants": list(meta.get("permission_grants") or []),
         "yolo": bool(meta.get("yolo")),
+        # So a reopened chat shows the access it ACTUALLY ran with. Absent key
+        # (a chat saved before desktop control existed) normalizes to "off".
+        "desktop": normalize_desktop(meta.get("desktop")),
+        "desktop_allowlist": list(meta.get("desktop_allowlist") or ()),
         "moderator": meta.get("moderator"),
         "supervisor": meta.get("supervisor"),
         "supervisor_goal": meta.get("supervisor_goal"),
@@ -4974,7 +5332,9 @@ def rehydrate(meta, workspace=None):
             name=s.get("label") or None,
             role=s.get("role") or None,
             role_instructions=s.get("role_instructions") or None,
-            connectors=bool(meta.get("connectors")))
+            connectors=bool(meta.get("connectors")),
+            desktop=meta.get("desktop"),
+            desktop_allowlist=meta.get("desktop_allowlist"))
         a.session_id = s.get("session_id") or None
         agents.append(a)
     return {
@@ -9918,6 +10278,43 @@ def run_rounds(state, io):
 
         agent.on_approval = ask_permission
 
+    # Desktop control is wired SEPARATELY and for every seat that has it,
+    # regardless of permission rung — the loop above nulls `on_approval` for
+    # anything that is not `ask`, and hanging clicks off that would deny them
+    # at read_only, auto and full, i.e. everywhere real work happens.
+    for i, agent in enumerate(state.get("agents") or ()):
+        if not desktop_enabled(agent):
+            agent.on_desktop_approval = None
+            continue
+
+        def ask_desktop(req, abort=None, i=i, agent=agent):
+            window = req.get("window") or {}
+            where = window.get("title") or window.get("exe") or "a window"
+            payload = {
+                "qid": "desktop-" + str(req.get("id") or uuid.uuid4().hex[:8]),
+                "kind": "desktop", "speaker": state["slot_ids"][i],
+                "provider": state["providers"][i], "asker": agent.name,
+                "question": f"{agent.name} wants to {req.get('detail') or 'act'}.",
+                "detail": str(req.get("detail") or ""),
+                "window": where,
+                "exe": str(window.get("exe") or ""),
+                # TWO options, on purpose. There is no "rest of this turn" and
+                # no "always allow" here: a standing licence over Josh's
+                # screen is the exact thing this ladder refuses, and the way
+                # to stop being asked is the allowlist he sets up front, not a
+                # button offered while a run is waiting on him.
+                "options": ["Allow once", "Deny"],
+            }
+            answer = io.ask_human(payload, abort=abort)
+            text = str(answer or "").strip().lower()
+            allowed = text.startswith("allow")
+            return allowed, ("Josh approved this."
+                             if allowed else
+                             "Josh declined this." if text
+                             else "Josh did not answer, so this is declined.")
+
+        agent.on_desktop_approval = ask_desktop
+
     ended = None
     completion = state.get("completion")
     if not isinstance(completion, dict):
@@ -10790,7 +11187,8 @@ def run_battle(state, io):
     else:
         io.emit("status", {"text": "No answers came back — nothing to "
                                    "compare. Continue the chat to retry."})
-    io.emit("battle_ready", {"slots": b["slots"], "answered": answered})
+    io.emit("battle_ready", {"session": store.id, "slots": b["slots"],
+                             "answered": answered})
     # A deliberate stop so the human can vote — not a failure, not a cap
     state["termination_reason"] = "battle_vote"
     return "wrapped"
@@ -11493,6 +11891,17 @@ def main():
                     help="let seats use your connected apps over MCP (Gmail, "
                          "Drive, Calendar, M365, ERP…). They can then act in "
                          "those accounts unattended — off by default")
+    ap.add_argument("--desktop", nargs="?", const="ask", default="off",
+                    choices=list(DESKTOP_ORDER),
+                    help="let seats see and control windows on this desktop: "
+                         "ask (every action waits for you), allowlist (apps "
+                         "you name go through), full (no prompt, including "
+                         "unattended). Bare --desktop means ask. Off by "
+                         "default")
+    ap.add_argument("--desktop-app", action="append", default=[],
+                    metavar="REGEX", dest="desktop_apps",
+                    help="with --desktop allowlist: a pattern matched against "
+                         "a window's title or executable. Repeatable")
     ap.add_argument("--workspace", default=None, metavar="PATH",
                     help="run the seats in an existing project folder instead "
                          "of a fresh scratch dir; its AI docs become shared "
@@ -11737,7 +12146,9 @@ def main():
     agents = [AGENT_TYPES[p](workspace, yolo=permission == "full",
                              permission=permission,
                              model=m, effort=e, name=lb,
-                             connectors=args.connectors, turn_cap=turn_cap)
+                             connectors=args.connectors, turn_cap=turn_cap,
+                             desktop=getattr(args, "desktop", None),
+                             desktop_allowlist=getattr(args, "desktop_apps", []))
               for p, m, e, lb in seats]
     for a in agents:  # suffixed/custom labels inherit the provider's color
         COLORS.setdefault(a.name, COLORS.get(type(a).name, ""))
@@ -11846,6 +12257,8 @@ def main():
              "yolo": permission == "full", "permission": permission,
              "permission_grants": [],
              "connectors": bool(args.connectors),
+             "desktop": normalize_desktop(getattr(args, "desktop", None)),
+             "desktop_allowlist": list(getattr(args, "desktop_apps", []) or []),
              "turns": args.turns,
              "rnd": 0, "max": args.turns, "ended": False, "mode": mode,
              "orchestration": recipe,
