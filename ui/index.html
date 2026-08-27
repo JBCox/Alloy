@@ -3070,9 +3070,12 @@ function peelDirs(s) {
 }
 function dirChip({ name, arg }) {
   const label = { WRAP: "wrap", NEXT: "next", PASS: "pass", SPAWN: "spawn",
-                  TEAM: "team", ASK: "asks Josh" }[name] || name.toLowerCase();
+                  TEAM: "team", ASK: "asks Josh", REMEMBER: "remembers",
+                  RECALL: "looks up" }[name] || name.toLowerCase();
   let detail = "";
   if (name === "NEXT" && arg) detail = ": " + arg;
+  if ((name === "REMEMBER" || name === "RECALL") && arg)
+    detail = ": " + (arg.length > 60 ? arg.slice(0, 60) + "…" : arg);
   if ((name === "SPAWN" || name === "TEAM") && arg)
     detail = ": " + arg.split("|")[0].trim();
   if (name === "ASK" && arg) {

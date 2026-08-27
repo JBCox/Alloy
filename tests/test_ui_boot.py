@@ -1091,6 +1091,10 @@ if (topLevelError) {
 
     ctx.closeMemory();
     p.closed = !modal.classList.contains('show');
+    // the two directives render as chips like every other trailing token --
+    // md() peels them, so with no label they would read "remember"/"recall"
+    p.chips = ['[[REMEMBER: the gate is run_all]]', '[[RECALL: gate]]']
+      .map(d => ctx.md('body text ' + d));
   } catch (e) { more.memError = (e && e.stack) || String(e); }
   // ---- the keyboard shortcuts cheat sheet, driven like a user -------------
   // The overlay's whole contract: exists, hidden until asked for, the toggle
@@ -2886,6 +2890,16 @@ class UiBootTests(unittest.TestCase):
 
     def test_an_unreadable_store_shows_the_error_not_an_empty_list(self):
         self.assertIn("disk on fire", self._mem()["errorNote"])
+
+    def test_the_two_memory_directives_render_as_chips(self):
+        chips = self._mem()["chips"]
+        self.assertIn("dir-chip dir-remember", chips[0])
+        self.assertIn("remembers: the gate is run_all", chips[0])
+        self.assertIn("dir-chip dir-recall", chips[1])
+        self.assertIn("looks up: gate", chips[1])
+        # the body survives the peel; the directive is not left in it
+        self.assertIn("body text", chips[0])
+        self.assertNotIn("[[REMEMBER", chips[0].split("dir-chip")[0])
 
     def test_the_memory_modal_is_registered_in_all_three_places(self):
         # miss one and it is invisible, or Escape leaves it open

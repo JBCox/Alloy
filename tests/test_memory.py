@@ -1016,6 +1016,258 @@ class ObjectiveSentenceTests(unittest.TestCase):
         self.assertEqual(self.sentence(goal="   "), "")
 
 
+# ------------------------------------------ [[REMEMBER]] / [[RECALL]] ------
+class DirectiveTests(unittest.TestCase):
+    """Driven through the REAL loops -- all FOUR of them."""
+
+    LOOPS = {"round_robin": "_run_rounds", "panel": "run_panel",
+             "parallel": "run_parallel", "free": "run_free"}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="alloy-mem-dir-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.mem = os.path.join(self.tmp, "memory")
+        old = relay.MEMORY_DIR
+        relay.MEMORY_DIR = self.mem
+        self.addCleanup(setattr, relay, "MEMORY_DIR", old)
+        self.proj = os.path.join(self.tmp, "proj")
+        os.makedirs(self.proj, exist_ok=True)
+        self.scope = memory.project_key(self.proj)
+
+    def run_mode(self, mode, first, second="ok", turns=2, project=True):
+        st = build_state(self.tmp, [[first] * turns, [second] * turns],
+                         turns=turns,
+                         workspace=self.proj if project else None)
+        st["mode"] = mode
+        io = RecordingIO()
+        relay.run_rounds(st, io)
+        return st, io
+
+    def statuses(self, io):
+        return [p.get("text") or "" for e, p in io.events if e == "status"]
+
+    def queued(self, st, i):
+        return "\n".join(st["pending"][i])
+
+    def notes(self, scope=None):
+        return memory.load(self.mem, scope or self.scope)["entries"]
+
+    # ---- the four loops --------------------------------------------------
+    def test_REMEMBER_works_in_every_loop(self):
+        for mode in self.LOOPS:
+            with self.subTest(mode=mode):
+                shutil.rmtree(self.mem, ignore_errors=True)
+                self.run_mode(mode, "Noted. [[REMEMBER: %s fact.]]" % mode)
+                self.assertIn("%s fact." % mode,
+                              [e["text"] for e in self.notes()], mode)
+
+    def test_RECALL_works_in_every_loop(self):
+        for mode in self.LOOPS:
+            with self.subTest(mode=mode):
+                shutil.rmtree(self.mem, ignore_errors=True)
+                memory.remember(self.mem, self.scope, "The gate is run_all.",
+                                who="Josh")
+                _st, io = self.run_mode(mode, "Looking. [[RECALL: gate]]")
+                self.assertTrue(
+                    any("recalled 1 note" in s for s in self.statuses(io)),
+                    "%s: %s" % (mode, self.statuses(io)))
+
+    def test_free_mode_handles_them_WITHOUT_an_ASK_in_the_same_reply(self):
+        """The bug this test exists for, found by running it.
+
+        Free mode is the only loop whose ask handling is conditional, and the
+        first wiring put the memory handler inside that branch -- so a
+        [[RECALL]] worked in three modes and silently did nothing in Talk
+        Live unless the same reply also asked Josh, which is almost never.
+        """
+        memory.remember(self.mem, self.scope, "The gate is run_all.",
+                        who="Josh")
+        _st, io = self.run_mode("free", "Looking. [[RECALL: gate]]")
+        self.assertTrue(any("recalled" in s for s in self.statuses(io)),
+                        self.statuses(io))
+
+    def test_all_four_loops_call_the_handler(self):
+        """A source guard, because 'three' is the wrap-token bug verbatim --
+        the one that would be left out is panel, i.e. the shipped Compare &
+        Decide preset."""
+        with open(os.path.join(ROOT, "relay.py"), encoding="utf-8") as f:
+            src = f.read()
+        for mode, fn in self.LOOPS.items():
+            body = src.split("\ndef %s(" % fn, 1)[1].split("\ndef ", 1)[0]
+            self.assertIn("handle_memory_directives(", body,
+                          "%s (%s) never calls it" % (mode, fn))
+
+    # ---- REMEMBER --------------------------------------------------------
+    def test_a_seats_note_is_marked_as_a_seats_claim_not_as_Joshs(self):
+        self.run_mode("round_robin", "Noted. [[REMEMBER: A claim.]]")
+        row = self.notes()[0]
+        self.assertEqual(row["kind"], memory.KIND_SEAT)
+        self.assertEqual(row["who"], "Fake 1")
+
+    def test_the_seat_is_told_it_worked_so_it_does_not_repeat_itself(self):
+        st, _io = self.run_mode("round_robin", "Noted. [[REMEMBER: A fact.]]",
+                                turns=1)
+        self.assertIn("kept for this project", self.queued(st, 0))
+
+    def test_an_empty_REMEMBER_keeps_nothing_and_says_so(self):
+        st, _io = self.run_mode("round_robin", "Hm. [[REMEMBER:]]", turns=1)
+        self.assertEqual(self.notes(), [])
+        self.assertIn("no text", self.queued(st, 0))
+
+    def test_two_REMEMBERs_in_one_reply_keep_NEITHER(self):
+        st, _io = self.run_mode(
+            "round_robin", "Hm. [[REMEMBER: one]] [[REMEMBER: two]]", turns=1)
+        self.assertEqual(self.notes(), [])
+        self.assertIn("only one [[REMEMBER]]", self.queued(st, 0))
+
+    def test_a_failed_write_is_reported_to_the_seat_never_swallowed(self):
+        real = memory.remember
+        memory.remember = lambda *a, **k: {"error": "disk on fire"}
+        self.addCleanup(setattr, memory, "remember", real)
+        st, _io = self.run_mode("round_robin", "Hm. [[REMEMBER: x]]", turns=1)
+        self.assertIn("was NOT kept", self.queued(st, 0))
+        self.assertIn("disk on fire", self.queued(st, 0))
+
+    # ---- RECALL ----------------------------------------------------------
+    def test_a_recall_result_reaches_the_REQUESTER_ONLY(self):
+        # the spawned-helper rule: one seat's lookup must not land in
+        # everyone's prompt, and the notes are in every preamble anyway
+        memory.remember(self.mem, self.scope, "The gate is run_all.",
+                        who="Josh")
+        st, _io = self.run_mode("round_robin", "Looking. [[RECALL: gate]]",
+                                turns=1)
+        self.assertIn("The gate is run_all.", self.queued(st, 0))
+        # Asserted on the PROMPT seat 1 actually received, and on the recall
+        # ENVELOPE rather than the note text. Two traps here, both of which
+        # made an earlier version of this test pass against a fan-out: seat 1
+        # speaks after seat 0 in a one-round lap and CONSUMES its queue, so an
+        # empty queue at the end is also what the bug looks like; and the note
+        # itself is legitimately in seat 1's preamble, because injection shows
+        # every seat the same notes. Only the "N note match" wrapper is
+        # unique to a delivered recall.
+        peer = (chr(10)).join(st["agents"][1].prompts)
+        self.assertNotIn("match 'gate'", peer)
+        self.assertNotIn("was searched", peer)
+        self.assertIn("match 'gate'", self.queued(st, 0))
+
+    def test_RECALL_cannot_reach_another_projects_notes(self):
+        # a poisoned file in a cloned dependency must not be able to talk a
+        # seat into pulling another project's memories into a transcript
+        # fanned out to four vendors overnight
+        other = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(other, exist_ok=True)
+        memory.remember(self.mem, memory.project_key(other),
+                        "ANOTHER PROJECT SECRET", who="Josh")
+        st, _io = self.run_mode("round_robin", "Looking. [[RECALL: SECRET]]",
+                                turns=1)
+        self.assertNotIn("ANOTHER PROJECT SECRET", self.queued(st, 0))
+        self.assertIn("nothing remembered matches", self.queued(st, 0))
+
+    def test_RECALL_from_a_project_does_not_search_the_global_scope(self):
+        memory.remember(self.mem, memory.GLOBAL_SCOPE, "GLOBAL PREFERENCE",
+                        who="Josh")
+        st, _io = self.run_mode("round_robin",
+                                "Looking. [[RECALL: PREFERENCE]]", turns=1)
+        self.assertNotIn("GLOBAL PREFERENCE", self.queued(st, 0))
+
+    def test_the_confinement_is_STATED_not_left_as_an_empty_result(self):
+        # a seat told only "no matches" concludes the store is empty and
+        # stops using it, or tries to reach further and cannot
+        st, _io = self.run_mode("round_robin", "Looking. [[RECALL: zzz]]",
+                                turns=1)
+        q = self.queued(st, 0)
+        self.assertIn("Only this project", q)
+        self.assertIn("already in your preamble", q)
+
+    def test_a_scratch_chat_searches_its_own_scope_and_says_which(self):
+        memory.remember(self.mem, memory.GLOBAL_SCOPE, "A global note.",
+                        who="Josh")
+        st, _io = self.run_mode("round_robin", "Looking. [[RECALL: global]]",
+                                turns=1, project=False)
+        q = self.queued(st, 0)
+        self.assertIn("A global note.", q)
+        self.assertIn("Everything Alloy remembers", q)
+
+    def test_a_long_result_set_is_capped_and_counts_what_it_cut(self):
+        for k in range(12):
+            memory.remember(self.mem, self.scope, "widget note %d" % k,
+                            who="Josh")
+        st, _io = self.run_mode("round_robin", "Looking. [[RECALL: widget]]",
+                                turns=1)
+        q = self.queued(st, 0)
+        self.assertIn("12 notes match", q)
+        self.assertIn("more match", q)
+        self.assertEqual(q.count("- ["), relay.MEMORY_RECALL_HITS)
+
+    def test_an_empty_RECALL_looks_nothing_up_and_says_so(self):
+        st, _io = self.run_mode("round_robin", "Hm. [[RECALL:]]", turns=1)
+        self.assertIn("no search words", self.queued(st, 0))
+
+    def test_two_RECALLs_in_one_reply_search_NEITHER(self):
+        st, _io = self.run_mode("round_robin",
+                                "Hm. [[RECALL: a]] [[RECALL: b]]", turns=1)
+        self.assertIn("only one [[RECALL]]", self.queued(st, 0))
+
+    def test_both_directives_in_one_reply_both_run(self):
+        memory.remember(self.mem, self.scope, "The gate is run_all.",
+                        who="Josh")
+        st, _io = self.run_mode(
+            "round_robin", "Hm. [[REMEMBER: new fact]] [[RECALL: gate]]",
+            turns=1)
+        self.assertIn("new fact", [e["text"] for e in self.notes()])
+        self.assertIn("The gate is run_all.", self.queued(st, 0))
+
+    # ---- grammar and preamble -------------------------------------------
+    def test_both_are_in_the_ONE_directive_grammar(self):
+        # not in KNOWN_DIRECTIVES, peel_directives reports them as unknown
+        # and set_next_speaker tells the seat its directive was ignored
+        for d in ("REMEMBER", "RECALL"):
+            self.assertIn(d, relay.KNOWN_DIRECTIVES)
+        _body, hits, unknown = relay.peel_directives(
+            "text [[REMEMBER: a]] [[RECALL: b]]")
+        self.assertEqual(unknown, [])
+        self.assertEqual(sorted(n for n, _ in hits), ["RECALL", "REMEMBER"])
+
+    def test_a_mid_reply_mention_does_not_fire(self):
+        # the wrap-token rule: a directive fires only when it TERMINATES
+        st, _io = self.run_mode(
+            "round_robin", "I could [[REMEMBER: x]] but I won't.", turns=1)
+        self.assertEqual(self.notes(), [])
+
+    def test_the_preamble_teaches_both_directives_and_the_confinement(self):
+        block = relay.memory_directive_block(
+            {"status": "none", "label": "ai-chat", "entries": []})
+        self.assertIn("[[REMEMBER:", block)
+        self.assertIn("[[RECALL:", block)
+        self.assertIn("this project (ai-chat) and nothing else", block)
+        self.assertIn("still be true next month", block)
+
+    def test_a_global_chats_block_drops_the_nothing_else_clause(self):
+        # it only MEANS something where there is something else to shut out
+        block = relay.memory_directive_block(
+            {"status": "none", "label": "", "entries": []})
+        self.assertNotIn("nothing else", block)
+        self.assertIn("your work with Josh generally", block)
+
+    def test_the_solo_block_does_not_promise_privacy_from_nobody(self):
+        rec = {"status": "none", "label": "ai-chat", "entries": []}
+        self.assertIn("to you alone", relay.memory_directive_block(rec))
+        self.assertNotIn("alone",
+                         relay.memory_directive_block(rec, solo=True))
+
+    def test_a_caller_that_passes_no_memory_is_told_about_neither(self):
+        self.assertEqual(relay.memory_directive_block(None), "")
+        a = relay.ClaudeAgent(self.tmp, name="Claude")
+        b = relay.CodexAgent(self.tmp, name="GPT")
+        pre = relay.preamble(a, [b], "t", 3, self.tmp, roster=[a, b])
+        self.assertNotIn("[[REMEMBER:", pre)
+
+    def test_a_real_seats_first_prompt_carries_both(self):
+        st, _io = self.run_mode("round_robin", "ok", turns=1)
+        self.assertIn("[[REMEMBER:", st["agents"][0].prompts[0])
+        self.assertIn("[[RECALL:", st["agents"][0].prompts[0])
+
+
 class SiblingTests(unittest.TestCase):
     def test_a_memory_folder_INSIDE_sessions_would_ship_a_phantom_rail_row(self):
         # the reason MEMORY_DIR is a sibling, kept as a live demonstration

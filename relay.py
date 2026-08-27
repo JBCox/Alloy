@@ -6931,7 +6931,8 @@ def drain_human_input(q, say_file):
 # One grammar for every end-of-reply directive: [[WRAP]], [[NEXT: seat]], and
 # the coming [[SPAWN:]]/[[TEAM:]]/[[PASS]]. wrap_called is reimplemented over
 # peel_directives so the wrap rule and any new directive can never drift apart.
-KNOWN_DIRECTIVES = ("WRAP", "NEXT", "TO", "PASS", "SPAWN", "TEAM", "ASK")
+KNOWN_DIRECTIVES = ("WRAP", "NEXT", "TO", "PASS", "SPAWN", "TEAM", "ASK",
+                    "REMEMBER", "RECALL")
 # matched against body[rfind("[["):] — anchoring each peel at the LAST "[["
 # keeps a stacked tail ("… [[NEXT: A]] [[WRAP]]") from collapsing into one
 # directive with a garbage argument (the leftmost-match + lazy-dot trap)
@@ -7802,6 +7803,7 @@ def preamble(agent, others, topic, turns, workspace, roster=None,
             f"{topic_line}"
             f"{brief_preamble_block(brief, agent, solo=True)}"
             f"{memory_preamble_block(memory, memory_budget(brief), solo=True)}"
+            f"{memory_directive_block(memory, solo=True)}"
             f"{cap_block}"
             f"{plan_block}"
             f"{spawn_block}"
@@ -7837,6 +7839,7 @@ def preamble(agent, others, topic, turns, workspace, roster=None,
         f"{topic_line}"
         f"{brief_preamble_block(brief, agent)}"
         f"{memory_preamble_block(memory, memory_budget(brief))}"
+        f"{memory_directive_block(memory)}"
         f"{cap_block}"
         f"{plan_block}"
         f"{spawn_block}"
@@ -11955,6 +11958,119 @@ def handle_ask_directive(state, i, reply, io, lock=None, abort=None):
         state["store"].save(state)
 
 
+MEMORY_RECALL_HITS = 5      # notes handed back for one [[RECALL]]
+
+
+def memory_directive_block(mem, solo=False):
+    """How a seat is told it can write to and search Alloy's memory.
+
+    A directive nobody is told about is never played, so this block is what
+    makes [[REMEMBER]] and [[RECALL]] exist at all. Two things it must not
+    drop, however tight the preamble budget gets: the CONFINEMENT (a seat
+    that knows the search is project-scoped asks Josh or reads the folder,
+    where one that finds an empty result invents a reason for it), and what
+    is WORTH keeping -- without that line a seat writes the conversation it
+    is having into a store every future chat has to read.
+    """
+    if mem is None:
+        return ""
+    # "and nothing else" is the confinement, and it only MEANS something
+    # where there IS something else to shut out; a chat with no project
+    # folder has one scope and the clause would be noise
+    where = (("this project (%s) and nothing else" % mem["label"])
+             if mem.get("label") else "your work with Josh generally")
+    return (
+        "Memory:\n"
+        "- Alloy keeps notes between sessions, scoped to %s"
+        ". END a reply with [[REMEMBER: what to keep]] to add one, or "
+        "[[RECALL: words]] to search what is kept -- matches come back to "
+        "you%s. Same trailing-token rules as %s; one of each per reply.\n"
+        "- Keep only what will still be true next month: a decision, a "
+        "preference, a fact that cost work to establish. Not what this "
+        "conversation already says.\n\n"
+        % (where, "" if solo else " alone", WRAP_TOKEN))
+
+
+def handle_memory_directives(state, i, reply, io, lock=None):
+    """Honor a trailing [[REMEMBER: ...]] / [[RECALL: ...]] from seat i.
+
+    Results are REQUESTER-ONLY -- the same rule spawned helpers follow. A
+    recall fanned out to every seat would put one seat's lookup into
+    everyone's prompt, and the notes are already in every preamble anyway.
+
+    The scope is the chat's own, so a [[RECALL]] can never reach another
+    project's notes. That is the point: a poisoned file in a cloned
+    dependency could otherwise talk a seat into pulling other projects'
+    memories into a transcript fanned out to four vendors overnight.
+    """
+    _, hits, _ = peel_directives(reply)
+    saves = [a for name, a in hits if name == "REMEMBER"]
+    finds = [a for name, a in hits if name == "RECALL"]
+    if not saves and not finds:
+        return
+    name = state["agents"][i].name
+    guard = lock if lock is not None else contextlib.nullcontext()
+    scope, label = memory_scope(state)
+    where = ("this project (%s)" % label) if label else "everywhere"
+
+    def note(text, status=None):
+        with guard:
+            state["pending"][i].append("(Relay: %s)" % text)
+            io.emit("status", {"text": "%s: %s" % (name, status or text)})
+            state["store"].save(state)
+
+    if len(saves) > 1:
+        note("only one [[REMEMBER]] per reply -- none were kept.")
+    elif saves:
+        text = (saves[0] or "").strip()
+        if not text:
+            note("your [[REMEMBER]] had no text, so nothing was kept.")
+        else:
+            got = memory_store.remember(MEMORY_DIR, scope, text,
+                                        kind=memory_store.KIND_SEAT, who=name)
+            if "error" in got:
+                note("that note was NOT kept: " + got["error"])
+            else:
+                note("kept for %s%s. It will be in every seat's preamble from "
+                     "now on, so do not repeat it."
+                     % (where, (" (%s)" % got["note"]) if got.get("note")
+                        else ""),
+                     status="remembered a note for %s" % where)
+
+    if len(finds) > 1:
+        note("only one [[RECALL]] per reply -- none were searched.")
+    elif finds:
+        query = (finds[0] or "").strip()
+        if not query:
+            note("your [[RECALL]] had no search words, so nothing was looked "
+                 "up.")
+            return
+        got = memory_store.search(MEMORY_DIR, scope, query,
+                                  limit=MEMORY_RECALL_HITS)
+        if got.get("error"):
+            note("that lookup failed: " + got["error"])
+            return
+        # the confinement is STATED rather than left as an empty result: a
+        # seat told only "no matches" concludes the store is empty and stops
+        # using it, or tries to reach further and cannot
+        bound = ("Only %s was searched; Josh's cross-project notes are "
+                 "already in your preamble." % where) if label else \
+                ("Everything Alloy remembers for you was searched.")
+        if not got["total"]:
+            note("nothing remembered matches %r. %s" % (query, bound),
+                 status="recalled nothing for %r" % query)
+            return
+        lines = [memory_store.one_line(e) for e in got["hits"]]
+        more = ("" if got["total"] <= len(lines) else
+                "\n(%d more match; narrow the words to see them.)"
+                % (got["total"] - len(lines)))
+        note("%d note%s match %r:\n%s%s\n%s"
+             % (got["total"], "" if got["total"] == 1 else "s", query,
+                "\n".join(lines), more, bound),
+             status="recalled %d note%s for %r"
+                    % (got["total"], "" if got["total"] == 1 else "s", query))
+
+
 def announce_lost_ask(state, io):
     """Run start: a question to Josh that was pending when the last process
     died is LOST — the in-flight-side-work precedent. Note it once, tell the
@@ -12694,6 +12810,7 @@ def _run_rounds(state, io):
         handle_spawn_directives(state, i, reply, io, mgr)
         # after the commit: the question rides the recorded reply, and the
         # wait (possibly minutes) happens with every queue already saved
+        handle_memory_directives(state, i, reply, io)
         handle_ask_directive(state, i, reply, io)
         if plan_ready:
             # blocks until Josh answers; declining leaves every seat read-only
@@ -13005,6 +13122,7 @@ def run_panel(state, io):
                         panel["source_rows"][phase].append(row["message_id"])
                     store.save(state)
                     handle_spawn_directives(state, i, reply, io, mgr)
+                handle_memory_directives(state, i, reply, io, lock=lock)
                 handle_ask_directive(state, i, reply, io, lock=lock)
                 results[i] = "ok"
             except BaseException as exc:
@@ -13426,6 +13544,7 @@ def run_parallel(state, io):
                     return
                 # OUTSIDE the lock: the ask wait can take minutes, and the
                 # round barrier (which keeps /stop live) waits for it
+                handle_memory_directives(state, i, reply, io, lock=lock)
                 handle_ask_directive(state, i, reply, io, lock=lock)
                 results[i] = ("wrap" if not worker_turn and wrap_called(reply)
                               else "ok")
@@ -13799,11 +13918,20 @@ def run_free(state, io):
             # seats keep talking (FREE_MAX_LEAD throttles them eventually).
             # busy[i] stays True, so the coordinator's cap-stop cannot fire
             # mid-question. abort = flow-stop, which should_stop never sees.
+            # OUTSIDE the ASK guard, deliberately. Free mode is the only
+            # loop whose ask handling is conditional -- the other three call
+            # it for every reply -- so a memory directive parked inside that
+            # branch fires only when the SAME reply also asks Josh, which is
+            # almost never. A [[RECALL]] would then work in three modes and
+            # silently do nothing in Talk Live.
+            handle_memory_directives(state, i, reply, io, lock=lock)
             if any(name == "ASK" for name, _ in peel_directives(reply)[1]):
                 handle_ask_directive(state, i, reply, io, lock=lock,
                                      abort=lambda: flow["stop"])
+            if any(name in ("ASK", "RECALL", "REMEMBER")
+                   for name, _ in peel_directives(reply)[1]):
                 with cond:
-                    cond.notify_all()        # the answer may unblock peers
+                    cond.notify_all()        # new queue rows may unblock a seat
             if wrapped_now:
                 return                       # the wrapper has said goodbye
 
