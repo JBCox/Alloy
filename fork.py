@@ -139,6 +139,14 @@ def fork_session(session_id, upto_message_id=None, sessions_dir=None):
             # turn was permanently view-only. Verified 2026-08-27 against real
             # sessions at one, two and three seats.
             seat["introduced"] = False
+            # ...and the cumulative-usage baseline, which is the THIRD half
+            # of "this seat has a live thread" (relay.usage_delta). Dropping
+            # it is not strictly required — the baseline is keyed on the very
+            # session id just discarded, so a fresh thread's id would not
+            # match it and it would be ignored — but leaving a number from
+            # another conversation lying in this one's meta is exactly the
+            # shape of the bug the two lines above exist to fix.
+            seat.pop("usage_baseline", None)
         meta["fork_of"] = {"id": source_id,
                            "message_id": upto_message_id}
         if "children" in meta:

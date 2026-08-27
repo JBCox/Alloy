@@ -1495,6 +1495,104 @@ if (topLevelError) {
     ctx.rosterChanged();
     more.solo.badgeAfterRoster = byId['policyChanges'].textContent;
   } catch (e) { more.soloError = (e && e.stack) || String(e); }
+
+  // ---- W1.1: produced-file chips, through the REAL message path ----------
+  // The row's `artifacts` list has been stamped by the engine since it
+  // shipped and the UI never read it. Driven as a `message` event, not by
+  // calling artifactChips directly, because the field has to survive
+  // addMsg's whole argument chain to be worth anything.
+  try {
+    const p = more.artifacts = {};
+    await ctx.newChat();
+    const feed = byId['feed'];
+    const arts = n => {
+      const rows = [...feed.children].filter(c => (c.className || '').includes('msg'));
+      const row = rows[rows.length - 1 + (n || 0)];
+      if (!row) return null;
+      const strip = row.querySelector('.msg-arts');
+      if (!strip) return null;
+      // the stub does NOT derive a parent's textContent from its children,
+      // so read the spans the renderer actually filled
+      const span = (c, cls) => {
+        const s = c.querySelector('.' + cls);
+        return s ? String(s.textContent || '') : null;
+      };
+      return [...strip.children].map(c => ({
+        cls: c.className || '',
+        tag: c.tag || '',
+        title: c.title || '',
+        ico: span(c, 'art-ico'),
+        name: span(c, 'art-name'),
+        size: span(c, 'art-size'),
+      }));
+    };
+    // 1. a reply that wrote nothing shows no strip at all
+    ctx.uiEvent({event: 'message', payload: {speaker: 0, provider: 'claude',
+      name: 'Claude', text: 'just talking', round: 1, message_id: 'm0'}});
+    p.silentWhenAbsent = arts() === null;
+    // 2. a reply that wrote files gets one chip each
+    ctx.uiEvent({event: 'message', payload: {speaker: 0, provider: 'claude',
+      name: 'Claude', text: 'done', round: 2, message_id: 'm1',
+      artifacts: [
+        {artifact_id: 'a1', path: 'notes\\\\plan.md', kind: 'text/markdown',
+         size: 3288, producer: 0, source_message_id: 'm1',
+         operation: 'created_or_modified'},
+        {artifact_id: 'a2', path: 'chart.png', kind: 'image/png',
+         size: 20480, producer: 0, source_message_id: 'm1',
+         operation: 'created_or_modified'},
+      ]}});
+    p.chips = arts();
+    // 3. the click routes by KIND: image to the lightbox, text to the pane
+    const strip = [...feed.children].filter(
+      c => (c.className || '').includes('msg')).pop().querySelector('.msg-arts');
+    const calls = [];
+    const realCode = ctx.openCode, realLb = ctx.openLightbox;
+    ctx.openCode = (path, prov) => calls.push(['code', path, prov]);
+    ctx.openLightbox = (path, name) => calls.push(['lightbox', path, name]);
+    strip.children[0].onclick({stopPropagation() {}});
+    strip.children[1].onclick({stopPropagation() {}});
+    ctx.openCode = realCode; ctx.openLightbox = realLb;
+    p.routed = calls;
+    // 4. an empty list, a junk entry and a non-array are all silent
+    ctx.uiEvent({event: 'message', payload: {speaker: 0, provider: 'claude',
+      name: 'Claude', text: 'x', round: 3, message_id: 'm2', artifacts: []}});
+    p.silentWhenEmpty = arts() === null;
+    ctx.uiEvent({event: 'message', payload: {speaker: 0, provider: 'claude',
+      name: 'Claude', text: 'y', round: 4, message_id: 'm3',
+      artifacts: [{artifact_id: 'z', kind: 'text/plain'}, null, 7]}});
+    p.silentWhenPathless = arts() === null;
+    // 5. replay must render identically — openChat feeds the same rows back
+    //    through addMsg, so a chip that only appeared live would vanish on
+    //    reopen (the failure mode typing indicators actually had)
+    p.replay = null;
+    ctx.addMsg('claude', 'Claude', 'replayed', 'round 5', null,
+               '2026-08-27T10:00:00', null, null,
+               {message_id: 'm4', delivered_to: [], speaker: 0,
+                artifacts: [{artifact_id: 'r1', path: 'a\\\\b\\\\out.txt',
+                             kind: 'text/plain', size: 12}]});
+    p.replay = arts();
+  } catch (e) { more.artifactsError = (e && e.stack) || String(e); }
+
+  // ---- W1.3: the usage pill's clock ---------------------------------------
+  // claude reports duration_ms, codex reports neither duration_ms nor cost —
+  // so before wall_ms every GPT row showed no time at all.
+  try {
+    const p = more.usagePill = {};
+    const pill = u => {
+      const html = String(ctx.formatUsage(u) || '');
+      const open = html.indexOf('>'), close = html.lastIndexOf('<');
+      return open < 0 || close <= open ? html : html.slice(open + 1, close);
+    };
+    p.none = pill(null);
+    p.claude = pill({cost_usd: 0.25512, input_tokens: 4,
+                     output_tokens: 3893, total_tokens: 3897,
+                     duration_ms: 60905, wall_ms: 61500});
+    p.codex = pill({input_tokens: 18050, output_tokens: 6,
+                    total_tokens: 18056, duration_ms: null, wall_ms: 4231});
+    p.neitherClock = pill({input_tokens: 5, output_tokens: 1,
+                           total_tokens: 6});
+    p.nothingReported = pill({});
+  } catch (e) { more.usagePillError = (e && e.stack) || String(e); }
   // Put the boot roster back: report() reads the LIVE DOM, so leaving the
   // stage solo would hand every other test in this file a one-seat page.
   try { ctx.addSeat('gpt'); ctx.addSeat('gemini'); } catch (e) {}

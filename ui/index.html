@@ -1417,6 +1417,26 @@
     border: 1px dashed var(--line); border-radius: 8px; color: var(--muted);
     font-size: 11.5px; font-style: italic; padding: 6px 10px;
   }
+
+  /* ---------- produced-file chips ---------- */
+  /* What the turn actually WROTE. Distinct from .img-thumb above on purpose:
+     a thumbnail is a preview of something the seat MENTIONED, a chip is a
+     file the engine verified on disk before it recorded the row. */
+  .msg-arts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px;
+    user-select: none; }
+  .art-chip {
+    display: inline-flex; align-items: center; gap: 6px; max-width: 300px;
+    border: 1px solid var(--line); border-radius: 999px; cursor: pointer;
+    background: var(--surface); color: var(--text); font: inherit;
+    font-size: 11.5px; line-height: 1.5; padding: 3px 10px 3px 8px;
+    text-align: left;
+  }
+  .art-chip:hover { border-color: var(--who, var(--muted)); }
+  .art-chip .art-ico { flex: none; }
+  .art-chip .art-name {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .art-chip .art-size { color: var(--muted); font-size: 10.5px; flex: none; }
   #lightbox {
     position: fixed; inset: 0; z-index: 60; display: none;
     flex-direction: column; align-items: center; justify-content: center;
@@ -2938,6 +2958,49 @@ function attachThumbs(container, refs) {
     cell.appendChild(img);
   });
 }
+// The files a turn actually produced, as clickable chips under its reply.
+//
+// The engine stamped this list onto the row (relay.artifact_descriptors) and
+// every entry was CONFINED to the workspace and confirmed with isfile before
+// the row was ever written — which is what separates a chip from the image
+// strip above it: findImageRefs guesses from prose and tolerates a miss,
+// these are already verified, so a chip can be clicked without a probe.
+// Paths are workspace-RELATIVE, which is exactly what read_text/read_image
+// take, so nothing here ever handles an absolute path.
+//
+// Absence stays silent: rows without artifacts get no strip, no empty state
+// and no placeholder. `provider` is passed in rather than read back off the
+// DOM because a masked battle row has deliberately had its provider cleared,
+// and the chips must not restore the colour the mask just removed.
+function artifactChips(container, arts, provider) {
+  if (!container || !Array.isArray(arts) || !arts.length) return;
+  const strip = document.createElement("div");
+  strip.className = "msg-arts";
+  arts.forEach(a => {
+    const path = a && typeof a.path === "string" ? a.path : "";
+    if (!path) return;
+    const name = path.split(/[\\/]/).pop() || path;
+    const isImg = String((a && a.kind) || "").indexOf("image/") === 0;
+    const size = typeof a.size === "number" ? fmtSize(a.size) : "";
+    const chip = document.createElement("button");
+    chip.className = "art-chip";
+    chip.title = path + (size ? " · " + size : "");
+    chip.innerHTML = '<span class="art-ico"></span>' +
+                     '<span class="art-name"></span>' +
+                     '<span class="art-size"></span>';
+    // textContent throughout: a path is arbitrary text a CLI chose
+    chip.querySelector(".art-ico").textContent = isImg ? "🖼️" : fileIcon(name);
+    chip.querySelector(".art-name").textContent = name;
+    chip.querySelector(".art-size").textContent = size;
+    chip.onclick = e => {
+      e.stopPropagation();
+      if (isImg) openLightbox(path, name);
+      else openCode(path, provider || null);
+    };
+    strip.appendChild(chip);
+  });
+  if (strip.children.length) container.appendChild(strip);
+}
 function openLightbox(path, name) {
   const lb = $("lightbox"), img = $("lightboxImg");
   $("lightboxCap").textContent = name || path;
@@ -3171,8 +3234,15 @@ function formatUsage(usage) {
   if (toks > 0) {
     parts.push(`${toks.toLocaleString()} toks`);
   }
-  if (usage.duration_ms) {
-    parts.push(`${(usage.duration_ms / 1000).toFixed(1)}s`);
+  // duration_ms is the CLI's own self-report and wall_ms is the relay's
+  // measurement of the whole child process. Claude sends the first, codex
+  // sends neither — so without the fallback every GPT row showed no time at
+  // all. Prefer the CLI's number where it exists (it excludes process
+  // startup); the tooltip carries the raw dict either way, so which one is
+  // on screen is always recoverable.
+  const ms = usage.duration_ms || usage.wall_ms;
+  if (ms) {
+    parts.push(`${(ms / 1000).toFixed(1)}s`);
   }
   if (!parts.length) return "";
   return `<span class="msg-usage" title="${esc(JSON.stringify(usage, null, 2))}">${esc(parts.join(" · "))}</span>`;
@@ -3415,6 +3485,9 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
   }
   // an agent mentioning an image it made ⇒ show it right here in the chat
   if (kind !== "system") attachThumbs(d.querySelector(".msg-body"), findImageRefs(text));
+  // and the files the turn actually wrote, verified engine-side. Below the
+  // thumbnails on purpose: a picture of the work first, the ledger after.
+  artifactChips(d.querySelector(".msg-body"), row && row.artifacts, kind);
   // a different calendar day opens a divider (live turns and replay both ride
   // addMsg, so a reopened chat divides itself identically)
   const dayKey = ts && String(ts).length >= 10 ? String(ts).slice(0, 10) : null;

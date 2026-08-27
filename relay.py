@@ -100,6 +100,61 @@ ERROR_MAX = 200
 ACTIVITY_MAX = 400          # per turn; a call and its outcome are 2 now
 ACTIVITY_KEEP = 80          # persisted onto the finished message row
 
+# ---- how a turn's token numbers were arrived at -----------------------------
+# Bumped whenever the MEANING of a usage number changes, never when a number
+# changes. History is not rewritten: a chat resumed across a bump keeps its
+# old totals and `record_usage` records BOTH bases, so a mixed total can say
+# so instead of quietly averaging a truth with a lie.
+#
+#   1  every adapter's numbers taken at face value and summed. Correct for
+#      claude; WRONG for codex, whose `turn.completed` restates the whole
+#      thread, so turn 1 was counted once per turn thereafter (measured
+#      2026-08-27: 16194 / 34244 / 52313 for three one-word replies, summed
+#      to 102751 against a true 52313; a real chat on disk reached
+#      534,655,991).
+#   2  cumulative counters differenced against a per-thread baseline, so
+#      every number is that turn's own. See usage_delta().
+USAGE_BASIS = 2
+
+# The counters codex restates in full on every turn, MEASURED from a live
+# `codex exec --json` capture. Cost and the two clocks are deliberately NOT
+# here: codex reports no cost at all today, and differencing a field nobody
+# has measured to be cumulative is exactly the inference this pass exists to
+# delete.
+CUMULATIVE_USAGE_FIELDS = ("input_tokens", "output_tokens",
+                           "cached_tokens", "total_tokens")
+
+
+def usage_delta(baseline, totals, session_id):
+    """Turn one CLI's THREAD-CUMULATIVE counters into this turn's own numbers.
+
+    Returns `(per_turn, new_baseline)`. `totals` is left untouched.
+
+    The baseline is keyed on the thread it describes, not on the adapter:
+    a `/clear` (or any fresh session id) starts a brand-new thread whose
+    counters begin again at zero, and differencing that against the OLD
+    thread's total would report a large negative. An unknown or changed
+    session id therefore means "nothing came before", which is also the
+    honest answer for the very first turn.
+
+    A counter that goes BACKWARDS within one thread breaks the assumption
+    this function is built on. It clamps to zero rather than reporting a
+    negative token count — a wrong-but-small number is recoverable, a
+    negative one poisons every total downstream of it.
+    """
+    prior = baseline if isinstance(baseline, dict) else {}
+    if not session_id or prior.get("session_id") != session_id:
+        prior = {}
+    per_turn = dict(totals)
+    for field in CUMULATIVE_USAGE_FIELDS:
+        if totals.get(field) is None:
+            continue
+        per_turn[field] = max(0, int(totals[field]) - int(prior.get(field) or 0))
+    new_baseline = {"session_id": session_id}
+    for field in CUMULATIVE_USAGE_FIELDS:
+        new_baseline[field] = int(totals.get(field) or 0)
+    return per_turn, new_baseline
+
 # Conversation modes (ORCHESTRATION_DESIGN.md). One conversation-level value:
 # cfg key `mode`, CLI --mode, meta field `mode`. `round_robin` is the classic
 # fixed order; the others land phase by phase — IMPLEMENTED_MODES is the gate
@@ -1250,6 +1305,34 @@ class Agent:
         # Josh approves, so a yolo conversation is not exempt.
         self.plan_mode = False
         self.last_usage = None
+        # Cumulative-counter bookkeeping for adapters whose CLI reports the
+        # whole THREAD's totals rather than this turn's (codex; see
+        # usage_delta). Stays None for every adapter that already reports
+        # per-turn numbers, and it is NOT usage — it must never be summed,
+        # rendered, or reach session_summary/outcome. It is persisted beside
+        # `session_id` for the same reason that one is: the two are halves of
+        # a single fact ("where this seat's thread had got to"), and Alloy
+        # resumes constantly, so a baseline that lived only in memory would
+        # re-count the entire thread once per reopen.
+        self.usage_baseline = None
+
+    def forget_thread(self):
+        """Discard this seat's CLI conversation.
+
+        `session_id` and `usage_baseline` are two halves of ONE fact — where
+        this seat's provider thread had got to — so they are dropped
+        together. Keeping a baseline past its thread is harmless today
+        (usage_delta ignores one whose session id does not match, and a test
+        pins that), but two fields describing one thing with only one of them
+        cleared is exactly the shape of the fork bug that made every branched
+        chat permanently view-only. A named method is the cheapest way to
+        make the pairing discoverable from any of its call sites.
+
+        `introduced` is deliberately NOT here: it lives on the loop's state,
+        not the agent, and the callers reset it themselves.
+        """
+        self.session_id = None
+        self.usage_baseline = None
 
     @property
     def yolo(self):
@@ -1696,6 +1779,12 @@ class Agent:
             browser_stop = threading.Event()
             threading.Thread(target=self._watch_browser, args=(browser_stop,),
                              daemon=True).start()
+        # OUR clock on the whole child process. Deliberately not the CLI's own
+        # `duration_ms` (claude reports one, codex reports none) and
+        # deliberately not time-to-first-line: the first line out of these
+        # CLIs is the process booting, not the model answering, so a TTFT
+        # built from it would measure npm and node.
+        wall_started = time.monotonic()
         try:
             rc, stdout, stderr = self._run_streaming(cmd, env, on_line)
         except TurnCancelled:
@@ -1740,6 +1829,14 @@ class Agent:
                 f"{self.describe_failure(stdout, stderr) or 'no detail'}"
             )
         reply = self.parse(stdout)
+        # Rides an existing usage dict; never creates one. Manufacturing a
+        # usage dict just to carry a wall time would give Gemini and OpenCode
+        # — the two adapters that report nothing — a by_seat entry reading
+        # "0 tokens" exactly where the budget bar renders an honest blank
+        # today, turning "not reported" into a number they never sent.
+        if isinstance(self.last_usage, dict):
+            self.last_usage["wall_ms"] = int(
+                (time.monotonic() - wall_started) * 1000)
         if not reply:
             # Exit 0 with nothing to say is a SOFT failure (dropped auth, quota,
             # a CLI that logged an error and still exited clean). Raise so it
@@ -2179,6 +2276,13 @@ class ClaudeAgent(Agent):
                 "cached_tokens": int(cached_total) if cached_total else 0,
                 "total_tokens": int(in_tokens + out_tokens) if (in_tokens or out_tokens) else 0,
                 "duration_ms": int(dur) if isinstance(dur, (int, float)) else None,
+                # claude's result object is genuinely per-turn — a real chat
+                # on disk reads input [6, 4, 26], which is not monotone and
+                # so cannot be cumulative — so there is nothing to difference
+                # here. It carries the label anyway: the label answers "how
+                # was this arrived at", and "taken at face value, correctly"
+                # is an answer.
+                "basis_version": USAGE_BASIS,
             }
         if data.get("is_error") or (data.get("subtype") or "success") != "success":
             # A FAILED result still carries `result` — but it holds the CLI's
@@ -2434,7 +2538,27 @@ class CodexAgent(Agent):
 
     @staticmethod
     def _extract_usage(evt):
-        """Extract standard token usage from codex event payload."""
+        """Extract codex's token counters from one event payload.
+
+        What comes back is the THREAD's running totals, not this turn's —
+        `parse` differences them. Measured 2026-08-27 against codex-cli
+        0.147.0: `codex exec --json` emits exactly one usage-bearing event
+        per run,
+
+            {"type":"turn.completed","usage":{"input_tokens":34244,
+             "cached_input_tokens":26112,"cache_write_input_tokens":0,
+             "output_tokens":11,"reasoning_output_tokens":0}}
+
+        and every counter in it restates the whole thread. The binary does
+        carry a per-turn field (`struct TokenUsageInfo with 3 elements:
+        total_token_usage, last_token_usage, model_context_window`) but that
+        belongs to the app-server protocol and never reaches this surface,
+        which is why a baseline is the only route.
+
+        Note `cached_input_tokens`: the spelling this wire actually uses, and
+        the one this function used to be missing — so 11,008 cached tokens
+        arrived on the very first probe turn and were recorded as 0.
+        """
         if not isinstance(evt, dict):
             return None
         u = evt.get("usage") or evt.get("token_usage")
@@ -2449,7 +2573,9 @@ class CodexAgent(Agent):
         if isinstance(u, dict):
             in_tok = u.get("input_tokens") or u.get("prompt_tokens") or u.get("input_token_count") or 0
             out_tok = u.get("output_tokens") or u.get("completion_tokens") or u.get("output_token_count") or 0
-            cached_tok = u.get("cached_tokens") or u.get("cache_read_input_tokens") or 0
+            cached_tok = (u.get("cached_tokens")
+                          or u.get("cache_read_input_tokens")
+                          or u.get("cached_input_tokens") or 0)
             total_tok = u.get("total_tokens") or (in_tok + out_tok)
             cost = u.get("cost_usd") or u.get("total_cost_usd")
             if in_tok or out_tok or total_tok or cost is not None:
@@ -2482,7 +2608,15 @@ class CodexAgent(Agent):
             if u:
                 usage_found = u
         if usage_found:
-            self.last_usage = usage_found
+            # AFTER the session-id sweep above, deliberately: the baseline is
+            # keyed on the thread these counters belong to, and a FIRST turn
+            # only learns its thread id here. (Same ordering rule as
+            # GeminiAgent.parse, whose image harvest needs the id too.)
+            per_turn, baseline = usage_delta(self.usage_baseline, usage_found,
+                                             self.session_id)
+            per_turn["basis_version"] = USAGE_BASIS
+            self.last_usage = per_turn
+            self.usage_baseline = baseline
         try:
             with open(self._lastmsg, "r", encoding="utf-8", errors="replace") as f:
                 return f.read().strip()
@@ -3950,7 +4084,7 @@ def compact_agent(agent, solo=False):
     CLI session. The caller seeds the fresh session with the summary."""
     summary = (agent.turn(COMPACT_PROMPT_SOLO if solo
                           else COMPACT_PROMPT) or "").strip()
-    agent.session_id = None
+    agent.forget_thread()
     return summary
 
 
@@ -4286,6 +4420,13 @@ class SessionStore:
                 "model": a.model,
                 "effort": a.effort,
                 "session_id": a.session_id,
+                # Additive, and paired with session_id on purpose: the two
+                # answer one question ("where has this seat's thread got
+                # to"). Without it every reopen re-counts the whole thread
+                # once — see usage_delta. Old code reading this meta simply
+                # ignores it; old metas rehydrate to None, which reads as
+                # "nothing came before", never as wrong continuity.
+                "usage_baseline": getattr(a, "usage_baseline", None),
                 "role": a.role,
                 "role_instructions": a.role_instructions,
                 "introduced": bool(state["introduced"][i]),
@@ -5930,6 +6071,12 @@ def rehydrate(meta, workspace=None):
             browser=meta.get("browser"),
             browser_sites=meta.get("browser_sites"))
         a.session_id = s.get("session_id") or None
+        # Restored beside the session id it is keyed on, and never without
+        # it: usage_delta ignores a baseline whose thread does not match, so
+        # a half-restored pair degrades to "nothing came before" rather than
+        # to a wrong number.
+        baseline = s.get("usage_baseline")
+        a.usage_baseline = baseline if isinstance(baseline, dict) else None
         agents.append(a)
     return {
         "agents": agents,
@@ -7478,7 +7625,7 @@ def seat_command(state, cmd, arg, io):
             io.emit("status", {"text": note})
             state["store"].system(note, round=state["rnd"])
         else:
-            agent.session_id = None
+            agent.forget_thread()
             state["introduced"][i] = False
             state["pending"][i].insert(0, CLEAR_NOTE)
             io.emit("status", {"text": f"{agent.name}'s context cleared."})
@@ -7684,6 +7831,20 @@ def record_usage(state, usage, seat_key=None, kind="seat"):
         "by_seat": {},
         "by_kind": {}
     })
+    # Which bases these totals are made of. A chat continued across a bump
+    # genuinely mixes them, so this is a SET, not a stamp: totals that were
+    # already here when the label arrived came from the old basis and are
+    # seeded as 1, and a chat that had spent nothing yet is not called mixed.
+    if "basis_versions" not in ustate:
+        had_spend = any(ustate.get(k) for k in ("total_cost_usd",
+                                                "input_tokens",
+                                                "output_tokens",
+                                                "total_tokens"))
+        ustate["basis_versions"] = [1] if had_spend else []
+    basis = int(usage.get("basis_version") or 1)
+    if basis not in ustate["basis_versions"]:
+        ustate["basis_versions"] = sorted(ustate["basis_versions"] + [basis])
+
     if usage.get("cost_usd") is not None:
         ustate["total_cost_usd"] = round(ustate.get("total_cost_usd", 0.0) + float(usage["cost_usd"]), 6)
     ustate["input_tokens"] = int(ustate.get("input_tokens", 0) + (usage.get("input_tokens") or 0))
@@ -7718,6 +7879,15 @@ def record_usage(state, usage, seat_key=None, kind="seat"):
         s_u["output_tokens"] += (usage.get("output_tokens") or 0)
         s_u["total_tokens"] += (usage.get("total_tokens") or 0)
         s_u["turns"] += 1
+        # Wall time is ours, measured (Agent.turn), so it accumulates like a
+        # token count. It only exists for seats that report usage at all —
+        # see the note in Agent.turn about not inventing a dict to carry it.
+        if usage.get("wall_ms") is not None:
+            s_u["wall_ms"] = int((s_u.get("wall_ms") or 0)
+                                 + (usage.get("wall_ms") or 0))
+        if usage.get("cached_tokens") is not None:
+            s_u["cached_tokens"] = int((s_u.get("cached_tokens") or 0)
+                                       + (usage.get("cached_tokens") or 0))
 
     # Live budget bar: the UI learns cumulative spend the moment it is
     # recorded, through the same seam every loop event uses. The payload is
@@ -7913,21 +8083,31 @@ def enqueue_josh_message(state, io, text):
     return row
 
 
-def artifact_descriptors(workspace, activity, producer, message_id):
-    """Turn confined edit activity into truthful, verified file references."""
+def artifact_descriptors(workspace, activity, producer, message_id,
+                         extra_paths=None):
+    """Turn confined edit activity into truthful, verified file references.
+
+    `extra_paths` is for files a seat produced that its STREAM never
+    mentioned. Gemini is the whole reason it exists: agy has no activity
+    stream at all, and `GeminiAgent.harvest_images` copies each turn's
+    generated images into the workspace itself — so an image that really
+    exists on disk had no way to become an artifact. Those paths go through
+    exactly the same gate as a streamed one (confine, then isfile, then
+    normcase-dedupe) rather than being appended raw: a path is a claim until
+    the filesystem agrees with it, and where the claim came from does not
+    change that.
+    """
     found = []
     seen = set()
-    for act in activity or ():
-        if not isinstance(act, dict) or not act.get("path"):
-            continue
-        raw = act["path"]
+
+    def add(raw):
         real = confine_to_workspace(workspace, raw)
         if real is None or not os.path.isfile(real):
-            continue
+            return
         relative = os.path.relpath(real, os.path.realpath(workspace))
         key = os.path.normcase(relative)
         if key in seen:
-            continue
+            return
         seen.add(key)
         mime = mimetypes.guess_type(relative)[0] or "application/octet-stream"
         stable = hashlib.sha256(
@@ -7936,11 +8116,20 @@ def artifact_descriptors(workspace, activity, producer, message_id):
         try:
             size = os.path.getsize(real)
         except OSError:
-            continue
+            seen.discard(key)
+            return
         found.append({"artifact_id": stable, "path": relative,
                       "kind": mime, "operation": "created_or_modified",
                       "producer": producer, "source_message_id": message_id,
                       "size": size})
+
+    for act in activity or ():
+        if not isinstance(act, dict) or not act.get("path"):
+            continue
+        add(act["path"])
+    for raw in extra_paths or ():
+        if isinstance(raw, str) and raw:
+            add(raw)
     return found
 
 
@@ -8030,7 +8219,7 @@ def deliver_hidden_digest(state, i, io, summarizer=None, lock=None):
                                    "hidden messages verbatim."})
     finally:
         if digest_agent is not None:
-            digest_agent.session_id = None
+            digest_agent.session_id = None  # stateless by design
     usage = getattr(digest_agent, "last_usage", None) if digest_agent else None
     if summary:
         text = "Relay digest of messages not addressed to this seat:\n\n" + summary[:5000]
@@ -8105,8 +8294,12 @@ def commit_reply(state, i, reply, consumed, io, activity=None,
         "message_id": message_id,
         "audience": audience,
         "delivered_to": [state["slot_ids"][j] for j in recipient_indices],
+        # last_images: the turn's harvested Gemini images. Absent on every
+        # other adapter, and reset by GeminiAgent.parse on each turn, so a
+        # turn that generated nothing contributes nothing.
         "artifacts": artifact_descriptors(
-            state.get("workspace"), activity, state["slot_ids"][i], message_id),
+            state.get("workspace"), activity, state["slot_ids"][i], message_id,
+            extra_paths=getattr(agent, "last_images", None)),
     }
     # Refused deliveries are stamped on the SENDER's row (comms-design.md
     # section 3.3: rejected_to [{seat, reason}], plus narrowing_failed when a
@@ -12556,7 +12749,7 @@ def run_free(state, io):
                 continue
             if job == "clear":
                 with cond:
-                    agent.session_id = None
+                    agent.forget_thread()
                     state["introduced"][i] = False
                     pending[i].insert(0, CLEAR_NOTE)
                     io.emit("status", {"text": f"{agent.name}'s context "

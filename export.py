@@ -165,6 +165,29 @@ def _card(row):
                 "<details><summary>Worked through %d step%s</summary><ul>%s</ul>"
                 "</details>" % (len(items), "" if len(items) == 1 else "s",
                                 "".join(items)))
+    # The files this turn produced, verified on disk by the engine before the
+    # row was recorded (relay.artifact_descriptors). Rendered here for the
+    # same reason the activity block is: an export is the SECOND renderer
+    # over these rows, and a field only the app draws is a field an exported
+    # transcript quietly loses. Text only, never a link — an export travels
+    # away from the machine that holds the workspace, so a path that resolves
+    # here would resolve nowhere for whoever it is sent to.
+    arts = row.get("artifacts")
+    if isinstance(arts, list) and arts:
+        items = []
+        for art in arts:
+            if not isinstance(art, dict) or not art.get("path"):
+                continue
+            size = art.get("size")
+            items.append("<li>%s%s</li>" % (
+                _esc(art["path"]),
+                (" &middot; %s bytes" % _esc(size))
+                if isinstance(size, int) else ""))
+        if items:
+            parts.append(
+                "<details><summary>Produced %d file%s</summary><ul>%s</ul>"
+                "</details>" % (len(items), "" if len(items) == 1 else "s",
+                                "".join(items)))
     usage = row.get("usage")
     if isinstance(usage, dict) and usage:
         pills = "".join("<span class='pill'>%s: %s</span>" % (_esc(k), _esc(v))
