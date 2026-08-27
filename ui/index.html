@@ -798,7 +798,8 @@
      no node harness can see, only getComputedStyle on a real page. There is
      now a test that reads the button ids straight out of the <aside> and
      checks each one appears here. */
-  #acctBtn, #skillBtn, #memBtn, #statsBtn, #roomsBtn, #soundBtn, #hooksBtn {
+  #acctBtn, #skillBtn, #memBtn, #statsBtn, #roomsBtn, #schedBtn, #soundBtn,
+  #hooksBtn {
     width: 100%; display: flex; align-items: center; gap: 8px;
     background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
     color: var(--text); padding: 9px 12px; margin-top: 16px; cursor: pointer;
@@ -809,19 +810,21 @@
   #memBtn { margin-top: 6px; font-size: 11px; }
   #statsBtn { margin-top: 6px; font-size: 11px; }
   #roomsBtn { margin-top: 6px; font-size: 11px; }
+  #schedBtn { margin-top: 6px; font-size: 11px; }
   #soundBtn { margin-top: 6px; font-size: 11px; }
   #soundBtn.off { color: var(--muted); }
   #hooksBtn { margin-top: 6px; font-size: 11px; }
   #acctBtn { margin-top: 6px; }
   #acctBtn:hover, #skillBtn:hover, #memBtn:hover, #statsBtn:hover,
-  #roomsBtn:hover, #soundBtn:hover,
+  #roomsBtn:hover, #schedBtn:hover, #soundBtn:hover,
   #hooksBtn:hover { border-color: rgba(255,255,255,.25); }
   #acctBadge {
     margin-left: auto; background: var(--danger); color: #fff; border-radius: 999px;
     font: 11px "Cascadia Mono", Consolas, monospace; padding: 1px 7px;
   }
   #acctModal, #roleModal, #askModal, #skillModal, #contModal, #kbdModal,
-  #hooksModal, #roomsModal, #deskModal, #brwsModal, #statsModal, #memModal {
+  #hooksModal, #roomsModal, #schedModal, #deskModal, #brwsModal, #statsModal,
+  #memModal {
     position: fixed; inset: 0; z-index: 50; display: none;
     align-items: flex-start; justify-content: center; padding-top: 9vh;
     background: rgba(10,8,14,.6);
@@ -843,10 +846,62 @@
   }
   #roomHint { color: var(--danger); font-size: 11px; min-height: 15px; margin-bottom: 4px; }
   #roomEmpty { color: var(--muted); font-size: 12px; padding: 10px 0 4px; }
+  /* ---------- scheduled rooms ---------- */
+  #schedModal .modal { width: min(680px, 94vw); }
+  .sched-row {
+    display: flex; align-items: center; gap: 8px; padding: 7px 0;
+    border-bottom: 1px solid rgba(255,255,255,.06); flex-wrap: wrap;
+  }
+  .sched-row:last-child { border-bottom: none; }
+  .sched-row.off .sched-name, .sched-row.off .sched-when { color: var(--muted); }
+  .sched-row .sched-name {
+    flex: 1; min-width: 120px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sched-row .sched-when { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .sched-foot {
+    flex-basis: 100%; color: var(--muted); font-size: 11px; line-height: 1.5;
+  }
+  .sched-foot.warn { color: var(--danger); }
+  #schedEmpty { color: var(--muted); font-size: 12px; padding: 10px 0 4px; }
+  #schedEditor { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .sched-field { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 7px; }
+  .sched-field > label:first-child {
+    flex: 0 0 104px; color: var(--muted); font-size: 12px; padding-top: 7px;
+  }
+  .sched-field input[type=text], .sched-field select, .sched-field textarea {
+    flex: 1; min-width: 0; background: var(--surface); color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px;
+    font-family: inherit; font-size: 13px; resize: vertical;
+  }
+  .sched-field .sched-unit { color: var(--muted); font-size: 12px; padding-top: 7px; }
+  #schedDays { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 5px; }
+  #schedDays label {
+    display: flex; align-items: center; gap: 4px; color: var(--text);
+    font-size: 12px; cursor: pointer;
+  }
+  #schedNotes { color: var(--muted); font-size: 11px; line-height: 1.55; margin: 4px 0 8px; }
+  #schedNotes div { margin-bottom: 3px; }
+  #schedGrants {
+    border: 1px solid var(--danger); border-radius: 10px; padding: 9px 11px;
+    margin: 6px 0 8px;
+  }
+  #schedGrants[hidden] { display: none; }
+  .sched-grant-h {
+    color: var(--danger); font-size: 11px; letter-spacing: .1em;
+    text-transform: uppercase; margin-bottom: 6px;
+  }
+  #schedGrantList { margin: 0 0 8px; padding-left: 18px; line-height: 1.6; font-size: 12px; }
+  #schedAckLbl {
+    display: flex; align-items: flex-start; gap: 7px; font-size: 12px;
+    line-height: 1.5; cursor: pointer;
+  }
+  #schedNote { color: var(--danger); font-size: 11px; min-height: 15px; }
+  #schedBtns { display: flex; gap: 8px; align-items: center; }
   #acctModal.show, #roleModal.show, #askModal.show, #skillModal.show,
   #contModal.show, #kbdModal.show, #hooksModal.show, #roomsModal.show,
   #deskModal.show, #brwsModal.show, #statsModal.show,
-  #memModal.show { display: flex; }
+  #schedModal.show, #memModal.show { display: flex; }
   #deskModal .modal, #brwsModal .modal { width: min(560px, 94vw); border-left: 3px solid var(--danger); }
   #deskModal ul, #brwsModal ul { margin: 10px 0 0; padding-left: 18px; line-height: 1.65; }
   #deskModal li, #brwsModal li { margin-bottom: 4px; }
@@ -2335,6 +2390,9 @@
     <button id="roomsBtn" title="Save this lineup — seats, models, roles, limits — and start it again in one click">
       <span>Saved rooms</span>
     </button>
+    <button id="schedBtn" title="Start a saved room on a timer — nightly, weekly, or every so often — while you are away">
+      <span>Scheduled rooms</span>
+    </button>
     <button id="soundBtn" title="Sound cues when a conversation needs you or finishes — a question, a check-in, a completed run">
       <span id="soundLbl">Sound on</span>
     </button>
@@ -2627,6 +2685,67 @@
     <div id="roomHint"></div>
     <div id="roomList"></div>
     <div id="roomEmpty" hidden>No saved rooms yet — set up the seats and controls, then save the lineup here.</div>
+  </div>
+</div>
+
+<div id="schedModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Scheduled rooms</h2>
+      <button class="close" id="schedClose" title="Close" aria-label="Close">✕</button>
+    </div>
+    <div class="kbd-note">A saved room, an opening message, and when to start it.
+      Alloy has to be running: a window it was closed for is reported as missed,
+      never started late. A scheduled run never takes the screen — it appears in
+      the chat list and the jobs bar like any other conversation, and it is
+      skipped if another conversation is still going.</div>
+    <div id="schedRows"></div>
+    <div id="schedEmpty" hidden>Nothing scheduled yet.</div>
+    <div id="schedEditor">
+      <div class="chat-search-h" id="schedEditH">New schedule</div>
+      <div class="sched-field"><label for="schedName">Name</label>
+        <input type="text" id="schedName" maxlength="80" spellcheck="false"
+               placeholder="Nightly review"></div>
+      <div class="sched-field"><label for="schedRoom">Room</label>
+        <select id="schedRoom"></select></div>
+      <div class="sched-field"><label for="schedPrompt">First message</label>
+        <textarea id="schedPrompt" rows="3"
+          placeholder="What the room should do — this is the message that starts it"></textarea></div>
+      <div class="sched-field"><label for="schedTurns">Rounds</label>
+        <input type="text" id="schedTurns" class="mono" inputmode="numeric"
+               spellcheck="false" value="10"></div>
+      <div class="sched-field"><label for="schedKind">Repeat</label>
+        <select id="schedKind">
+          <option value="daily">Every day</option>
+          <option value="weekly">Certain days</option>
+          <option value="interval">Every so often</option>
+          <option value="once">Once</option>
+        </select></div>
+      <div class="sched-field" id="schedAtRow"><label for="schedAt">At</label>
+        <input type="text" id="schedAt" class="mono" spellcheck="false"
+               placeholder="01:00" value="01:00"></div>
+      <div class="sched-field" id="schedDaysRow"><label>Days</label>
+        <span id="schedDays"></span></div>
+      <div class="sched-field" id="schedEveryRow"><label for="schedEvery">Every</label>
+        <input type="text" id="schedEvery" class="mono" inputmode="numeric"
+               spellcheck="false" value="60">
+        <span class="sched-unit">minutes</span></div>
+      <div class="sched-field" id="schedOnceRow"><label for="schedStart">Date &amp; time</label>
+        <input type="text" id="schedStart" class="mono" spellcheck="false"
+               placeholder="2026-09-01 01:00"></div>
+      <div id="schedNotes"></div>
+      <div id="schedGrants" hidden>
+        <div class="sched-grant-h">Standing access, granted on every run</div>
+        <ul id="schedGrantList"></ul>
+        <label id="schedAckLbl"><input type="checkbox" id="schedAck">
+          <span id="schedAckText"></span></label>
+      </div>
+      <div class="kbd-note"><span id="schedNote"></span></div>
+      <div id="schedBtns">
+        <button id="schedSave">Save schedule</button>
+        <button class="btn-sm" id="schedReset">Clear</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -5312,6 +5431,15 @@ window.uiEvent = packet => {
     budgetApply(payload);
   } else if (event === "checkin") {
     showContBanner(payload.text || "The scheduled check-in ran.");
+  } else if (event === "scheduled") {
+    // No chat_id on purpose (see _announce_schedule): this is the APP
+    // reporting on a timer, not a conversation speaking, and stamping it
+    // with the focused chat would paint it into whatever Josh has open.
+    // A banner rather than a transcript row for the same reason — and it
+    // is shown for a SKIP and a MISS too, which are the outcomes nothing
+    // else on screen would ever mention.
+    showContBanner(payload.text || "A scheduled room fired.");
+    if ($("schedModal").classList.contains("show")) loadSched();
   } else if (event === "hooks_status") {
     if (payload.ok) {
       if ($("hooksModal").classList.contains("show"))
@@ -7242,7 +7370,14 @@ $("soundBtn").onclick = () => {
 // built with createElement/textContent only — hook commands are arbitrary
 // CLI text and must never pass through innerHTML.
 const hookLabels = {question: "Question", checkin: "Check-in", done: "Done",
-                    gate_red: "Gate failed"};
+                    gate_red: "Gate failed",
+                    scheduled: "Scheduled room"};
+// The ids openHooks actually PAINTED. Save used to walk hookLabels, so an
+// event Python knows about but this table does not rendered a row (the list
+// comes from `r.events`) and was silently dropped on Save — a fourth place
+// to keep in sync, and the one nothing would have noticed. Iterating what
+// was drawn cannot drift from what was drawn.
+let hookRowIds = [];
 function closeHooks() { $("hooksModal").classList.remove("show"); }
 async function openHooks() {
   let r;
@@ -7252,7 +7387,9 @@ async function openHooks() {
   const rows = $("hookRows");
   rows.replaceChildren();
   const saved = (r && r.hooks) || {};
+  hookRowIds = [];
   for (const ev of (r && r.events) || Object.keys(hookLabels)) {
+    hookRowIds.push(ev);
     const row = document.createElement("div");
     row.className = "hook-row";
     const lab = document.createElement("label");
@@ -7274,7 +7411,7 @@ $("hooksClose").onclick = closeHooks;
 $("hooksModal").onclick = e => { if (e.target === $("hooksModal")) closeHooks(); };
 $("hookSave").onclick = async () => {
   const hooks = {};
-  for (const ev of Object.keys(hookLabels)) {
+  for (const ev of hookRowIds) {
     const box = $("hook-" + ev);
     const v = ((box && box.value) || "").trim();
     if (v) hooks[ev] = v;
@@ -7677,6 +7814,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
     closeAccounts(); closeRole(); hideAsk(); closeSkills(); closeRooms();
     closeContinuous(); closeKbd(); closeHooks(); closeStats(); closeMemory();
+    closeSched();
     // false = refused, so Escape reverts the picker like Cancel does
     if ($("deskModal").classList.contains("show")) closeDeskModal(false);
     if ($("brwsModal").classList.contains("show")) closeBrwsModal(false);
@@ -10263,6 +10401,297 @@ async function startRoom(name) {
   closeRooms();
   $("say").focus();
 }
+
+/* ---------- scheduled rooms ----------
+   A saved room + an opening message + a recurrence. schedule.py owns the
+   store and the clock; this is the form and the list.
+
+   Two rules the Python side also enforces, deliberately duplicated HERE only
+   as a faster refusal — python is authoritative and is what actually stops a
+   fire: a room that grants standing access needs its own acknowledgement, and
+   the acknowledgement names the grants AND how often they are renewed.
+
+   Text inputs, never <input type="number">: WebView2 draws duplicate spinners
+   and reports "" for partially typed values, which makes clamp-on-blur lie
+   (the #rVal lesson). Times and intervals are validated on save instead. */
+let schedCache = [], schedRooms = [], schedRisk = null, schedEditId = null;
+const SCHED_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function closeSched() { $("schedModal").classList.remove("show"); }
+function schedNote(text) { $("schedNote").textContent = text || ""; }
+
+function schedBuildDays() {
+  const box = $("schedDays");
+  if (box.children.length) return;          // built once
+  SCHED_DAYS.forEach((name, i) => {
+    const lab = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.value = String(i); cb.className = "sched-day";
+    const span = document.createElement("span");
+    span.textContent = name;
+    lab.append(cb, span);
+    box.appendChild(lab);
+  });
+}
+
+function schedKindRows() {
+  const kind = $("schedKind").value;
+  $("schedAtRow").hidden = !(kind === "daily" || kind === "weekly");
+  $("schedDaysRow").hidden = kind !== "weekly";
+  $("schedEveryRow").hidden = kind !== "interval";
+  $("schedOnceRow").hidden = kind !== "once";
+}
+
+function schedDaysPicked() {
+  return Array.from(document.querySelectorAll("#schedDays .sched-day"))
+    .filter(cb => cb.checked).map(cb => parseInt(cb.value, 10));
+}
+
+function schedRecurrenceText() {
+  // The same sentence schedule.describe() builds, for the acknowledgement —
+  // "how often it repeats" is half of what Josh is agreeing to, so the tick
+  // box has to say it rather than pointing at a field above it.
+  const kind = $("schedKind").value;
+  if (kind === "once") return "once, at " + $("schedStart").value.trim();
+  if (kind === "interval") return "every " + $("schedEvery").value.trim()
+                                  + " minutes";
+  const at = $("schedAt").value.trim();
+  if (kind === "daily") return "every day at " + at;
+  const days = schedDaysPicked().map(i => SCHED_DAYS[i]).join(", ");
+  return "every " + (days || "—") + " at " + at;
+}
+
+function schedPaintAck() {
+  const grants = (schedRisk && schedRisk.grants) || [];
+  const box = $("schedGrants");
+  box.hidden = !grants.length;
+  const list = $("schedGrantList");
+  list.replaceChildren();
+  for (const line of (schedRisk && schedRisk.sentences) || []) {
+    const li = document.createElement("li");
+    li.textContent = line;                  // never innerHTML: room-derived
+    list.appendChild(li);
+  }
+  $("schedAckText").textContent =
+    "I understand this starts " + ($("schedRoom").value || "this room")
+    + " " + schedRecurrenceText()
+    + ", unattended, and that every run has the access listed above until I "
+    + "delete this schedule.";
+  const notes = $("schedNotes");
+  notes.replaceChildren();
+  for (const line of (schedRisk && schedRisk.notes) || []) {
+    const div = document.createElement("div");
+    div.textContent = "· " + line;
+    notes.appendChild(div);
+  }
+}
+
+async function schedLoadRisk() {
+  const name = $("schedRoom").value;
+  schedRisk = null;
+  if (name) {
+    try {
+      const r = await pywebview.api.room_risk(name);
+      if (r && !r.error) schedRisk = r;
+    } catch (e) { schedRisk = null; }
+  }
+  schedPaintAck();
+}
+
+function schedFillRooms(selected) {
+  const sel = $("schedRoom");
+  sel.replaceChildren();
+  if (!schedRooms.length) {
+    const o = document.createElement("option");
+    o.value = ""; o.textContent = "— save a room first —";
+    sel.appendChild(o);
+    return;
+  }
+  for (const name of schedRooms) {
+    const o = document.createElement("option");
+    o.value = name; o.textContent = name;
+    if (name === selected) o.selected = true;
+    sel.appendChild(o);
+  }
+}
+
+function schedClear() {
+  schedEditId = null;
+  $("schedEditH").textContent = "New schedule";
+  $("schedName").value = "";
+  $("schedPrompt").value = "";
+  $("schedTurns").value = "10";
+  $("schedKind").value = "daily";
+  $("schedAt").value = "01:00";
+  $("schedEvery").value = "60";
+  $("schedStart").value = "";
+  document.querySelectorAll("#schedDays .sched-day")
+    .forEach(cb => { cb.checked = false; });
+  $("schedAck").checked = false;
+  schedNote("");
+  schedFillRooms(schedRooms[0]);
+  schedKindRows();
+  schedLoadRisk();
+}
+
+function schedEdit(rec) {
+  schedEditId = rec.id;
+  $("schedEditH").textContent = "Editing " + rec.name;
+  $("schedName").value = rec.name || "";
+  $("schedPrompt").value = rec.prompt || "";
+  $("schedTurns").value = String(rec.turns || 10);
+  $("schedKind").value = rec.kind || "daily";
+  $("schedAt").value = rec.at || "01:00";
+  $("schedEvery").value = String(rec.every_min || 60);
+  $("schedStart").value = String(rec.start || "").replace("T", " ");
+  const days = rec.days || [];
+  document.querySelectorAll("#schedDays .sched-day")
+    .forEach(cb => { cb.checked = days.includes(parseInt(cb.value, 10)); });
+  // Pre-ticked ONLY when the room still grants exactly what was acknowledged.
+  // A room that gained Full access since starts the box empty, because that
+  // is a grant nobody has agreed to yet.
+  $("schedAck").checked = !!(rec.grants || []).length
+                          && !(rec.ack_gap || []).length;
+  schedNote("");
+  schedFillRooms(rec.room);
+  schedKindRows();
+  schedLoadRisk();
+  $("schedName").focus();
+}
+
+function schedRowFoot(rec) {
+  const bits = [];
+  if (rec.missing_room)
+    bits.push("The room \"" + rec.room + "\" no longer exists — this will not run.");
+  else if ((rec.ack_gap || []).length)
+    bits.push("This room now grants access this schedule was never acknowledged "
+              + "for, so it will not run: " + (rec.ack_sentences || []).join("; ") + ".");
+  if (rec.next_run && rec.enabled)
+    bits.push("Next: " + String(rec.next_run).replace("T", " "));
+  if (rec.last_run)
+    bits.push("Last: " + String(rec.last_run).replace("T", " ")
+              + (rec.last_result ? " — " + rec.last_result : ""));
+  if (rec.misses) bits.push(rec.misses + " missed");
+  return bits;
+}
+
+function renderSchedRows() {
+  const list = $("schedRows");
+  list.replaceChildren();
+  $("schedEmpty").hidden = schedCache.length > 0;
+  for (const rec of schedCache) {
+    const row = document.createElement("div");
+    row.className = "sched-row" + (rec.enabled ? "" : " off");
+    row.dataset.sched = rec.id;
+    const name = document.createElement("span");
+    name.className = "sched-name";
+    name.textContent = rec.name;             // never innerHTML: Josh-named
+    const when = document.createElement("span");
+    when.className = "sched-when";
+    when.textContent = rec.describe + (rec.enabled ? "" : " · paused");
+    const run = document.createElement("button");
+    run.className = "btn-sm"; run.textContent = "Run now";
+    run.title = "Start it this instant without using up its next window";
+    run.onclick = async () => {
+      run.disabled = true;
+      const r = await pywebview.api.run_schedule_now(rec.id);
+      run.disabled = false;
+      if (r && r.error) schedNote(r.error);
+      else if (r && !r.started) schedNote(r.text || "It did not start.");
+      else schedNote("");
+      loadSched();
+    };
+    const arm = document.createElement("button");
+    arm.className = "btn-sm";
+    arm.textContent = rec.enabled ? "Pause" : "Resume";
+    arm.onclick = async () => {
+      await pywebview.api.set_schedule_enabled(rec.id, !rec.enabled);
+      loadSched();
+    };
+    const edit = document.createElement("button");
+    edit.className = "btn-sm"; edit.textContent = "Edit";
+    edit.onclick = () => schedEdit(rec);
+    const del = document.createElement("button");
+    del.className = "btn-sm danger"; del.textContent = "Delete";
+    del.onclick = async () => {
+      if (!del.dataset.arm) {                // two-step arm, like every other
+        del.dataset.arm = "1"; del.textContent = "Really delete?";
+        setTimeout(() => { delete del.dataset.arm; del.textContent = "Delete"; },
+                   8000);
+        return;
+      }
+      delete del.dataset.arm;
+      await pywebview.api.delete_schedule(rec.id);
+      if (schedEditId === rec.id) schedClear();
+      loadSched();
+    };
+    row.append(name, when, run, arm, edit, del);
+    for (const line of schedRowFoot(rec)) {
+      const foot = document.createElement("div");
+      foot.className = "sched-foot"
+        + ((rec.missing_room || (rec.ack_gap || []).length) ? " warn" : "");
+      foot.textContent = line;
+      row.appendChild(foot);
+    }
+    list.appendChild(row);
+  }
+}
+
+async function loadSched() {
+  try {
+    const r = await pywebview.api.get_schedules();
+    schedCache = (r && r.schedules) || [];
+    schedRooms = (r && r.rooms) || [];
+  } catch (e) { schedCache = []; schedRooms = []; }
+  renderSchedRows();
+  const keep = $("schedRoom").value;
+  schedFillRooms(keep && schedRooms.includes(keep) ? keep : schedRooms[0]);
+  schedPaintAck();
+}
+
+async function openSched() {
+  schedBuildDays();
+  $("schedModal").classList.add("show");
+  await loadSched();
+  if (!schedEditId) schedClear();
+}
+
+async function saveSched() {
+  const grants = (schedRisk && schedRisk.grants) || [];
+  if (grants.length && !$("schedAck").checked) {
+    schedNote("Tick the acknowledgement — this room grants standing access on "
+              + "every run.");
+    return;
+  }
+  const spec = {
+    id: schedEditId || "",
+    name: $("schedName").value.trim(),
+    room: $("schedRoom").value,
+    prompt: $("schedPrompt").value.trim(),
+    turns: parseInt($("schedTurns").value, 10) || 10,
+    kind: $("schedKind").value,
+    at: $("schedAt").value.trim(),
+    days: schedDaysPicked(),
+    every_min: parseInt($("schedEvery").value, 10) || 0,
+    start: $("schedStart").value.trim(),
+    enabled: true,
+    ack: grants.length ? {grants: grants} : null,
+  };
+  let r;
+  try { r = await pywebview.api.save_schedule(spec); }
+  catch (e) { schedNote(String(e)); return; }
+  if (r && r.error) { schedNote(r.error); return; }
+  schedClear();
+  loadSched();
+}
+
+$("schedBtn").onclick = openSched;
+$("schedClose").onclick = closeSched;
+$("schedModal").onclick = e => { if (e.target === $("schedModal")) closeSched(); };
+$("schedKind").onchange = () => { schedKindRows(); schedPaintAck(); };
+$("schedRoom").onchange = schedLoadRisk;
+$("schedSave").onclick = saveSched;
+$("schedReset").onclick = schedClear;
 
 /* ---------- boot ---------- */
 function fill(sel, items, def) {

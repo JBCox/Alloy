@@ -103,12 +103,10 @@ function parseFragment(html, mk) {
   return out;
 }
 
-function matches(el, sel) {
-  sel = sel.trim();
-  // only the selector forms the UI actually uses on built fragments
-  for (const part of sel.split(',')) {
-    const p = part.trim();
-    if (!p) continue;
+// ONE compound (no combinators). `matches` below layers the comma list
+// and the descendant combinator on top.
+function matchesCompound(el, p) {
+    if (!p) return false;
     // COMPOUND class selectors (".react-btn.on") matched for real. Treating
     // the whole tail as one class name means such a selector NEVER matches,
     // and the UI then takes its own no-match branch -- which is how a probe
@@ -141,15 +139,39 @@ function matches(el, sel) {
       const attr = p.match(/\[([\w-]+)(?:\s*=\s*"?([^\]"]*)"?)?\]/);
       if (attr) {
         const have = el.getAttribute(attr[1]);
-        if (have === undefined || have === null) continue;
-        if (attr[2] !== undefined && String(have) !== attr[2]) continue;
+        if (have === undefined || have === null) return false;
+        if (attr[2] !== undefined && String(have) !== attr[2]) return false;
       }
-      if (/:checked\b/.test(p) && !el.checked) continue;
-      if (/:disabled\b/.test(p) && !el.disabled) continue;
+      if (/:checked\b/.test(p) && !el.checked) return false;
+      if (/:disabled\b/.test(p) && !el.disabled) return false;
       const cls = p.match(/\.([\w-]+)/);
       if (!cls) return true;
       if ((' ' + el.className + ' ').includes(' ' + cls[1] + ' ')) return true;
+  }
+  return false;
+}
+
+// Comma lists AND the descendant combinator. The combinator used to be
+// ignored outright: "#schedDays .sched-day" hit the `#` branch and
+// compared el.id to the WHOLE string, so it matched nothing, silently --
+// and the UI's own code then looked as though it found no checkboxes.
+// ui/index.html has been using that form for a while ("#feed .msg",
+// "#battleBar .vote-btn"), so this was three selectors returning [] in
+// the harness while working perfectly in a browser: the same family as
+// the no-op classList and the permissive Proxy (2026-08-27).
+function matches(el, sel) {
+  for (const part of String(sel).split(',')) {
+    const compounds = part.trim().split(/\s+/).filter(Boolean);
+    if (!compounds.length) continue;
+    if (!matchesCompound(el, compounds.pop())) continue;
+    let node = el.parentElement, ok = true;
+    while (compounds.length) {
+      const want = compounds.pop();
+      while (node && !matchesCompound(node, want)) node = node.parentElement;
+      if (!node) { ok = false; break; }
+      node = node.parentElement;
     }
+    if (ok) return true;
   }
   return false;
 }
@@ -457,6 +479,13 @@ let interjectSwitchesChatTo = null;
 let openSessionExtra = {};   // merged into the reopened chat's session summary
 let jobsReply = {jobs: [], now: 1000};   // W2.3: what Api.jobs() hands back
 const boardCalls = [];       // W2.2: what approve_board was asked to do
+const schedCalls = [];       // W4: what the schedule bridge was asked to do
+let schedReply = {ok: true, rooms: [], schedules: []};
+let riskReply = {ok: true, grants: [], sentences: [], notes: []};
+const hookSaves = [];        // what set_event_hooks was handed
+// null = the bridge's real event list; the probe swaps in one carrying an
+// event hookLabels does NOT know, which is the whole point of the check
+let hooksReply = null;
 function apiReply(name, args) {
   apiCalls.push(name);
   switch (name) {
@@ -538,6 +567,17 @@ function apiReply(name, args) {
         openSessionExtra),
     };
     case 'jobs': return jobsReply;
+    case 'get_schedules': return schedReply;
+    case 'room_risk': return riskReply;
+    case 'save_schedule':
+    case 'delete_schedule':
+    case 'set_schedule_enabled':
+    case 'run_schedule_now':
+      schedCalls.push([name].concat(args)); return {ok: true, started: true};
+    case 'get_event_hooks': return hooksReply || {
+      ok: true, events: ['question', 'checkin', 'done', 'gate_red',
+                         'scheduled'], hooks: {}};
+    case 'set_event_hooks': hookSaves.push(args && args[0]); return {ok: true};
     case 'approve_board': boardCalls.push(args.slice()); return {ok: true};
     case 'list_workspace_files': return [];
     case 'list_runs': return {runs: []};
@@ -2720,6 +2760,139 @@ if (topLevelError) {
     p.barAfterNewChat = !byId['jobsBar'].hidden;
   } catch (e) { more.advPassError = (e && e.stack) || String(e); }
 
+  // ---- W4: scheduled rooms, driven through the REAL modal ----------------
+  try {
+    const p = more.sched = {};
+
+    // (a) the hooks modal renders from the BRIDGE's event list and saves what
+    // it rendered. `future_thing` is deliberately absent from hookLabels: the
+    // old hookSave walked that table, so a row Python knew about displayed and
+    // was silently dropped on Save.
+    hooksReply = {ok: true, hooks: {},
+                  events: ['question', 'checkin', 'done', 'gate_red',
+                           'scheduled', 'future_thing']};
+    await ctx.openHooks();
+    p.hookRowIds = vm.runInContext('hookRowIds', ctx).slice();
+    p.scheduledLabel = byId['hookRows'].children
+      .map(r => (r.children[0] || {}).textContent).join('|');
+    // `document.getElementById`, exactly as the page's own $() does:
+    // dynamically built elements never enter byId (only setAttribute
+    // registers there), and the stub's getElementById already walks
+    // the live tree for them
+    document.getElementById('hook-scheduled').value = 'notify-me';
+    document.getElementById('hook-future_thing').value = 'later';
+    await byId['hookSave'].onclick();
+    p.hookSaved = hookSaves[hookSaves.length - 1];
+    hooksReply = null;
+    ctx.closeHooks();
+
+    // (b) the schedule list
+    schedReply = {ok: true, rooms: ['Quiet', 'Loud'], schedules: [
+      {id: 's1', name: 'Nightly', room: 'Quiet', prompt: 'go', turns: 6,
+       kind: 'daily', at: '01:00', days: [], every_min: 0, start: '',
+       enabled: true, next_run: '2026-08-28T01:00:00', last_run: '',
+       last_result: '', runs: 0, misses: 0, ack: null,
+       describe: 'Every day at 01:00', grants: [], ack_gap: [],
+       ack_sentences: [], missing_room: false},
+      {id: 's2', name: 'Loud one', room: 'Loud', prompt: 'go', turns: 6,
+       kind: 'weekly', at: '02:00', days: [0, 4], every_min: 0, start: '',
+       enabled: false, next_run: '', last_run: '2026-08-20T02:00:00',
+       last_result: 'Missed 2026-08-20 02:00 — Alloy was not running.',
+       runs: 1, misses: 2,
+       ack: {grants: ['connectors'], at: '2026-08-01T00:00:00'},
+       describe: 'Every Mon, Fri at 02:00',
+       grants: ['permission_full', 'connectors'],
+       ack_gap: ['permission_full'],
+       ack_sentences: ['write, delete and run anything'],
+       missing_room: false},
+    ]};
+    riskReply = {ok: true, grants: [], sentences: [], notes: []};
+    await ctx.openSched();
+    p.modalShown = byId['schedModal'].classList.contains('show');
+    p.rowCount = byId['schedRows'].children.length;
+    p.rowNames = byId['schedRows'].children
+      .map(r => (r.children[0] || {}).textContent);
+    p.roomOptions = byId['schedRoom'].options.map(o => o.value);
+    p.emptyHidden = !!byId['schedEmpty'].hidden;
+    // the second row's warning: it is armed against a room that has widened
+    p.warnText = byId['schedRows'].children[1].children
+      .filter(c => (c.className || '').indexOf('sched-foot') >= 0)
+      .map(c => c.textContent).join(' ');
+    // a paused row is marked as such rather than reading as armed
+    p.secondRowClass = byId['schedRows'].children[1].className;
+
+    // (c) editing a row whose room WIDENED must not pre-tick the box
+    ctx.schedEdit(schedReply.schedules[1]);
+    p.ackAfterGap = !!byId['schedAck'].checked;
+    p.editHeading = byId['schedEditH'].textContent;
+    // the stub's selector engine really does descendants now; a 0 here
+    // means schedDaysPicked() is reading nothing and every weekly
+    // assertion below is vacuous
+    p.dayBoxes = document.querySelectorAll('#schedDays .sched-day').length;
+    p.daysAfterEdit = Array.from(
+      byId['schedDays'].children.map(l => l.children[0]))
+      .filter(cb => cb.checked).map(cb => cb.value);
+    // ...and one whose ack still covers the room does
+    const covered = Object.assign({}, schedReply.schedules[1],
+                                  {ack_gap: []});
+    ctx.schedEdit(covered);
+    p.ackWhenCovered = !!byId['schedAck'].checked;
+
+    // (d) the kind rows follow the picker
+    ctx.schedClear();
+    p.kindRows = {};
+    for (const kind of ['daily', 'weekly', 'interval', 'once']) {
+      byId['schedKind'].value = kind;
+      byId['schedKind'].onchange();
+      p.kindRows[kind] = [byId['schedAtRow'].hidden,
+                          byId['schedDaysRow'].hidden,
+                          byId['schedEveryRow'].hidden,
+                          byId['schedOnceRow'].hidden].map(Boolean);
+    }
+
+    // (e) a risky room shows its grants and REFUSES a save with no tick
+    byId['schedKind'].value = 'daily';
+    byId['schedKind'].onchange();
+    riskReply = {ok: true, grants: ['permission_full'],
+                 sentences: ['write, delete and run anything on this machine'],
+                 notes: ['Desktop control is set to Ask.']};
+    byId['schedRoom'].value = 'Loud';
+    await byId['schedRoom'].onchange();
+    p.grantsHidden = !!byId['schedGrants'].hidden;
+    p.grantLines = byId['schedGrantList'].children.map(li => li.textContent);
+    p.ackText = byId['schedAckText'].textContent;
+    p.noteLines = byId['schedNotes'].children.map(d => d.textContent);
+    byId['schedName'].value = 'Nightly';
+    byId['schedPrompt'].value = 'do the thing';
+    const before = schedCalls.length;
+    await byId['schedSave'].onclick();
+    p.savedWithoutTick = schedCalls.length - before;
+    p.refusal = byId['schedNote'].textContent;
+    // ...and lets it through once ticked, carrying the ack
+    byId['schedAck'].checked = true;
+    await byId['schedSave'].onclick();
+    const call = schedCalls[schedCalls.length - 1];
+    p.savedName = call[0];
+    p.savedSpec = call[1];
+
+    // (f) an innocuous room hides the block again
+    riskReply = {ok: true, grants: [], sentences: [], notes: []};
+    byId['schedRoom'].value = 'Quiet';
+    await byId['schedRoom'].onchange();
+    p.grantsHiddenAgain = !!byId['schedGrants'].hidden;
+
+    ctx.closeSched();
+    p.closedByEscape = null;
+
+    // (g) the `scheduled` event reaches the banner — the ONLY thing on screen
+    // that ever mentions a run that did not happen
+    ctx.uiEvent({event: 'scheduled', payload: {
+      id: 's1', name: 'Nightly', room: 'Quiet', started: false,
+      text: 'Nightly — Skipped: another conversation was still running.'}});
+    p.bannerShown = byId['contBanner'].classList.contains('show');
+    p.bannerText = deepText(byId['contBanner']);
+  } catch (e) { more.schedError = (e && e.stack) || String(e); }
+
   // Put the boot roster back: report() reads the LIVE DOM, so leaving the
   // stage solo would hand every other test in this file a one-seat page.
   try { ctx.addSeat('gpt'); ctx.addSeat('gemini'); } catch (e) {}
@@ -3782,13 +3955,57 @@ class UiBootTests(unittest.TestCase):
         self.assertIn("body text", chips[0])
         self.assertNotIn("[[REMEMBER", chips[0].split("dir-chip")[0])
 
-    def test_the_memory_modal_is_registered_in_all_three_places(self):
-        # miss one and it is invisible, or Escape leaves it open
+    #: Every modal's Escape closer. Hand-kept ON PURPOSE, and the test below
+    #: fails LOUDLY on a missing entry rather than skipping it -- a map that
+    #: silently ignores an id it does not know is the fourth-place-to-sync bug
+    #: the `scheduled` hook event was written to avoid.
+    MODAL_CLOSERS = {
+        "acctModal": "closeAccounts(", "roleModal": "closeRole(",
+        "askModal": "hideAsk(", "skillModal": "closeSkills(",
+        "contModal": "closeContinuous(", "kbdModal": "closeKbd(",
+        "hooksModal": "closeHooks(", "roomsModal": "closeRooms(",
+        "schedModal": "closeSched(", "statsModal": "closeStats(",
+        "memModal": "closeMemory(",
+        # these two REVERT a picker, so Escape checks them by id
+        "deskModal": '$("deskModal")', "brwsModal": '$("brwsModal")',
+    }
+
+    def test_every_modal_is_registered_in_all_three_places(self):
+        """Miss one and it is invisible, or Escape leaves it open.
+
+        Derived from the markup rather than named one at a time -- the same
+        move `test_every_sidebar_button_is_in_the_shared_style_rule` makes,
+        for the same reason: the previous version pinned the literal string
+        "#statsModal, #memModal {" and broke the moment a THIRTEENTH modal
+        made the selector wrap, which says nothing about whether the new
+        modal was registered.
+        """
         with open(UI, encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("#statsModal, #memModal {", src)
-        self.assertIn("#memModal.show { display: flex; }", src)
-        self.assertIn("closeStats(); closeMemory();", src)
+        ids = re.findall(r'<div id="(\w+Modal)"', src)
+        self.assertGreaterEqual(len(ids), 13, ids)
+        # the SELECTOR LIST of each rule, sliced exactly -- both rules wrap
+        # over several lines and will wrap again with the next modal
+        marker = "position: fixed; inset: 0; z-index: 50; display: none;"
+        i = src.index(marker)
+        hidden = src[src.rindex("}", 0, i) + 1:i]
+        j = src.index("#acctModal.show")
+        shown = src[j:src.index("}", j) + 1]
+        # the ONE global Escape handler -- anchored on the closer it is
+        # known to hold, because the page has several keydown listeners
+        # and an inline note editor with an Escape branch of its own
+        k = src.index("closeAccounts(); closeRole();")
+        escape = src[src.rindex('if (e.key === "Escape") {', 0, k):]
+        escape = escape.split(chr(10) + "  }", 1)[0]
+        for mid in ids:
+            self.assertIn("#" + mid, hidden, mid + " is not in the display:none list")
+            self.assertIn("#" + mid + ".show", shown, mid + " is not in the .show list")
+            closer = self.MODAL_CLOSERS.get(mid)
+            self.assertIsNotNone(
+                closer, "add %s to MODAL_CLOSERS -- a new modal needs an "
+                        "Escape closer" % mid)
+            self.assertIn(closer, escape,
+                          mid + " is not closed by the Escape listener")
 
     def test_every_sidebar_button_is_in_the_shared_style_rule(self):
         """Found in a real browser, invisible everywhere else.
@@ -4039,6 +4256,94 @@ class UiBootTests(unittest.TestCase):
         self.assertTrue(q["folderNamed"])
         self.assertTrue(q["folderUnseatedCue"], q.get("quickwinsError"))
         self.assertTrue(q["folderSeatedCue"])
+
+    # ---- W4: scheduled rooms ------------------------------------------
+    def _sched(self):
+        self.assertIsNone(self.report.get("schedError"),
+                          self.report.get("schedError"))
+        return self.report["sched"]
+
+    def test_the_hooks_modal_renders_the_bridges_event_list(self):
+        """Three edits, and the third is the one nothing would notice."""
+        p = self._sched()
+        self.assertIn("scheduled", p["hookRowIds"])
+        self.assertIn("Scheduled room", p["scheduledLabel"])
+
+    def test_hook_save_sends_a_row_hook_labels_never_heard_of(self):
+        """`future_thing` is in the bridge's event list and not in the UI's
+        label table. The old Save walked the TABLE, so such a row rendered
+        and was silently dropped."""
+        p = self._sched()
+        self.assertIn("future_thing", p["hookRowIds"])
+        self.assertEqual(p["hookSaved"],
+                         {"scheduled": "notify-me", "future_thing": "later"})
+
+    def test_the_schedule_list_renders_and_names_its_rooms(self):
+        p = self._sched()
+        self.assertTrue(p["modalShown"])
+        self.assertEqual(p["rowCount"], 2)
+        self.assertEqual(p["rowNames"], ["Nightly", "Loud one"])
+        self.assertEqual(p["roomOptions"], ["Quiet", "Loud"])
+        self.assertTrue(p["emptyHidden"])
+
+    def test_a_row_whose_room_widened_says_it_will_not_run(self):
+        p = self._sched()
+        self.assertIn("never acknowledged", p["warnText"])
+        self.assertIn("will not run", p["warnText"])
+        self.assertIn("Missed", p["warnText"])
+        self.assertIn("off", p["secondRowClass"].split())
+
+    def test_editing_a_widened_room_does_not_pre_tick_the_box(self):
+        """The acknowledgement is for what the room grants NOW. A pre-ticked
+        box would let one click re-consent to access nobody agreed to."""
+        p = self._sched()
+        self.assertFalse(p["ackAfterGap"])
+        self.assertTrue(p["ackWhenCovered"])
+        self.assertEqual(p["editHeading"], "Editing Loud one")
+        self.assertEqual(p["daysAfterEdit"], ["0", "4"])
+
+    def test_the_day_boxes_are_really_being_read(self):
+        """A 0 here means schedDaysPicked() sees nothing and every weekly
+        assertion in this file is vacuous -- the stub's selector engine used
+        to ignore the descendant combinator outright."""
+        self.assertEqual(self._sched()["dayBoxes"], 7)
+
+    def test_the_form_shows_only_the_fields_its_recurrence_uses(self):
+        rows = self._sched()["kindRows"]
+        self.assertEqual(rows["daily"], [False, True, True, True])
+        self.assertEqual(rows["weekly"], [False, False, True, True])
+        self.assertEqual(rows["interval"], [True, True, False, True])
+        self.assertEqual(rows["once"], [True, True, True, False])
+
+    def test_a_risky_room_shows_its_grants_and_its_dead_controls(self):
+        p = self._sched()
+        self.assertFalse(p["grantsHidden"])
+        self.assertEqual(p["grantLines"],
+                         ["write, delete and run anything on this machine"])
+        self.assertIn("Desktop control is set to Ask", p["noteLines"][0])
+        # the tick box names the ROOM and the RECURRENCE, not just "this"
+        self.assertIn("Loud", p["ackText"])
+        self.assertIn("every day at 01:00", p["ackText"])
+        self.assertIn("unattended", p["ackText"])
+        self.assertTrue(p["grantsHiddenAgain"],
+                        "the grants block stayed up for an innocuous room")
+
+    def test_save_is_refused_until_the_acknowledgement_is_ticked(self):
+        p = self._sched()
+        self.assertEqual(p["savedWithoutTick"], 0,
+                         "an unacknowledged schedule reached the bridge")
+        self.assertIn("Tick the acknowledgement", p["refusal"])
+        self.assertEqual(p["savedName"], "save_schedule")
+        self.assertEqual(p["savedSpec"]["ack"], {"grants": ["permission_full"]})
+        self.assertEqual(p["savedSpec"]["room"], "Loud")
+        self.assertEqual(p["savedSpec"]["prompt"], "do the thing")
+
+    def test_a_scheduled_event_reaches_the_banner(self):
+        """The only thing on screen that ever mentions a run that did NOT
+        happen. It carries no chat_id, so it must not be routed like one."""
+        p = self._sched()
+        self.assertTrue(p["bannerShown"])
+        self.assertIn("Skipped", p["bannerText"])
 
     def test_drop_classification_splits_entries_from_files(self):
         """webkitGetAsEntry folders vs getAsFile files, string items skipped."""

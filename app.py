@@ -30,6 +30,7 @@ import memory as memory_mod
 import outcome
 import relay
 import retro as retro_mod
+import schedule as schedule_mod
 import stats as stats_mod
 from relay import (AGENT_TYPES, PROVIDERS, SESSIONS_DIR, HELP_TEXT,
                    MODES, DEFAULT_MODE, IMPLEMENTED_MODES, DEFAULT_CEILING,
@@ -222,6 +223,19 @@ def _rail_row(summary):
 
 def _webhook_cfg_path():
     return os.path.join(relay.SESSIONS_DIR, "webhook.json")
+
+
+# --------------------------------------------------------- schedule config --
+# Same rule, same reason: the path is JOINED at call time from
+# relay.SESSIONS_DIR, never captured into a module constant at import. A
+# constant here would survive a test's redirect and write schedules into
+# Josh's real sessions/ folder — which is precisely what write_tabs taught,
+# expensively, by throwing away the tabs he had open.
+SCHEDULE_POLL_S = 30
+
+
+def _schedule_path():
+    return os.path.join(relay.SESSIONS_DIR, schedule_mod.SCHEDULE_FILE)
 
 
 def read_webhook_config():
@@ -776,6 +790,12 @@ class Api:
         # (currently the one-shot auto-title). main() flips this; tests
         # instantiating Api directly stay token-free by construction.
         self._side_calls_enabled = False
+        # Scheduled rooms. The THREAD is deliberately absent here — see
+        # start_scheduler: a poller in the constructor would run against
+        # Josh's real sessions/ folder inside every suite that builds an
+        # Api, and spend real CLI turns doing it.
+        self._sched_thread = None
+        self._sched_stop = threading.Event()
         threading.Thread(target=self._drain_emits, daemon=True).start()
 
     # ---- focused-run views (the old singular attributes) -----------------
@@ -1455,6 +1475,268 @@ class Api:
                 srv.stop()
             except Exception:
                 pass
+
+    # ---------------------------------------------------- scheduled rooms --
+    # A saved room, an opening message, and a recurrence. schedule.py owns the
+    # store and the time arithmetic; everything here is the bridge and the
+    # poller — and the poller is started from main() ALONE (see
+    # start_scheduler), never from __init__.
+    #
+    # Bridge-thread rules: get/save/delete/enable are bounded JSON I/O like
+    # get_skills and save_tabs, so they answer synchronously. Nothing here
+    # shells out.
+
+    def _room_cfg(self, name):
+        """One saved room's cfg by name, or None. The rooms store is the ONE
+        source: a schedule keeps the room's NAME, never a copy of its config,
+        so editing a room edits every schedule that starts it."""
+        for row in relay.list_rooms().get("rooms") or ():
+            if row.get("name") == name:
+                return row.get("cfg") or {}
+        return None
+
+    @staticmethod
+    def _room_axes(cfg):
+        """A room cfg reduced to the axes a standing grant is judged on.
+
+        NORMALIZED HERE, with relay's own functions, because relay is where
+        the rungs are defined — schedule.py deliberately owns the policy
+        (which values are grants, what each one says) and none of the
+        normalization. A second copy of `normalize_desktop` living next to
+        the acknowledgement would be the browser_mcp._confine drift again,
+        this time on the control that decides what runs unattended at 01:00.
+        """
+        cfg = cfg if isinstance(cfg, dict) else {}
+        cont = relay.continuous_policy(cfg.get("continuous"))
+        limits = cont.get("limits") or {}
+        unbounded = bool(cont.get("on")) and (
+            limits.get("spend_usd") is None and limits.get("hours") is None
+            and not limits.get("watchdog_may_stop"))
+        return {
+            "permission": relay.normalize_permission(
+                cfg.get("permission"),
+                "full" if cfg.get("yolo") else relay.DEFAULT_PERMISSION),
+            "connectors": bool(cfg.get("connectors")),
+            "desktop": relay.normalize_desktop(cfg.get("desktop")),
+            "browser": relay.normalize_browser(cfg.get("browser")),
+            "continuous": bool(cont.get("on")),
+            "checkin_action": (cont.get("checkin") or {}).get("action"),
+            "continuous_unbounded": unbounded,
+        }
+
+    def _room_grants(self, name_or_cfg):
+        """The standing grants a room hands out on EVERY scheduled run."""
+        cfg = (name_or_cfg if isinstance(name_or_cfg, dict)
+               else self._room_cfg(name_or_cfg))
+        if cfg is None:
+            return None                     # the room is gone; not "no grants"
+        return schedule_mod.grants_for(Api._room_axes(cfg))
+
+    def room_risk(self, name):
+        """What the modal needs to draw the acknowledgement for ONE room:
+        the grants (each with its sentence) and the controls that will do
+        nothing unattended. A room that no longer exists says so rather than
+        answering "no grants", which would read as "safe"."""
+        cfg = self._room_cfg(name)
+        if cfg is None:
+            return {"error": "No saved room called %r." % name}
+        axes = Api._room_axes(cfg)
+        grants = schedule_mod.grants_for(axes)
+        return {"ok": True, "grants": grants,
+                "sentences": schedule_mod.grant_sentences(grants),
+                "notes": schedule_mod.unattended_notes(axes)}
+
+    def get_schedules(self):
+        """Every schedule, each judged against its room AS IT IS NOW.
+
+        `grants`/`ack_gap`/`missing_room` are computed on the way out rather
+        than trusted from the record: a room can be overwritten (or deleted)
+        long after a schedule was acknowledged, and a list that showed the
+        stored ack would tell Josh a nightly Full-access run was still the
+        one he agreed to.
+        """
+        rows = schedule_mod.read_schedules(_schedule_path())["schedules"]
+        rooms = [r.get("name") for r in relay.list_rooms().get("rooms") or ()]
+        out = []
+        for rec in rows:
+            row = dict(rec)
+            grants = self._room_grants(rec["room"])
+            row["missing_room"] = grants is None
+            row["grants"] = grants or []
+            row["ack_gap"] = ([] if grants is None
+                              else schedule_mod.ack_gap(rec, grants))
+            row["ack_sentences"] = schedule_mod.grant_sentences(row["ack_gap"])
+            row["describe"] = schedule_mod.describe(rec)
+            out.append(row)
+        return {"ok": True, "schedules": out, "rooms": rooms,
+                "poll_seconds": SCHEDULE_POLL_S}
+
+    def save_schedule(self, spec):
+        spec = spec if isinstance(spec, dict) else {}
+        grants = self._room_grants(str(spec.get("room") or ""))
+        if grants is None:
+            return {"error": "Pick a saved room for this schedule to start."}
+        try:
+            rec = schedule_mod.save_schedule(_schedule_path(), spec, grants)
+        except ValueError as e:
+            return {"error": str(e)}
+        except OSError as exc:
+            return {"error": error_excerpt(exc)}
+        return {"ok": True, "schedule": rec}
+
+    def delete_schedule(self, sched_id):
+        try:
+            if schedule_mod.delete_schedule(_schedule_path(), sched_id):
+                return {"ok": True}
+        except OSError as exc:
+            return {"error": error_excerpt(exc)}
+        return {"error": "No such schedule."}
+
+    def set_schedule_enabled(self, sched_id, on):
+        if not isinstance(on, bool):
+            return {"error": "Enabled must be true or false."}
+        try:
+            rec = schedule_mod.set_enabled(_schedule_path(), sched_id, on)
+        except OSError as exc:
+            return {"error": error_excerpt(exc)}
+        if rec is None:
+            return {"error": "No such schedule."}
+        return {"ok": True, "schedule": rec}
+
+    def run_schedule_now(self, sched_id):
+        """Start one schedule's room this instant, without touching its clock.
+
+        Deliberately not a `claim`: this is Josh pressing a button, so it must
+        not consume the night's window or record a miss. It goes through the
+        SAME `_launch_schedule`, which is what makes the acknowledgement, the
+        missing-room refusal and the busy refusal identical on both paths — a
+        second, friendlier code path here is exactly how a safety control ends
+        up with a way around it.
+        """
+        for rec in schedule_mod.read_schedules(_schedule_path())["schedules"]:
+            if rec["id"] == sched_id:
+                ok, text = self._launch_schedule(rec, manual=True)
+                schedule_mod.record_result(_schedule_path(), sched_id, text,
+                                           ran=ok)
+                return {"ok": True, "started": ok, "text": text}
+        return {"error": "No such schedule."}
+
+    # ---- the poller ------------------------------------------------------
+    # NOT started by __init__. Twenty-nine test suites construct app.Api()
+    # directly (the plan said eighteen; it predates three waves), and a
+    # scheduler spun up in the constructor would poll Josh's REAL sessions/
+    # folder from inside every one of them and shell out to real CLIs. It
+    # starts from main(), which is also where `_side_calls_enabled` is
+    # flipped, for exactly the same reason.
+
+    def start_scheduler(self):
+        """Begin polling saved schedules. Called from main() and from tests
+        that mean it — never from __init__."""
+        if self._sched_thread is not None and self._sched_thread.is_alive():
+            return False
+        self._sched_stop.clear()
+        self._sched_thread = threading.Thread(target=self._scheduler_loop,
+                                              daemon=True)
+        self._sched_thread.start()
+        return True
+
+    def stop_scheduler(self):
+        """Shutdown path, and the way a test takes its scheduler back."""
+        self._sched_stop.set()
+
+    def _scheduler_loop(self):
+        # `wait` rather than sleep: closing the window must not have to
+        # outlast a poll interval.
+        while not self._sched_stop.wait(SCHEDULE_POLL_S):
+            try:
+                self._scheduler_tick()
+            except Exception:
+                pass                        # a poller that dies is a feature
+                                            # that silently stops existing
+
+    def _scheduler_tick(self, now=None):
+        """One pass: fire whatever is due. THE unit — the thread above adds
+        nothing but a clock, so every test drives this directly."""
+        now = now or datetime.datetime.now()
+        path = _schedule_path()
+        rows = schedule_mod.read_schedules(path)["schedules"]
+        fired = []
+        for rec in schedule_mod.due(rows, now):
+            claimed, verdict, note = schedule_mod.claim(
+                path, rec["id"], rec["next_run"], now)
+            if claimed is None:
+                continue
+            if verdict == "missed":
+                # never fired late: the window belonged to a time Alloy was
+                # not running, and starting a nightly job at breakfast is a
+                # surprise, not a service
+                self._announce_schedule(claimed, False, note)
+                continue
+            ok, text = self._launch_schedule(claimed)
+            schedule_mod.record_result(path, claimed["id"], text, ran=ok,
+                                       now=now)
+            self._announce_schedule(claimed, ok, text)
+            fired.append((claimed["id"], ok, text))
+        return fired
+
+    def _launch_schedule(self, rec, manual=False):
+        """Turn one schedule into a running conversation. (ok, sentence).
+
+        Every refusal is a SENTENCE that lands on the record and in the
+        `scheduled` event, because nobody is watching at 01:00 and a schedule
+        that silently did nothing is indistinguishable from one that ran.
+        """
+        cfg = self._room_cfg(rec["room"])
+        if cfg is None:
+            return False, ("The room %r no longer exists." % rec["room"])
+        grants = schedule_mod.grants_for(Api._room_axes(cfg))
+        gap = schedule_mod.ack_gap(rec, grants)
+        if gap:
+            # The room GAINED access since this schedule was acknowledged.
+            # Refusing is the whole reason the check happens here as well as
+            # at save time: a room is saved by name and overwriting one is
+            # documented behaviour.
+            return False, ("%s now grants access this schedule was never "
+                           "acknowledged for: %s."
+                           % (rec["room"],
+                              "; ".join(schedule_mod.grant_sentences(gap))))
+        live = self._runs.live()
+        if live:
+            # The webhook RAISES here, because a script is waiting for an
+            # answer. A schedule has nobody to answer to, so it SKIPS — and
+            # says so on the record rather than queueing, which would start
+            # an unattended room at an unpredictable hour.
+            return False, ("Skipped — another conversation was still "
+                           "running.")
+        start = dict(cfg)
+        start["opener"] = rec["prompt"]
+        start["turns"] = rec["turns"]
+        # The schedule's own identity, carried onto the run so the transcript,
+        # the rail row and the `scheduled` hook all name the same thing.
+        start["scheduled"] = {"id": rec["id"], "name": rec["name"],
+                              "room": rec["room"],
+                              "when": schedule_mod.describe(rec),
+                              "manual": bool(manual)}
+        run = self._runs.background()
+        self._runs.spawn(self._run, (start, run), run=run)
+        return True, ("Started %s%s." % (rec["room"],
+                                         " (run now)" if manual else ""))
+
+    def _announce_schedule(self, rec, started, text):
+        """One `scheduled` event per fire — started or not.
+
+        A miss and a skip are exactly the events Josh wants a hook for, so
+        the event fires for them too and carries `started: false`. It has no
+        chat_id: the conversation, if there is one, emits its own `started`
+        with its own identity a moment later, and stamping this with the
+        FOCUSED chat would paint a background notice onto whatever Josh has
+        open (the `_emit_for` lesson).
+        """
+        self.emit("scheduled", {
+            "id": rec.get("id"), "name": rec.get("name"),
+            "room": rec.get("room"), "started": bool(started),
+            "text": "%s — %s" % (rec.get("name") or rec.get("room"), text),
+        })
 
     # ------------------------------------------------- file/image viewing --
     # Bridge-thread rules apply: bounded file I/O and Pillow only — no
@@ -2457,7 +2739,11 @@ class Api:
             if payload.get("ok") is not False:
                 return None
             hook_name = "gate_red"
-        elif event in ("question", "checkin", "done"):
+        elif event in ("question", "checkin", "done", "scheduled"):
+            # `scheduled` fires for a SKIP and a MISS too, not only a
+            # start: a nightly room that did not run is exactly the thing
+            # a notification hook exists for. The payload's `started`
+            # flag says which, and `text` is the sentence.
             hook_name = event
         else:
             return None
@@ -3374,6 +3660,18 @@ class Api:
             store.system(text, round=0)
             emit("status", {"text": text})
 
+        # A scheduled run says so in its OWN transcript, as a persisted row.
+        # Josh reads these hours later with no memory of arming them, and
+        # the rail cannot tell him: `background` says nobody was watching,
+        # not WHAT decided this should happen at 01:00.
+        sched = cfg.get("scheduled")
+        if isinstance(sched, dict) and sched.get("name"):
+            brief_status_row(
+                "Started by the schedule %r (%s, room %r)%s."
+                % (sched.get("name"), sched.get("when") or "no recurrence",
+                   sched.get("room"),
+                   " — run now" if sched.get("manual") else ""))
+
         # Every browser-fence correction, as a row rather than a badge: the
         # site list is the one control here that is actually enforcing, so a
         # change Alloy made to it has to survive a reopen.
@@ -3682,6 +3980,7 @@ def main():
             pass
     api = Api()
     api._side_calls_enabled = True     # real window: side calls may spend
+    api.start_scheduler()              # ONLY here — never in Api.__init__
     threading.Thread(target=api.precompute_config, daemon=True).start()
     threading.Thread(target=api.precompute_auth, daemon=True).start()
     ui = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -3695,6 +3994,7 @@ def main():
         webview.start(debug=False)
     finally:
         # release the webhook socket so the process can exit promptly
+        api.stop_scheduler()
         api.webhook_stop_all()
 
 

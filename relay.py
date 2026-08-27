@@ -6347,7 +6347,7 @@ def write_tabs(payload, path=None):
 # narration). The config lives beside tabs.json and resolves through
 # SESSIONS_DIR at CALL time — no second module constant, so redirecting the
 # global redirects this too.
-HOOK_EVENTS = ("question", "checkin", "done", "gate_red")
+HOOK_EVENTS = ("question", "checkin", "done", "gate_red", "scheduled")
 EVENT_HOOKS_FILE = "event-hooks.json"
 HOOKS_MAX_COMMAND = 2000
 
