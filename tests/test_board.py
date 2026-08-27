@@ -231,6 +231,24 @@ class BoardGateTests(unittest.TestCase):
         self.assertTrue(state["supervisor_plan_attempted"],
                         "an unanswered board would re-plan forever")
 
+    def test_a_typed_cli_refusal_is_the_feedback(self):
+        """The console prompt invites "a number or your own answer". Reading
+        the note only out of a dict meant the sentence Josh typed went
+        nowhere and the manager re-planned the identical board — measured
+        live on 2026-08-27."""
+        state = self._state(name="cli-note")
+        io = AnsweringIO("the plan is too big — split it")
+        self.assertEqual(relay.board_gate(state, io, [task("t1")]), [])
+        self.assertEqual(state["board_feedback"],
+                         "the plan is too big — split it")
+        self.assertFalse(state["supervisor_plan_attempted"])
+
+    def test_a_dict_refusal_with_no_note_is_still_a_refusal(self):
+        state = self._state(name="no-note")
+        self.assertEqual(relay.board_gate(state, AnsweringIO(
+            {"approved": False}), [task("t1")]), [])
+        self.assertEqual(state["board_feedback"], "")
+
     def test_the_payload_carries_what_the_cli_front_end_subscripts(self):
         """CLIIO.ask_human does payload['asker'] — a payload without it raises
         KeyError inside the front end instead of asking anybody."""
@@ -384,6 +402,69 @@ class DispatchTests(unittest.TestCase):
         relay.plan_workstreams(state, AnsweringIO({"approved": True}),
                                goal="g")
         self.assertNotIn("board_feedback", state)
+
+    def test_sending_it_back_plans_again_in_the_SAME_run(self):
+        """The auto-plan is a single pre-loop call and supervise_next_wave
+        needs a non-empty drained board to get the floor — so without the
+        re-plan loop a refused first board left the seats chatting for the
+        rest of the run and the manager never planned again until a resume."""
+        state = self._state(name="replan")
+        stub = self._side(StubSide(self.PLAN, self.PLAN))
+        answers = iter([{"approved": False, "feedback": "split t1"},
+                        {"approved": True}])
+
+        class Twice(AnsweringIO):
+            def ask_human(self, payload, abort=None):
+                self.asked.append(payload)
+                return next(answers)
+
+        io = Twice()
+        out = relay.plan_workstreams(state, io, goal="g")
+        self.assertEqual(len(io.asked), 2, "it only asked once")
+        self.assertEqual([t["id"] for t in out], ["t1", "t2"])
+        self.assertIn("split t1", stub.prompts[1])
+
+    def test_a_board_nobody_answers_does_not_re_plan(self):
+        """Silence means Josh is not here — asking again spends a real side
+        call per attempt for nobody."""
+        state = self._state(name="silent")
+        stub = self._side(StubSide(self.PLAN, self.PLAN, self.PLAN))
+        io = AnsweringIO(None)
+        self.assertEqual(relay.plan_workstreams(state, io, goal="g"), [])
+        self.assertEqual(len(io.asked), 1)
+        self.assertEqual(len(stub.prompts), 1)
+
+    def test_a_dead_planner_is_not_retried_either(self):
+        state = self._state(name="dead")
+        stub = self._side(StubSide("prose with no directives",
+                                   "prose with no directives"))
+        self.assertEqual(relay.plan_workstreams(state, AnsweringIO(
+            {"approved": True}), goal="g"), [])
+        self.assertEqual(len(stub.prompts), 1)
+
+    def test_endless_refusals_give_up_and_say_so(self):
+        state = self._state(name="giveup")
+        stub = self._side(StubSide(*([self.PLAN] * 6)))
+        io = AnsweringIO({"approved": False, "feedback": "no"})
+        self.assertEqual(relay.plan_workstreams(state, io, goal="g"), [])
+        self.assertEqual(len(stub.prompts), relay.BOARD_REPLAN_MAX)
+        self.assertTrue(state["supervisor_plan_attempted"])
+        notes = " ".join(p.get("text", "")
+                         for e, p in io.events if e == "status")
+        self.assertIn("came back", notes)
+
+    def test_a_refused_wave_tells_the_next_review_why(self):
+        """Both prompt sites, or the feedback works for the first board and
+        silently not for any wave after it."""
+        state = self._state(name="wave-note")
+        state["workstreams"] = [task("t1", status="done")]
+        state["supervisor_waves"] = 0
+        stub = self._side(StubSide(self.WAVE, self.WAVE))
+        relay.supervise_next_wave(state, AnsweringIO(
+            {"approved": False, "feedback": "wrong seat"}))
+        relay.supervise_next_wave(state, AnsweringIO({"approved": True}))
+        self.assertNotIn("wrong seat", stub.prompts[0])
+        self.assertIn("wrong seat", stub.prompts[1])
 
     def test_with_the_gate_off_nothing_pauses(self):
         state = self._state(name="off", review=False)

@@ -9446,7 +9446,13 @@ def board_gate(state, io, tasks, abort=None):
                              or "Josh kept none of the proposed tasks.")
     if not approved:
         board["phase"] = "declined"
-        note = (edits.get("feedback") or "").strip()
+        # A CLI answer is a bare STRING, and the prompt invites one ("type a
+        # number or your own answer"). Reading the feedback only out of a dict
+        # meant the sentence Josh typed at the console went nowhere and the
+        # manager re-planned the identical board — measured live on
+        # 2026-08-27. The typed line IS the note.
+        note = ((edits.get("feedback") or "") if edits
+                else ("" if answer is None else str(answer))).strip()
         board["feedback"] = note
         # The manager is a stateless side call, so the only way feedback
         # reaches it is the NEXT prompt. Latching the attempt on silence and
@@ -9739,7 +9745,42 @@ def build_supervisor(state):
                                  name=room_helper_name(state, "supervisor"))
 
 
+# How many times the manager may re-plan against Josh's notes before the run
+# gives up and carries on as an ordinary parallel conversation. Bounded
+# because each attempt is a real billed side call; three is enough for "you
+# missed X" -> "now you have missed Y" -> "fine".
+BOARD_REPLAN_MAX = 3
+
+
 def plan_workstreams(state, io, goal=None):
+    """Turn the goal into tasks, and let Josh send the board back.
+
+    The gate lives one level down, in `_plan_once`; this wrapper exists
+    because "send it back" has to MEAN something in the run Josh is watching.
+    The auto-plan is a single pre-loop call (`_run_rounds`), and
+    `supervise_next_wave` needs a non-empty drained board to get the floor —
+    so without this loop a refused first board left the seats chatting for
+    the rest of the run and the manager never planned again until a resume.
+
+    Only a REFUSAL asks for another attempt. A dead planner, an unparseable
+    reply, a plan with no tasks and a gate nobody answered all latch
+    `supervisor_plan_attempted`, and each of those means stop asking.
+    """
+    for _ in range(BOARD_REPLAN_MAX):
+        tasks = _plan_once(state, io, goal=goal)
+        if tasks or state.get("supervisor_plan_attempted") \
+                or not state.get("board_feedback"):
+            return tasks
+    state["supervisor_plan_attempted"] = True
+    note = ("The board came back %d times, so the seats carry on as an "
+            "ordinary parallel conversation. Set a fresh objective to plan "
+            "again." % BOARD_REPLAN_MAX)
+    io.emit("status", {"text": note})
+    io.emit("message", state["log"]("relay", note))
+    return []
+
+
+def _plan_once(state, io, goal=None):
     """One cheap side call that turns the goal into tasks. Returns the tasks.
 
     Every failure - CLI error, timeout, nothing parseable - degrades to NO
@@ -10142,6 +10183,13 @@ def supervise_next_wave(state, io):
         used=used, left=left, plural="" if left == 1 else "s",
         intro=voice["review_intro"], teamwork=voice["review_teamwork"],
         playbook=playbook_block())
+    # The same channel the initial planner gets: a wave Josh sent back is only
+    # useful if the next one hears why. Both sites, or the feedback works for
+    # the first board and silently not for any wave after it.
+    sent_back = (state.get("board_feedback") or "").strip()
+    if sent_back:
+        prompt += ("\n\nJosh sent your last board back with this note. Plan "
+                   "against it:\n" + sent_back)
     sup = build_supervisor(state)
     try:
         with working(io, "review", goal,
