@@ -4858,6 +4858,16 @@ class SessionStore:
             # Additive like the rest: a v2 meta without it rehydrates to None,
             # which plan_phase() reads as "no plan", i.e. ordinary execution.
             "plan": state.get("plan"),
+            # W2.2's board review — its OWN keys, never plan's. `board_review`
+            # is the conversation-level switch, `board` the last card, and
+            # `board_feedback` what a refusal told the manager to plan
+            # against. Anything SessionStore.save reads off state has to be
+            # put BACK on state by rehydrate, or a resumed chat writes the
+            # default over the real value on its very next save (the lesson
+            # `connectors` and `desktop` both learned the hard way).
+            "board_review": bool(state.get("board_review")),
+            "board": state.get("board"),
+            "board_feedback": state.get("board_feedback") or "",
             # Panel is a resumable phase machine. Source row ids and per-seat
             # completion live here so a restart never replays a successful
             # draft, critique, or synthesis call.
@@ -6560,6 +6570,10 @@ def session_summary(session_dir, meta=None):
         # so a reopened chat truthfully shows whether it was planned and
         # whether Josh ever approved it, rather than guessing from the rail
         "plan": meta.get("plan") or None,
+        # so a reopened chat truthfully shows whether its board was gated, and
+        # what the last card said
+        "board_review": bool(meta.get("board_review")),
+        "board": meta.get("board") or None,
         "panel": meta.get("panel") or None,
         "battle": battle_status(meta),
         "digest": meta.get("digest") or None,
@@ -6878,6 +6892,9 @@ def rehydrate(meta, workspace=None):
         "ask_pending": meta.get("ask_pending"),
         "auto_titled": bool(meta.get("auto_titled")),
         "plan": meta.get("plan"),
+        "board_review": bool(meta.get("board_review")),
+        "board": meta.get("board"),
+        "board_feedback": meta.get("board_feedback") or "",
         "panel": meta.get("panel"),
         "battle": meta.get("battle"),
         "hidden": dict(meta.get("hidden") or {}),
@@ -9264,6 +9281,204 @@ def _seat_name(state, slot_id):
     return str(slot_id)
 
 
+# ---------------------------------------------------------------------------
+# W2.2 — the board review: Josh gates the [[TASK]] board before it dispatches
+# ---------------------------------------------------------------------------
+# `state["board"]`, NEVER `state["plan"]`. That key belongs to Plan Mode, is
+# written by `start_plan` with no mode check at all, persists in meta and
+# rehydrates — so a supervisor run can arrive already holding
+# {"phase": "drafting"}. Sharing the key would mean an awaiting-only guard
+# reading someone else's record, and since nothing on the supervisor path
+# calls `approve_plan`, `set_plan_mode(True)` would leave every seat read-only
+# for the rest of the run: every file-claiming task failing verification while
+# the card said "Executing". Two features, two records.
+#
+# The four things Josh can do here are exactly the four the plan names:
+# include/exclude, retitle, reassign, reorder — plus refusing the whole board
+# with feedback the manager then plans against. `files` and `deps` are
+# deliberately NOT editable: they are the workstream isolation contract (a
+# literal, workspace-relative, non-glob file claim is what `parse_task`
+# validates and what `serialize_conflicts` orders the board by), and a JSON
+# edit path would get NONE of that validation.
+BOARD_EDITABLE = ("brief", "owner")
+BOARD_WAIT_MAX = 15 * 60      # a gate nobody answers must not hold a run open
+
+
+def board_review_on(state):
+    """Is the board gate armed for this conversation?"""
+    return bool(state.get("board_review"))
+
+
+def merge_board_edits(tasks, edits, slot_ids=None):
+    """Apply Josh's board edits onto the planner's tasks. A WHITELIST.
+
+    Everything the SCHEDULER owns survives untouched — `status`, `started_ts`,
+    `verified`, `replans`, `files`, `deps`, `report`, `executed_by`,
+    `findings`, `attempts`, `commit`. Two of those are selection predicates
+    that silently grant a repeat if they are blanked: `replans` is what limits
+    a failed task to ONE repair attempt, and `commit` is what binds a task to
+    its checkpoint. A merge that rebuilt each task from the card's fields —
+    which is what the existing plan card sends — would drop all eleven.
+
+    `owner` is coerced through `slot_ids`, because a slot id is a NUMBER and
+    an HTML <select>.value is a STRING: `assign_workstreams` tests
+    `t["owner"] not in ids` and would fail the task with "no seat '0' in this
+    conversation".
+
+    Returns (kept, dropped_ids) in Josh's order.
+    """
+    by_id = {str(t["id"]): t for t in tasks}
+    ids = list(slot_ids or ())
+    kept, seen = [], set()
+    for edit in edits or ():
+        if not isinstance(edit, dict):
+            continue
+        tid = str(edit.get("id") or "")
+        original = by_id.get(tid)
+        if original is None or tid in seen:
+            continue                      # an id we never proposed, or a dupe
+        seen.add(tid)
+        if edit.get("include") is False:
+            continue
+        task = dict(original)
+        for key in BOARD_EDITABLE:
+            if key not in edit or edit[key] is None:
+                continue
+            if key == "owner":
+                want = edit["owner"]
+                match = [s for s in ids if str(s) == str(want)]
+                if not match:
+                    continue              # an owner nobody here can be
+                task["owner"] = match[0]  # the SLOT ID's own type
+            else:
+                text = str(edit[key]).strip()
+                if text:
+                    task[key] = text
+        kept.append(task)
+    dropped = [str(t["id"]) for t in tasks if str(t["id"]) not in
+               {str(k["id"]) for k in kept}]
+    return kept, dropped
+
+
+def board_abort(state, abort=None):
+    """The gate's deadline. Composed like `ask_abort`, and for the same reason.
+
+    A gate with no deadline reproduces the 2026-08-22 wedge exactly: it blocks
+    the parallel barrier, and the accumulated clock, the spend cap and the
+    scheduled watchdog are ALL checked at that barrier, so nothing can fire.
+    Unlike `ask_abort` this applies outside continuous mode too — a board
+    gate is not a seat's spontaneous question, it is the app holding a run
+    open, and Josh may simply have walked away.
+    """
+    limit = BOARD_WAIT_MAX
+    if continuous_on(state):
+        every = int((state["continuous"].get("checkin") or {}).get("minutes")
+                    or CHECKIN_DEFAULT_MINUTES) * 60
+        limit = min(limit, every)
+    deadline = time.monotonic() + limit
+
+    def expired():
+        return bool((abort and abort()) or time.monotonic() >= deadline)
+    return expired
+
+
+def board_gate(state, io, tasks, abort=None):
+    """Pause for Josh before a wave of tasks is dispatched.
+
+    Returns the tasks to dispatch: Josh's edited list when he approves, and
+    an EMPTY list when he declines or never answers. Silence is never read as
+    approval — the same rule an unanswered [[ASK]] follows.
+
+    Runs at a barrier, before `assign_workstreams`, and that ordering is not
+    cosmetic: `assign_workstreams` rewrites `owner` (capability_gate) and
+    appends to `deps` (serialize_conflicts) as it dispatches, so a gate placed
+    after it would be reviewing work already in flight.
+    """
+    if not board_review_on(state) or not tasks:
+        return list(tasks)
+    revision = int((state.get("board") or {}).get("revision") or 0) + 1
+    board = state["board"] = {
+        "id": "board-%d" % revision,
+        "revision": revision,
+        "phase": "proposed",
+        "wave": max(1, int(state.get("supervisor_wave_index") or 1)),
+        "goal": current_objective(state),
+        "tasks": [dict(t) for t in tasks],
+        "seats": [{"id": sid, "name": _seat_name(state, sid),
+                   "writes": sid in workstream_writers(state)}
+                  for sid in state["slot_ids"]],
+    }
+    qid = uuid.uuid4().hex[:8]
+    board["qid"] = qid
+    io.emit("board", dict(board))
+    manager = room_helper_name(state, "supervisor")
+    answer = io.ask_human({
+        "qid": qid, "kind": "board",
+        # CLIIO.ask_human subscripts payload['asker'] — a payload without it
+        # raises KeyError inside the front end rather than asking anybody
+        "asker": manager, "speaker": None, "provider": "",
+        "board_id": board["id"], "revision": revision,
+        "question": ("%s planned %d task%s. Approve the board, or send it "
+                     "back?" % (manager, len(tasks),
+                                "" if len(tasks) == 1 else "s")),
+        "options": ["Approve & dispatch", "Send it back"],
+        "tasks": [dict(t) for t in tasks],
+    }, abort=board_abort(state, abort))
+    edits = answer if isinstance(answer, dict) else {}
+    approved = (bool(edits.get("approved")) if edits
+                else bool(answer)
+                and str(answer).strip().lower().startswith("approve"))
+    board["qid"] = None
+    # `None` and `[]` are DIFFERENT answers. No task list at all — which is
+    # every CLI answer, and a card approved without touching anything — means
+    # "as proposed"; an empty one means Josh kept nothing, and reading the
+    # first as the second would silently dispatch an empty wave.
+    edit_list = edits.get("tasks")
+    kept, dropped = ((list(tasks), []) if edit_list is None
+                     else merge_board_edits(tasks, edit_list,
+                                            slot_ids=state["slot_ids"]))
+    if approved and not kept:
+        # An approval that keeps nothing IS a refusal, and saying so is what
+        # gives the manager something to plan against next time.
+        approved = False
+        edits = dict(edits)
+        edits["feedback"] = (edits.get("feedback")
+                             or "Josh kept none of the proposed tasks.")
+    if not approved:
+        board["phase"] = "declined"
+        note = (edits.get("feedback") or "").strip()
+        board["feedback"] = note
+        # The manager is a stateless side call, so the only way feedback
+        # reaches it is the NEXT prompt. Latching the attempt on silence and
+        # clearing it on a real refusal is the difference between "Josh sent
+        # it back, plan again" and "Josh is not here, stop asking".
+        if answer is None:
+            state["supervisor_plan_attempted"] = True
+            said = ("%s's board was never answered, so nothing was "
+                    "dispatched." % manager)
+        else:
+            state["supervisor_plan_attempted"] = False
+            state["board_feedback"] = note
+            said = ("Josh sent %s's board back%s"
+                    % (manager, (": " + note) if note else "."))
+        supervisor_trace(state, io, "board", "Board declined", said,
+                         status="failed", tasks=[dict(t) for t in tasks])
+        io.emit("board", dict(board))
+        io.emit("message", state["log"]("relay", said))
+        return []
+    board["phase"] = "approved"
+    board["tasks"] = [dict(t) for t in kept]
+    state.pop("board_feedback", None)
+    said = "Josh approved %d task%s" % (len(kept), "" if len(kept) == 1 else "s")
+    if dropped:
+        said += " and dropped " + ", ".join(dropped)
+    supervisor_trace(state, io, "board", "Board approved", said + ".",
+                     status="ready", tasks=[dict(t) for t in kept])
+    io.emit("board", dict(board))
+    io.emit("message", state["log"]("relay", said + "."))
+    return kept
+
+
 SUPERVISOR_TRACE_MAX = 120
 
 
@@ -9294,6 +9509,7 @@ def supervisor_trace(state, io, phase, title, detail="", **facts):
         # Keep Improving. These render through the same generic row (type,
         # title, detail), so no UI work is needed for them to be legible.
         "objective": "objective_set",
+        "board": "board_reviewed",
         "checkin": "health_check",
         "gate": "gate_result",
         "revived": "run_revived",
@@ -9543,6 +9759,14 @@ def plan_workstreams(state, io, goal=None):
                                       intro=voice["plan_intro"],
                                       teamwork=voice["plan_teamwork"],
                                       goal=goal)
+    # A board Josh sent back is only useful if the manager hears WHY, and the
+    # manager is a stateless side call — the next prompt is the only channel
+    # there is. Appended rather than templated in, so SUPERVISOR_PROMPT stays
+    # one string with one shape.
+    sent_back = (state.get("board_feedback") or "").strip()
+    if sent_back:
+        prompt += ("\n\nJosh sent your last board back with this note. Plan "
+                   "against it:\n" + sent_back)
     supervisor_trace(state, io, "planning", "Decomposing the goal",
                      goal, goal=goal)
     sup = build_supervisor(state)
@@ -9596,6 +9820,14 @@ def plan_workstreams(state, io, goal=None):
                      for t in tasks)
     io.emit("message", state["log"]("relay",
                                 f"{room_helper_name(state, "supervisor")}'s plan:\n" + plan))
+    # Josh's gate, BEFORE assign_workstreams — which rewrites owners
+    # (capability_gate) and appends deps (serialize_conflicts) as it
+    # dispatches, so a review placed after it would be reviewing work already
+    # in flight. A no-op when board review is off.
+    tasks = board_gate(state, io, tasks)
+    state["workstreams"] = tasks
+    if not tasks:
+        return []
     assign_workstreams(state, io)
     return tasks
 
@@ -9990,6 +10222,18 @@ def supervise_next_wave(state, io):
         for t in tasks if t["id"] in picked)
     io.emit("message", state["log"]("relay",
                                     "Supervisor's next wave:\n" + plan))
+    proposed = [t for t in tasks if t["id"] in picked]
+    approved = board_gate(state, io, proposed)
+    # The fresh tasks were appended IN PLACE above, so a refusal has to REMOVE
+    # them, not merely skip the dispatch: a task left pending keeps
+    # plan_drained False forever, and the manager never gets the floor again.
+    # Josh's order for the new slice is kept — they were appended at the end,
+    # and `next_assignments` starts tasks in list order.
+    tasks[:] = [t for t in tasks if t["id"] not in picked] + list(approved)
+    state["workstreams"] = tasks
+    if not approved:
+        state["store"].save(state)
+        return "idle"
     assign_workstreams(state, io)
     state["store"].save(state)
     return "assigned"
@@ -14182,6 +14426,11 @@ def main():
                     help="let seats spawn up to N one-shot helper AIs via "
                          "[[SPAWN: provider | task]] (default 0 = off; "
                          "each helper is a real CLI call)")
+    ap.add_argument("--board-review", action="store_true",
+                    help="pause for you before each wave of Supervisor tasks "
+                         "is dispatched: include, exclude, retitle, reassign "
+                         "or reorder them, or send the whole board back with "
+                         "a note. Supervisor modes only; off by default")
     ap.add_argument("--no-ask", action="store_true",
                     help="don't tell seats they may put a [[ASK: …]] "
                          "question to you (asking is on by default; an ASK "
@@ -14568,6 +14817,7 @@ def main():
                        "max_teams": max(0, args.spawn_teams),
                        "teams_used": 0},
              "ask": not args.no_ask,
+             "board_review": bool(args.board_review),
              "pending": {i: [] for i in range(len(agents))},
              "introduced": [False] * len(agents),
              "floor_opened": {}, "floor_turns": {},

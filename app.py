@@ -2928,6 +2928,44 @@ class Api:
         })
         return {"ok": True}
 
+    def approve_board(self, chat_id=None, board_id=None, payload=None):
+        """Josh answered the Supervisor's board card.
+
+        Like `approve_plan`, this ANSWERS the question the loop is blocked on
+        and changes nothing itself: `relay.board_gate` owns the merge and the
+        dispatch, and it only runs when this answer arrives. Flipping the
+        board here instead would leave the conversation thread asleep in
+        ask_human with the card saying "approved" — the deadlock the plan
+        card's own audit found in 2026-08-18.
+
+        A separate method and a separate state key from approve_plan on
+        purpose: `state["plan"]` belongs to Plan Mode, is written with no mode
+        check and rehydrates, so a supervisor chat can arrive already holding
+        one.
+
+        Bridge-thread safe: a pure queue put, exactly like answer_question.
+        """
+        run, err = self._resolve_chat(chat_id)
+        if err:
+            return {"ok": False, "error": err}
+        board = (run.state or {}).get("board") or {}
+        qid = board.get("qid")
+        if not qid or qid not in self._ask_waiters:
+            return {"ok": False, "error": "No board is waiting for review."}
+        data = dict(payload or {})
+        # Stale-card guard: an old window must not approve over a newer wave.
+        if board_id and board.get("id") and board_id != board["id"]:
+            return {"ok": False, "error": "That board is out of date."}
+        rev = data.get("revision")
+        if rev is not None and rev != board.get("revision"):
+            return {"ok": False, "error": "That board is out of date."}
+        self._ask_waiters[qid].put({
+            "approved": bool(data.get("approved", True)),
+            "tasks": data.get("tasks"),
+            "feedback": data.get("feedback") or "",
+        })
+        return {"ok": True}
+
     def stop_seat(self, chat_id, seat_id):
         """Stop ONE seat without ending the conversation.
 
@@ -3254,6 +3292,9 @@ class Api:
                           "teams_used": 0},
                 # the app always has a human watching — seats may [[ASK]] Josh
                 "ask": True,
+                # W2.2: pause before each Supervisor wave dispatches. Off
+                # unless Josh ticked it; a no-op outside supervisor modes.
+                "board_review": bool(cfg.get("board_review")),
             }
             state["log"] = log = make_log(state, store)
             # _session_dir was set above, so the focused run is this chat's — pin

@@ -114,10 +114,22 @@ function matches(el, sel) {
     // and the UI then takes its own no-match branch -- which is how a probe
     // watched addMsg fall back to a default verdict and reported it as the
     // product's behaviour (2026-08-27).
-    if (p.startsWith('.')
-        && p.slice(1).split('.').every(
-          c => c && (' ' + el.className + ' ').includes(' ' + c + ' '))) {
-      return true;
+    if (p.startsWith('.')) {
+      // ".class[attr]" and ".class[attr=value]" matched for real. Dropping
+      // the bracket made the whole selector never match, so a renderer that
+      // finds its own card with `.plan-card[data-active-board]` built a NEW
+      // one on every repaint and the harness watched cards accumulate --
+      // the same shape as the attribute selectors on tag names below
+      // (2026-08-27).
+      const at = p.match(/\[([\w-]+)(?:\s*=\s*"?([^\]"]*)"?)?\]\s*$/);
+      const classes = (at ? p.slice(0, at.index) : p).slice(1).split('.');
+      if (classes.every(
+            c => c && (' ' + el.className + ' ').includes(' ' + c + ' '))) {
+        if (!at) return true;
+        const have = el.getAttribute(at[1]);
+        if (have !== undefined && have !== null
+            && (at[2] === undefined || String(have) === at[2])) return true;
+      }
     }
     if (p.startsWith('#') && el.id === p.slice(1)) return true;
     if (/^[a-zA-Z]/.test(p) && el.tag === p.toLowerCase().split(/[.#\s\[]/)[0]) {
@@ -149,7 +161,6 @@ function mkEl(tag) {
     tag, id: '', className: '', children: [], parent: null,
     _attrs: {}, _html: '', textContent: '', value: '', checked: false,
     hidden: false, disabled: false, selected: false, options: [],
-    dataset: {},
     // records custom properties instead of swallowing them: a UI that paints
     // per-tab colour through setProperty('--tab', …) is otherwise untestable
     style: {_props: {}, display: '',
@@ -250,6 +261,27 @@ function mkEl(tag) {
     },
   };
   el.classList._own = el;
+  // A REFLECTING dataset, both ways, like a real one. The plain object it
+  // used to be meant `el.dataset.activeBoard = "1"` set no attribute at all,
+  // so `querySelector('.plan-card[data-active-board]')` could never find the
+  // card a renderer had just built -- and the renderer then built a NEW one
+  // on every repaint while the harness watched them pile up. The other
+  // direction matters too: `data-` attributes written in index.html's markup
+  // have to be readable as dataset properties.
+  const dataKey = k => 'data-' + String(k).replace(/[A-Z]/g,
+                                                  c => '-' + c.toLowerCase());
+  el._dataset = new Proxy({}, {
+    get(t, k) {
+      if (typeof k !== 'string') return undefined;
+      return k in t ? t[k] : el._attrs[dataKey(k)];
+    },
+    set(t, k, v) { t[k] = v; el._attrs[dataKey(k)] = String(v); return true; },
+    deleteProperty(t, k) {
+      delete t[k]; delete el._attrs[dataKey(k)]; return true;
+    },
+    has(t, k) { return k in t || dataKey(k) in el._attrs; },
+  });
+  Object.defineProperty(el, 'dataset', {get() { return el._dataset; }});
   Object.defineProperty(el, 'innerHTML', {
     get() { return this._html; },
     set(v) {
@@ -259,6 +291,11 @@ function mkEl(tag) {
       parseFragment(this._html, mkEl).forEach(c => this.appendChild(c));
     },
   });
+  // `parentElement` is what the page reaches for; the stub only had `parent`,
+  // and the permissive Proxy answered the standard name with a no-op FUNCTION
+  // — so `x.parentElement.children` was `undefined`, not an error anyone could
+  // read.
+  Object.defineProperty(el, 'parentElement', {get() { return this.parent || null; }});
   Object.defineProperty(el, 'firstChild', {get() { return this.children[0] || null; }});
   Object.defineProperty(el, 'lastChild', {get() { return this.children[this.children.length - 1] || null; }});
   Object.defineProperty(el, 'childNodes', {get() { return this.children; }});
@@ -416,6 +453,7 @@ const dockCalls = [];        // W2.1: what the queue dock asked the bridge to do
 let prepareReply = null;     // what prepare_message hands back; null = an echo
 let openSessionExtra = {};   // merged into the reopened chat's session summary
 let jobsReply = {jobs: [], now: 1000};   // W2.3: what Api.jobs() hands back
+const boardCalls = [];       // W2.2: what approve_board was asked to do
 function apiReply(name, args) {
   apiCalls.push(name);
   switch (name) {
@@ -493,6 +531,7 @@ function apiReply(name, args) {
         openSessionExtra),
     };
     case 'jobs': return jobsReply;
+    case 'approve_board': boardCalls.push(args.slice()); return {ok: true};
     case 'list_workspace_files': return [];
     case 'list_runs': return {runs: []};
     case 'folder_exists': return false;
@@ -2195,6 +2234,82 @@ if (topLevelError) {
                            total_tokens: 6});
     p.nothingReported = pill({});
   } catch (e) { more.usagePillError = (e && e.stack) || String(e); }
+  // ---- W2.2: the Supervisor board review -----------------------------------
+  // A separate card, event and bridge call from Plan Mode's, sharing only the
+  // stylesheet. What the card sends has to match what merge_board_edits
+  // accepts, and what it OFFERS has to match what that whitelist allows.
+  try {
+    const p = more.board = {};
+    await ctx.newChat();
+    ctx.uiEvent({event: 'started', payload: {
+      session: {id: 'sess-board', title: 'Board', participants: [],
+                mode: 'supervisor', can_continue: false},
+      transcript: 'x/transcript.md', workspace: '', mode: 'supervisor'}});
+    const BOARD = {
+      id: 'board-1', revision: 1, phase: 'proposed', wave: 2,
+      goal: 'make it better',
+      seats: [{id: 0, name: 'Claude', writes: true},
+              {id: 1, name: 'Gemini', writes: false}],
+      tasks: [{id: 't1', owner: 0, brief: 'write a.py', files: ['a.py'],
+               deps: [], status: 'pending', replans: 0},
+              {id: 't2', owner: 1, brief: 'write b.py', files: [],
+               deps: [], status: 'pending', replans: 0}],
+    };
+    ctx.uiEvent({event: 'board', payload: {...BOARD, chat_id: 'sess-board'}});
+    // the gate's question routes to the CARD, never the generic modal — the
+    // modal answers with a STRING and board_gate reads Josh's edits off a dict
+    ctx.uiEvent({event: 'question', payload: {
+      chat_id: 'sess-board', qid: 'bq1', kind: 'board', asker: 'Supervisor',
+      question: 'Approve the board?', options: ['Approve & dispatch'],
+      tasks: BOARD.tasks}});
+    p.askModalOpened = byId['askModal'].classList.contains('show');
+    const card = () => document.querySelector('.plan-card[data-active-board]');
+    p.cardPresent = !!card();
+    p.phase = card().dataset.phase;
+    const rows = () => [...card().querySelector('.plan-tasks').children];
+    p.rowCount = rows().length;
+    // the owner picker offers the seats the ENGINE published, and says which
+    // of them can actually deliver a file
+    p.ownerOptions = [...rows()[0].querySelector('.plan-owner').options]
+      .map(o => o.value + ':' + o.textContent);
+    p.filesShown = deepText(rows()[0].querySelector('.task-state'));
+    // ...and it offers no way to edit the file claims or the dependencies
+    p.hasFileInput = !!card().querySelector('.plan-files');
+
+    // drop t2, reword and reassign t1, then approve
+    rows()[1].querySelector('.plan-include').checked = false;
+    rows()[0].querySelector('.plan-title').value = 'write a.py properly';
+    rows()[0].querySelector('.plan-owner').value = '1';
+    boardCalls.length = 0;
+    const acts = card().querySelector('.plan-actions');
+    const approve = [...acts.children].filter(
+      c => String(c.className || '').includes('plan-approve'))[0];
+    await approve.onclick();
+    await new Promise(r => setImmediate(r));
+    p.approveCall = boardCalls[0];
+    p.phaseAfterApprove = card().dataset.phase;
+
+    // ...and a refusal asks WHY before it sends
+    ctx.uiEvent({event: 'board', payload: {...BOARD, chat_id: 'sess-board'}});
+    ctx.uiEvent({event: 'question', payload: {
+      chat_id: 'sess-board', qid: 'bq2', kind: 'board', asker: 'Supervisor',
+      question: 'Approve the board?', options: ['Approve & dispatch']}});
+    boardCalls.length = 0;
+    const back = [...card().querySelector('.plan-actions').children]
+      .filter(c => deepText(c) === 'Send it back')[0];
+    const pending = back.onclick();
+    await new Promise(r => setImmediate(r));
+    const note = card().querySelector('textarea');
+    p.notePrompted = !!note;
+    note.value = 'too broad';
+    card().querySelectorAll('button')
+      .filter(b => deepText(b) === 'Send back')[0].onclick();
+    await pending;
+    await new Promise(r => setImmediate(r));
+    p.refuseCall = boardCalls[0];
+    await ctx.newChat();
+  } catch (e) { more.boardError = (e && e.stack) || String(e); }
+
   // ---- W2.3: the background jobs badge and popover -------------------------
   // The badge counts every chat this window holds, including the ones whose
   // rows never reach the transcript on screen — which is the whole point, and
@@ -3122,6 +3237,56 @@ class UiBootTests(unittest.TestCase):
     def test_escape_clears_the_search_outright(self):
         self.assertEqual(self.report.get("valueAfterEscape"), "")
         self.assertTrue(self.report.get("railRestoredAfterEscape"))
+
+    # ---- W2.2: the Supervisor board review ----------------------------------
+    def _board(self):
+        self.assertIsNone(self.report.get("boardError"),
+                          "board probe threw: %s" % self.report.get("boardError"))
+        return self.report["board"]
+
+    def test_the_gate_answers_in_the_card_not_the_generic_modal(self):
+        """The modal answers with a STRING; board_gate reads Josh's edits off
+        a dict."""
+        b = self._board()
+        self.assertFalse(b["askModalOpened"])
+        self.assertTrue(b["cardPresent"])
+        self.assertEqual(b["phase"], "awaiting")
+        self.assertEqual(b["rowCount"], 2)
+
+    def test_the_owner_picker_comes_from_the_engines_seat_list(self):
+        """Reassigning to a seat that is not in this conversation makes
+        assign_workstreams fail the task outright."""
+        b = self._board()
+        self.assertEqual(b["ownerOptions"],
+                         ["0:Claude", "1:Gemini (cannot write files)"])
+
+    def test_the_card_shows_the_file_claims_and_will_not_edit_them(self):
+        b = self._board()
+        self.assertEqual(b["filesShown"], "1 file")
+        self.assertFalse(b["hasFileInput"])
+
+    def test_an_approval_sends_exactly_what_the_whitelist_accepts(self):
+        b = self._board()
+        chat, board_id, payload = b["approveCall"]
+        self.assertEqual(chat, "sess-board")
+        self.assertEqual(board_id, "board-1")
+        self.assertEqual(payload["approved"], True)
+        self.assertEqual(payload["revision"], 1)
+        self.assertEqual(payload["tasks"], [
+            {"id": "t1", "include": True, "brief": "write a.py properly",
+             "owner": "1"},
+            {"id": "t2", "include": False, "brief": "write b.py",
+             "owner": "1"},
+        ])
+        self.assertEqual(b["phaseAfterApprove"], "approved")
+
+    def test_sending_it_back_asks_why_first(self):
+        """A refusal with no reason is the least useful thing Josh can hand a
+        planner, and it is the only channel the feedback has."""
+        b = self._board()
+        self.assertTrue(b["notePrompted"])
+        self.assertFalse(b["refuseCall"][2]["approved"])
+        self.assertEqual(b["refuseCall"][2]["feedback"], "too broad")
 
     # ---- W2.3: the background jobs view -------------------------------------
     def _jobs(self):

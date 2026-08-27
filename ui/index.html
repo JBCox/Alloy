@@ -2281,6 +2281,10 @@
              title="Each CLI only auto-loads its own doc (Claude reads CLAUDE.md, GPT reads AGENTS.md, Gemini reads AGENTS.md/GEMINI.md), so without this the seats start with very unequal knowledge of the project. Only applies to a chosen folder.">
         <input type="checkbox" id="projBrief" checked> Share the folder's AI docs with every seat
       </label>
+      <label class="check-row check-div"
+             title="Build Together and Keep Improving only. The Supervisor's task board pauses for you before each wave dispatches: drop tasks, reword them, reassign them, reorder them, or send the whole board back with a note it plans against. A board nobody answers dispatches nothing.">
+        <input type="checkbox" id="boardReview"> Review the task board before work starts
+      </label>
       <label class="check-row check-div">
         <input type="checkbox" id="connectors"> Connected apps (Gmail, Drive, Calendar…)
       </label>
@@ -3036,7 +3040,9 @@ function runFor(id, seed) {
     status: canonicalRunState(seed?.status) || (seed?.running ? "running" : "idle"),
     thinkers: new Set(), question: seed?.question || null,
     unread: Number(seed?.unread || 0), completionUnread: false,
-    plan: seed?.plan || null, permission: seed?.permission || seed?.session?.permission || null,
+    plan: seed?.plan || null,
+    board: seed?.board || seed?.session?.board || null,
+    permission: seed?.permission || seed?.session?.permission || null,
     supervisorTrace: [...(seed?.supervisor_trace || seed?.session?.supervisor_trace || [])],
     supervisorGoal: seededGoal,
     supervisorTasks: [...(seed?.tasks || seed?.session?.tasks || [])],
@@ -4834,6 +4840,178 @@ function renderPlan(plan) {
   if (isNew) $("feed").appendChild(card);
   stickBottom();
 }
+/* ---------- W2.2: the Supervisor board review ----------
+   A SEPARATE card, a separate event and a separate bridge call from Plan
+   Mode's, sharing only the .plan-* stylesheet. `state["plan"]` is written by
+   start_plan with no mode check and rehydrates, so a supervisor chat can
+   arrive already holding one — two features sharing one record is how an
+   awaiting-only guard ends up reading somebody else's card.
+
+   What Josh can do here is exactly what the engine's whitelist accepts:
+   include/exclude, retitle, reassign, reorder — plus sending the whole board
+   back with a note. `files` and `deps` are NOT offered, because they are the
+   workstream isolation contract and the only validator for them parses a
+   directive STRING, not a dict. */
+function renderBoard(board) {
+  if (!board || !Array.isArray(board.tasks)) return;
+  const phase = board.phase || "proposed", editable = phase === "proposed";
+  let card = document.querySelector(".plan-card[data-active-board]");
+  const isNew = !card;
+  if (!card) {
+    card = document.createElement("section");
+    card.className = "plan-card";
+    card.dataset.activeBoard = "1";
+  }
+  card.dataset.phase = editable ? "awaiting" : phase;
+  card.replaceChildren();
+
+  const head = document.createElement("div"); head.className = "plan-head";
+  const title = document.createElement("strong");
+  title.textContent = "Task board" + (board.wave ? ` · wave ${board.wave}` : "");
+  const pill = document.createElement("span"); pill.className = "plan-phase";
+  pill.textContent = ({proposed: "Needs review", approved: "Dispatched",
+                       declined: "Sent back"})[phase] || phase;
+  head.append(title, pill);
+  const goal = document.createElement("div"); goal.className = "plan-goal";
+  goal.textContent = board.goal || "";
+  const tasks = document.createElement("div"); tasks.className = "plan-tasks";
+
+  // The seats the ENGINE published with the board, not the live seat rail:
+  // reassigning to a seat that is not in this conversation makes
+  // assign_workstreams fail the task with "no seat 'x' in this conversation".
+  const seatOpts = board.seats || [];
+  board.tasks.forEach((task, index) => {
+    const row = document.createElement("div"); row.className = "plan-task";
+    row.dataset.id = task.id || `task-${index + 1}`;
+    row.dataset.status = task.status || "pending";
+    const include = document.createElement("input"); include.type = "checkbox";
+    include.className = "plan-include"; include.checked = true;
+    include.disabled = !editable;
+    const text = document.createElement("input"); text.type = "text";
+    text.className = "plan-title"; text.value = task.brief || task.title || row.dataset.id;
+    text.disabled = !editable;
+    const owner = document.createElement("select"); owner.className = "plan-owner";
+    const ownerValue = String(task.owner ?? "");
+    seatOpts.forEach(seat => {
+      const opt = document.createElement("option");
+      opt.value = String(seat.id);
+      opt.textContent = seat.name + (seat.writes ? "" : " (cannot write files)");
+      owner.appendChild(opt);
+    });
+    if (ownerValue && ![...owner.options].some(o => o.value === ownerValue)) {
+      const opt = document.createElement("option"); opt.value = ownerValue;
+      opt.textContent = ownerValue; owner.appendChild(opt);
+    }
+    owner.value = ownerValue || owner.options[0]?.value || "";
+    owner.disabled = !editable;
+    const state = document.createElement("span"); state.className = "task-state";
+    const files = (task.files || []).length;
+    state.textContent = files ? `${files} file${files === 1 ? "" : "s"}` : "no files";
+    state.title = (task.files || []).join(", ")
+      || "This task claims no files, so nothing about it can be verified.";
+    const order = document.createElement("span"); order.className = "task-order";
+    if (editable) {
+      const up = document.createElement("button"); up.textContent = "↑"; up.title = "Move task up";
+      up.onclick = () => { const prev = row.previousElementSibling; if (prev) tasks.insertBefore(row, prev); };
+      const down = document.createElement("button"); down.textContent = "↓"; down.title = "Move task down";
+      down.onclick = () => { const next = row.nextElementSibling; if (next) tasks.insertBefore(next, row); };
+      order.append(up, down);
+    }
+    row.append(include, text, owner, state, order); tasks.appendChild(row);
+  });
+
+  const actions = document.createElement("div"); actions.className = "plan-actions";
+  const note = document.createElement("span"); note.className = "plan-note";
+  note.textContent = editable
+    ? "Untick to drop a task, edit the wording, reassign or reorder."
+    : phase === "declined" ? "Sent back — the Supervisor plans again."
+    : "The board is dispatched; editing is locked while work is active.";
+  actions.appendChild(note);
+  if (editable) {
+    const back = document.createElement("button"); back.className = "btn-sm";
+    back.textContent = "Send it back";
+    back.title = "Refuse the whole board — the Supervisor plans again";
+    const approve = document.createElement("button"); approve.className = "plan-approve";
+    approve.textContent = "Approve & dispatch";
+    const send = async (approved) => {
+      const edits = [...tasks.querySelectorAll(".plan-task")].map(row => ({
+        id: row.dataset.id,
+        include: row.querySelector(".plan-include").checked,
+        brief: row.querySelector(".plan-title").value.trim(),
+        owner: row.querySelector(".plan-owner").value,
+      }));
+      if (approved && !edits.some(e => e.include)) {
+        addMsg("system", "relay",
+               "Keep at least one task, or send the whole board back.", "");
+        return;
+      }
+      if (approved && edits.some(e => e.include && !e.brief)) {
+        addMsg("system", "relay", "Every kept task needs a description.", "");
+        return;
+      }
+      approve.disabled = back.disabled = true;
+      let feedback = "";
+      if (!approved) feedback = await openBoardNote();
+      if (!approved && feedback === null) {
+        approve.disabled = back.disabled = false; return;
+      }
+      let r;
+      try {
+        r = await pywebview.api.approve_board(activeId, board.id || null,
+          {revision: board.revision || 1, approved, tasks: edits,
+           feedback: feedback || ""});
+      } catch (e) { r = {error: "Board review is not available yet."}; }
+      if (r?.error) {
+        approve.disabled = back.disabled = false;
+        addMsg("system", "relay", r.error, ""); return;
+      }
+      renderBoard({...board, phase: approved ? "approved" : "declined"});
+    };
+    back.onclick = () => send(false);
+    approve.onclick = () => send(true);
+    actions.append(back, approve);
+  }
+  card.append(head, goal, tasks, actions);
+  if (isNew) $("feed").appendChild(card);
+  stickBottom();
+}
+// One inline prompt, the same shape openNoteEditor uses — this app uses
+// window.prompt nowhere, and a refusal with no reason is the least useful
+// thing Josh can send a planner.
+function openBoardNote() {
+  return new Promise(resolve => {
+    const card = document.querySelector(".plan-card[data-active-board]");
+    if (!card) { resolve(""); return; }
+    // `.msg-note-edit` / `.note-acts` are the classes that EXIST — the ones
+    // openNoteEditor uses, unscoped, so they style this box too. The first
+    // draft invented `.note-editor` / `.note-actions`, which appear nowhere
+    // in the stylesheet, and the textarea rendered as a raw browser default:
+    // black text on white, 168px wide, inside a dark card. No text-level test
+    // and no node harness can see that — only getComputedStyle on a real
+    // page (the same lesson #statsBtn taught in the sidebar).
+    const box = document.createElement("div"); box.className = "msg-note-edit";
+    const ta = document.createElement("textarea");
+    ta.rows = 3; ta.placeholder = "Why? (optional — the Supervisor plans against this)";
+    const acts = document.createElement("div"); acts.className = "note-acts";
+    const save = document.createElement("button"); save.className = "btn-sm";
+    save.textContent = "Send back";
+    const cancel = document.createElement("button"); cancel.className = "btn-sm";
+    cancel.textContent = "Cancel";
+    const done = v => { box.remove(); resolve(v); };
+    save.onclick = () => done(ta.value.trim());
+    cancel.onclick = () => done(null);
+    ta.onkeydown = e => {
+      if (e.key === "Escape") { e.stopPropagation(); done(null); }
+      else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.stopPropagation(); e.preventDefault(); done(ta.value.trim());
+      }
+    };
+    acts.append(save, cancel);
+    box.append(ta, acts);
+    card.appendChild(box);
+    ta.focus();
+  });
+}
 function mergePlanTasks(chatId, updates) {
   const run = runFor(chatId);
   if (!run?.plan || !Array.isArray(updates)) return;
@@ -4883,6 +5061,10 @@ window.uiEvent = packet => {
   } else if (chatId && event === "plan") {
     const run = runFor(chatId); run.plan = payload;
     if (planPhase(payload.phase) === "awaiting") setRunStatus(chatId, "waiting");
+  } else if (chatId && event === "board") {
+    const run = runFor(chatId); run.board = payload;
+    if ((payload.phase || "proposed") === "proposed")
+      setRunStatus(chatId, "waiting");
   } else if (chatId && event === "run_status") {
     const patch = {};
     if (payload.pending_ask !== undefined) patch.question = payload.pending_ask;
@@ -5044,14 +5226,28 @@ window.uiEvent = packet => {
     scheduleFilesRefresh();              // the turn may have written files
   } else if (event === "question") {
     const run = runFor(activeId);
+    // The board's own gate answers in its CARD, never the generic modal:
+    // the modal returns a STRING, and board_gate reads Josh's edits off a
+    // dict.
+    const boardAsk = payload.kind === "board" && run?.board
+      && (run.board.phase || "proposed") === "proposed";
+    // `kind` is "plan", not "plan_approval" — relay.plan_gate has always sent
+    // the former and this test has always named the latter, so the plan
+    // card's Approve button was unreachable and every approval fell through
+    // to the modal, whose string answer makes approve_plan(goal=None,
+    // tasks=None). Inert today (plan mode is unreachable from the app) but
+    // wrong, and it sits one line above its working twin.
     const planAsk = run?.plan && planPhase(run.plan.phase) === "awaiting" &&
-      (payload.kind === "plan_approval" ||
+      (payload.kind === "plan" || payload.kind === "plan_approval" ||
        (run.plan.qid && run.plan.qid === payload.qid));
     if (payload.speaker !== undefined)
       setSeatTelemetry(payload.speaker,
         payload.kind === "permission" ? "awaiting approval" : "waiting for answer",
         "waiting", false);
-    if (planAsk) {
+    if (boardAsk) {
+      run.board.qid = payload.qid;      // review lives in the board card
+      renderBoard(run.board);
+    } else if (planAsk) {
       run.plan.qid = payload.qid;       // approval lives in the plan card, not a modal
       renderPlan(run.plan);
     } else showQuestion(payload);
@@ -6501,6 +6697,9 @@ function setSeated(on) {
   // the project context is injected in each seat's FIRST preamble, so it is
   // settled the moment a conversation exists
   $("projBrief").disabled = seated;
+  // the gate is armed for the whole run, and the first wave can dispatch
+  // within seconds of Send
+  $("boardReview").disabled = seated;
   // permissions are baked into every seat's argv when the chat starts, so
   // flipping them mid-conversation would be a lie until the next /clear
   $("permissionMode").disabled = seated;
@@ -8234,6 +8433,7 @@ async function sendSay() {
     browser: $("browserMode").value,
     browser_sites: browserSiteList(),
     brief: $("projBrief").checked,
+    board_review: $("boardReview").checked,
     mode: orchestration.legacy_mode,
     orchestration,
     synthesizer: orchestration.workflow === "panel" ? synthesizer : null,
@@ -9671,6 +9871,9 @@ async function openChat(id, findQuery, findExcerpt) {
   // truthful for chats that ran before this existed, and for ones that opted
   // out: no brief record means the seats were never given project context
   $("projBrief").checked = !!s.brief;
+  // truthful for chats that ran before this existed: no record means the
+  // board was never gated
+  $("boardReview").checked = !!s.board_review;
   restoreDesktop(s.desktop, s.desktop_allowlist);
   restoreBrowser(s.browser, s.browser_sites);
   const helpers = (s.spawn || {}).max_helpers || 0;
@@ -9708,6 +9911,7 @@ async function openChat(id, findQuery, findExcerpt) {
   });
   run.unread = 0; run.completionUnread = false;
   if (run.plan && Array.isArray(run.plan.tasks)) renderPlan(run.plan);
+  if (run.board && Array.isArray(run.board.tasks)) renderBoard(run.board);
   stickBottom(true);
   // A search hit opened this chat: land on the words, not the bottom.
   // When nothing matches (the snippet came from a message the renderer
@@ -9875,6 +10079,7 @@ function roomCfgFromStage() {
     browser_sites: browserSiteList(),
     workspace: customFolder,
     brief: $("projBrief").checked,
+    board_review: $("boardReview").checked,
     mode: orchestration.legacy_mode,
     orchestration,
     synthesizer: panel ? synthesizer : null,
@@ -9906,6 +10111,9 @@ function applyRoomToStage(room) {
   restoreBrowser(cfg.browser, cfg.browser_sites);
   setFolder(cfg.workspace || null);
   $("projBrief").checked = !!cfg.brief;
+  // a saved room that dropped the gate would silently start an UNgated run
+  // from a template Josh set up with it
+  $("boardReview").checked = !!cfg.board_review;
   restoreModerator(cfg.mode === "supervisor" ? cfg.supervisor : cfg.moderator);
   if (Number(cfg.ceiling) > 0) ceiling = Number(cfg.ceiling);
   restoreOrchestration({orchestration: cfg.orchestration, mode: cfg.mode,
