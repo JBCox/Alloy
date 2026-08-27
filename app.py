@@ -6,6 +6,7 @@ mirrors relay.py's round-robin engine and reuses its Agent adapters verbatim.
 """
 
 import base64
+import collections
 import ctypes
 import datetime
 import json
@@ -313,6 +314,52 @@ def agy_path():
         os.environ.get("LOCALAPPDATA", ""), "agy", "bin", "agy.exe")
 
 
+class HumanQueue:
+    """Josh's undelivered lines for ONE chat, plus a race-free peek.
+
+    A FIFO with the three methods `queue.Queue` was being used for, and one
+    more: `snapshot()`, so a front end can say honestly what is still waiting
+    to be picked up.
+
+    Deliberately NOT edit or drop. The loops drain at moments no front end can
+    predict — the SEQUENTIAL loop reads this once per TURN, which is minutes —
+    so an edit or a delete against it would silently do nothing whenever the
+    drain won the race, and look fine in parallel and free mode where drains
+    are 250 ms apart. That is the repo's own recurring shape (N sites, one
+    guard makes the edit meaningless), so the editable hold lives in the
+    CLIENT, where a row is provably still Josh's until he presses send. This
+    side only has to be truthful about what it is holding.
+    """
+
+    def __init__(self):
+        self._items = collections.deque()
+        self._lock = threading.Lock()
+
+    def put(self, item):
+        with self._lock:
+            self._items.append(item)
+
+    def get_nowait(self):
+        with self._lock:
+            if not self._items:
+                raise queue.Empty
+            return self._items.popleft()
+
+    def empty(self):
+        with self._lock:
+            return not self._items
+
+    def qsize(self):
+        with self._lock:
+            return len(self._items)
+
+    def snapshot(self):
+        """What is still waiting, oldest first. A COPY: handing out the deque
+        would let a reader mutate the queue by accident."""
+        with self._lock:
+            return list(self._items)
+
+
 class Run:
     """One conversation this window owns — live, paused, or just being drafted.
 
@@ -335,7 +382,7 @@ class Run:
         # from under him mid-sentence.
         self.background = bool(background)
         self.stop_flag = threading.Event()
-        self.human_q = queue.Queue()
+        self.human_q = HumanQueue()
         self.session_dir = None
         self.view_workspace = None   # reopened view-only chat's workspace
         self.staged_roles = {}       # seat index -> staged role change
@@ -2513,9 +2560,59 @@ class Api:
                 text = with_attachments(text, save_attachments(files, ws))
             except (OSError, ValueError) as e:
                 return {"error": f"Could not save attachment: {e}"}
+        if text.startswith("/"):
+            # A slash line is a COMMAND and takes a different path
+            # (Api.command -> dispatch_command). Once on this queue the two are
+            # indistinguishable, and four of the five loops tell them apart by
+            # this exact test — so a message that only looks like a command
+            # must be refused here rather than becoming "Unknown command".
+            return {"error": "That starts with / — send it as a command, or "
+                             "put a space or a word in front of it."}
         if text:
             run.human_q.put(text)
-        return {"ok": True, "text": text}
+        # How many of Josh's lines are still waiting to be picked up, counted
+        # at the moment his own was added. True when it is said; deliberately
+        # not polled (see HumanQueue on why this side does not pretend to be
+        # editable) — Api.jobs publishes the live figure.
+        return {"ok": True, "text": text, "waiting": run.human_q.qsize()}
+
+    def prepare_message(self, text, files=None, chat_id=None):
+        """Save a message's attachments WITHOUT delivering the message.
+
+        The queue dock holds Josh's rows in the browser, where an edit or a
+        delete is provably his until he presses send. Attachment BYTES cannot
+        live there — they belong in the chat's working folder, where the seats
+        can open them and the Files rail can list them — so they are written
+        now and the returned text carries the `[Josh attached a file: …]`
+        lines the row will send verbatim.
+
+        The consequence is stated rather than hidden: deleting a held row
+        cannot unwrite those files, so the dock's delete says how many it is
+        leaving behind.
+
+        Bridge-thread safe, exactly like interject: bounded file IO, no
+        subprocess.
+        """
+        run, err = self._resolve_chat(chat_id)
+        if err:
+            return {"error": err}
+        text = (text or "").strip()
+        if text.startswith("/"):
+            return {"error": "That starts with / — send it as a command, or "
+                             "put a space or a word in front of it."}
+        saved = []
+        if files:
+            ws = (run.state or {}).get("workspace")
+            if not ws:
+                return {"error": "No conversation workspace to attach files to."}
+            try:
+                saved = save_attachments(files, ws)
+            except (OSError, ValueError) as e:
+                return {"error": f"Could not save attachment: {e}"}
+        if not text and not saved:
+            return {"error": "Nothing to queue."}
+        return {"ok": True, "text": with_attachments(text, saved),
+                "attached": len(saved)}
 
     def answer_question(self, qid, text, chat_id=None):
         """Answer (or skip, with empty text) a seat's [[ASK]] question.

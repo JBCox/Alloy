@@ -13298,8 +13298,20 @@ def run_battle(state, io):
         t.start()
     while any(t.is_alive() for t in threads):
         for h in io.drain_human():
+            # The `/` test the other four drain sites make. Without it every
+            # drained line went to dispatch_command, so a plain interjection
+            # during the blind round was recorded as a command, answered
+            # "Unknown command /<first word>." and DESTROYED — never queued to
+            # any seat. The message lands in `pending` instead and reaches
+            # both seats on the next turn: the blind prompts were composed
+            # before any thread started, so appending cannot disturb the round
+            # in flight (commit_reply deletes a prefix it already measured).
+            if h.startswith("/"):
+                with lock:
+                    dispatch_command(state, h, io)
+                continue
             with lock:
-                dispatch_command(state, h, io)
+                enqueue_josh_message(state, io, h)
         for t in threads:
             t.join(timeout=0.25)
 

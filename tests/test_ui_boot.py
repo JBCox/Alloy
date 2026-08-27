@@ -182,7 +182,27 @@ function mkEl(tag) {
     setAttribute(k, v) { this._attrs[k] = v; if (k === 'id') { this.id = v; byId[v] = this; } },
     getAttribute(k) { return this._attrs[k]; },
     removeAttribute(k) { delete this._attrs[k]; },
-    addEventListener() {}, removeEventListener() {}, dispatchEvent() {},
+    // RECORDED, not dropped. A no-op here makes every keyboard binding in
+    // the page structurally untestable: the composer's Enter / Shift+Enter /
+    // Ctrl+Enter split lives entirely in a keydown listener, so a probe could
+    // only ever call the handler function directly -- which passes whether
+    // the key is bound or not (caught by a RED pass, 2026-08-27).
+    _listeners: null,
+    addEventListener(type, fn) {
+      if (typeof fn !== 'function') return;
+      (this._listeners = this._listeners || {});
+      (this._listeners[type] = this._listeners[type] || []).push(fn);
+    },
+    removeEventListener(type, fn) {
+      const fns = (this._listeners || {})[type] || [];
+      const i = fns.indexOf(fn);
+      if (i > -1) fns.splice(i, 1);
+    },
+    dispatchEvent(ev) {
+      const type = (ev && ev.type) || '';
+      ((this._listeners || {})[type] || []).slice().forEach(fn => fn(ev));
+      return true;
+    },
     focus() {}, blur() {}, select() {}, click() {}, scrollIntoView() {},
     getBoundingClientRect() { return {top: 0, left: 0, width: 0, height: 0, bottom: 0, right: 0}; },
     setPointerCapture() {}, releasePointerCapture() {},
@@ -204,6 +224,19 @@ function mkEl(tag) {
       return c;
     },
     append(...cs) { cs.forEach(c => typeof c === 'object' && this.appendChild(c)); },
+    // REAL, not the permissive Proxy's no-op. Every renderer in the UI that
+    // rebuilds a list uses replaceChildren(), and a silent no-op meant the
+    // old rows stayed: a probe then watched a list "grow" on every repaint
+    // and read that as the product's behaviour. Same lesson as classList and
+    // the attribute selectors -- a stub that lies is worse than one that
+    // refuses (2026-08-27).
+    replaceChildren(...cs) {
+      this.children.forEach(c => { if (c.parent === this) c.parent = null; });
+      this.children = [];
+      this._html = '';
+      if (this.tag === 'select') { this.options = []; this.value = ''; }
+      cs.forEach(c => typeof c === 'object' && this.appendChild(c));
+    },
     insertBefore(c) { return this.appendChild(c); },
     prepend(c) { c.parent = this; this.children.unshift(c); return c; },
     querySelector(sel) { return this._all().find(e => matches(e, sel)) || null; },
@@ -379,6 +412,8 @@ let reactionsReply = {};     // what get_reactions hands a reopened chat
 let noteEditorAnswer = undefined;
 let playbookReply = null;    // set to {error} to drive the refusal path
 let interjectReply = null;   // set to {error} to drive the refusal path
+const dockCalls = [];        // W2.1: what the queue dock asked the bridge to do
+let prepareReply = null;     // what prepare_message hands back; null = an echo
 function apiReply(name, args) {
   apiCalls.push(name);
   switch (name) {
@@ -420,7 +455,12 @@ function apiReply(name, args) {
       active: 'sess-one',
     };
     case 'save_tabs': savedTabs.push(args && args[0]); return args && args[0];
-    case 'interject': return interjectReply || {ok: true, text: args && args[0]};
+    case 'interject':
+      dockCalls.push([name].concat(args));
+      return interjectReply || {ok: true, text: args && args[0]};
+    case 'prepare_message':
+      dockCalls.push([name].concat(args));
+      return prepareReply || {ok: true, text: args && args[0], attached: 0};
     // A chat whose process died mid-run: reopened AND resumed at boot.
     case 'restart_resume': return {
       session_id: 'sess-one', resume: true,
@@ -2150,6 +2190,102 @@ if (topLevelError) {
                            total_tokens: 6});
     p.nothingReported = pill({});
   } catch (e) { more.usagePillError = (e && e.stack) || String(e); }
+  // ---- W2.1: the queue dock, driven like a user ---------------------------
+  // Things only an executed page can see: that Enter still SENDS while
+  // Ctrl+Enter holds, that an edit to a held row is what actually goes out,
+  // and that a drop happens in two steps and names what it cannot undo.
+  try {
+    const p = more.dock = {};
+    await ctx.newChat();
+    ctx.uiEvent({event: 'started', payload: {
+      session: {id: 'sess-dock', title: 'Dock', participants: [],
+                mode: 'round_robin', can_continue: false},
+      transcript: 'x/transcript.md', workspace: '', mode: 'round_robin'}});
+    const dock = byId['queueDock'];
+    p.hiddenWithNothingQueued = !!dock.hidden;
+    p.buttonOfferedWhileRunning = !byId['queueBtn'].hidden;
+
+    // plain Enter still delivers at once
+    dockCalls.length = 0;
+    byId['say'].value = 'send me now';
+    await ctx.sendSay();
+    p.enterCalls = dockCalls.map(c => c[0]);
+
+    // the queue gesture holds instead — driven through the REAL keydown
+    // binding, not by calling queueSay directly, which would pass whether the
+    // key was bound at all
+    const key = (el, ev) => {
+      let stopped = false;
+      const e = Object.assign({key: 'Enter', ctrlKey: false, metaKey: false,
+                               shiftKey: false, type: 'keydown',
+                               preventDefault() { stopped = true; }}, ev);
+      ((el._listeners || {}).keydown || []).slice().forEach(fn => fn(e));
+      return stopped;
+    };
+    dockCalls.length = 0;
+    byId['say'].value = 'hold me';
+    p.ctrlEnterPrevented = key(byId['say'], {ctrlKey: true});
+    await new Promise(r => setImmediate(r));   // queueSay is async
+    p.queueCalls = dockCalls.map(c => c[0]);
+    // ...while a plain Enter on the same box still SENDS
+    dockCalls.length = 0;
+    byId['say'].value = 'plain enter';
+    key(byId['say'], {});
+    await new Promise(r => setImmediate(r));
+    p.plainEnterCalls = dockCalls.map(c => c[0]);
+    dockCalls.length = 0;
+    p.sayClearedAfterQueue = byId['say'].value === '';
+    const rows = () => [...byId['queueList'].children]
+      .filter(c => String(c.className || '').split(/\s+/).includes('q-row'));
+    p.rowCount = rows().length;
+    p.shownOnceQueued = !dock.hidden;
+    p.rowIsTextarea = (rows()[0].querySelector('.q-text') || {}).tag;
+
+    // editing the row is what gets sent, not what was typed
+    const ta = rows()[0].querySelector('.q-text');
+    ta.value = 'hold me, edited';
+    ta.oninput();
+    dockCalls.length = 0;
+    await ctx.sendQueued(rows()[0].dataset.qid);
+    p.sentText = (dockCalls.find(c => c[0] === 'interject') || [])[1];
+    p.emptyAfterSend = rows().length;
+    p.hiddenAfterSend = !!dock.hidden;
+
+    // a slash line is refused rather than queued
+    dockCalls.length = 0;
+    byId['say'].value = '/compact';
+    await ctx.queueSay();
+    p.slashCalls = dockCalls.map(c => c[0]);
+    p.slashNote = deepText(byId['queueNote']);
+    byId['say'].value = '';
+
+    // dropping takes two clicks, and the arm names the files it leaves
+    prepareReply = {ok: true, attached: 1,
+                    text: 'with a file\n\n[Josh attached a file: C:\\w\\a.png]'};
+    byId['say'].value = 'with a file';
+    await ctx.queueSay();
+    const row = rows()[0];
+    p.attChips = [...((row.querySelector('.q-att') || {}).children || [])]
+      .map(c => c.textContent);
+    p.proseOnlyInBox = row.querySelector('.q-text').value;
+    const del = row.querySelector('.q-del');
+    del.onclick();
+    p.armLabel = del.textContent;
+    p.rowsAfterArm = rows().length;
+    del.onclick();
+    p.rowsAfterConfirm = rows().length;
+    prepareReply = null;
+
+    // the dock is PER CHAT: queue for this one, look at another, come back
+    byId['say'].value = 'for sess-dock';
+    await ctx.queueSay();
+    p.rowsBeforeSwitch = rows().length;
+    await ctx.openChat('some-other-chat');
+    p.rowsInOtherChat = rows().length;
+    p.dockHiddenInOtherChat = !!dock.hidden;
+    await ctx.newChat();
+  } catch (e) { more.dockError = (e && e.stack) || String(e); }
+
   // ---- W2.0: a background chat must not yank the visible transcript -------
   // The webhook (and every scheduled room after it) starts a conversation
   // while Josh is reading something else. `started` used to do
@@ -2863,6 +2999,68 @@ class UiBootTests(unittest.TestCase):
     def test_escape_clears_the_search_outright(self):
         self.assertEqual(self.report.get("valueAfterEscape"), "")
         self.assertTrue(self.report.get("railRestoredAfterEscape"))
+
+    # ---- W2.1: the queue dock ----------------------------------------------
+    def _dock(self):
+        self.assertIsNone(self.report.get("dockError"),
+                          "dock probe threw: %s" % self.report.get("dockError"))
+        return self.report["dock"]
+
+    def test_the_dock_is_hidden_until_something_is_queued(self):
+        d = self._dock()
+        self.assertTrue(d["hiddenWithNothingQueued"])
+        self.assertTrue(d["buttonOfferedWhileRunning"])
+
+    def test_enter_still_sends_and_the_queue_gesture_holds(self):
+        """A hold is something you ask for, never the new default: a message
+        typed in a hurry must not sit in a dock nobody looked at."""
+        d = self._dock()
+        self.assertEqual(d["enterCalls"], ["interject"])
+        # driven through the real keydown binding: Ctrl+Enter holds...
+        self.assertTrue(d["ctrlEnterPrevented"],
+                        "Ctrl+Enter fell through to the browser default")
+        self.assertEqual(d["queueCalls"], ["prepare_message"])
+        # ...and plain Enter on the same box still delivers
+        self.assertEqual(d["plainEnterCalls"], ["interject"])
+        self.assertTrue(d["sayClearedAfterQueue"])
+        self.assertEqual(d["rowCount"], 1)
+        self.assertTrue(d["shownOnceQueued"])
+
+    def test_a_queued_row_is_a_textarea(self):
+        """An <input> collapses multi-line text, and a row with an attachment
+        is always multi-line."""
+        self.assertEqual(self._dock()["rowIsTextarea"], "textarea")
+
+    def test_the_edited_text_is_what_gets_sent(self):
+        d = self._dock()
+        self.assertEqual(d["sentText"], "hold me, edited")
+        self.assertEqual(d["emptyAfterSend"], 0)
+        self.assertTrue(d["hiddenAfterSend"])
+
+    def test_a_slash_line_is_refused_rather_than_queued(self):
+        d = self._dock()
+        self.assertEqual(d["slashCalls"], [])
+        self.assertIn("Commands are not queued", d["slashNote"])
+
+    def test_attachments_are_chips_and_the_box_holds_only_the_prose(self):
+        d = self._dock()
+        self.assertEqual(d["proseOnlyInBox"], "with a file")
+        self.assertEqual(len(d["attChips"]), 1)
+        self.assertIn("a.png", d["attChips"][0])
+
+    def test_dropping_takes_two_clicks_and_names_the_files_it_leaves(self):
+        """The bytes were written into the working folder when the row was
+        queued, so a drop cannot unwrite them — and hiding that is the lie."""
+        d = self._dock()
+        self.assertEqual(d["rowsAfterArm"], 1)
+        self.assertIn("keeps 1 file", d["armLabel"])
+        self.assertEqual(d["rowsAfterConfirm"], 0)
+
+    def test_the_dock_belongs_to_one_chat(self):
+        d = self._dock()
+        self.assertEqual(d["rowsBeforeSwitch"], 1)
+        self.assertEqual(d["rowsInOtherChat"], 0)
+        self.assertTrue(d["dockHiddenInOtherChat"])
 
     # ---- W2.0: background chats (run pinning) ------------------------------
     def _bg(self):

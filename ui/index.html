@@ -1917,12 +1917,18 @@
   .mode-opt .mode-main { flex: 1; min-width: 0; }
   .mode-opt b { display: block; font-size: 12px; font-weight: 600; }
   .mode-opt .mode-desc { display: block; color: var(--muted); font-size: 10.5px; margin-top: 2px; line-height: 1.3; }
-  #attachBtn, #micBtn {
+  /* EVERY composer icon button belongs in this list — same rule as the
+     sidebar's, and for the same reason: one left out renders as a raw browser
+     default (Arial, white, square, 2px black border) next to its styled
+     siblings, and nothing but getComputedStyle on a real page can see it. */
+  #attachBtn, #micBtn, #queueBtn {
     border: 1px solid var(--line); background: var(--surface); color: var(--muted);
     border-radius: 9px; padding: 0 13px; font-size: 15px; cursor: pointer;
     height: 42px; flex: none;
   }
-  #attachBtn:hover, #micBtn:hover { color: var(--text); border-color: rgba(255,255,255,.25); }
+  #attachBtn:hover, #micBtn:hover, #queueBtn:hover { color: var(--text); border-color: rgba(255,255,255,.25); }
+  #queueBtn[hidden] { display: none; }
+  #queueBtn.has { color: var(--alloy); border-color: var(--alloy); }
   /* dictation: hold to talk. The recording state has to be unmistakable —
      a live microphone you have forgotten about is the whole failure mode. */
   #micBtn { touch-action: none; user-select: none; }
@@ -1939,6 +1945,59 @@
   }
   #attRow { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; }
   #attRow[hidden] { display: none; }
+  /* The queue dock: messages Josh has lined up for a busy chat but has not
+     sent yet. `[hidden]` rather than a `.show` class, because every one of its
+     neighbours in the composer (#attRow, #battleBar, #askPill, .mention-hint)
+     uses the attribute and mixing the two idioms is how a control ends up
+     permanently invisible. Alloy chrome, not a provider colour: this is
+     Josh's own text waiting on him. */
+  #queueDock {
+    flex-basis: 100%; display: flex; flex-direction: column; gap: 6px;
+    border: 1px solid var(--line); border-radius: 10px;
+    background: var(--surface); padding: 8px 9px; margin-bottom: 6px;
+  }
+  #queueDock[hidden] { display: none; }
+  #queueHead {
+    display: flex; align-items: center; gap: 9px;
+    font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted);
+  }
+  #queueHead .q-count { color: var(--alloy); }
+  #queueHead .q-note { text-transform: none; letter-spacing: 0; font-size: 11px; }
+  #queueSendAll {
+    margin-left: auto; background: none; border: 1px solid var(--line);
+    border-radius: 8px; color: var(--text); cursor: pointer;
+    padding: 3px 10px; font: inherit; font-size: 10.5px;
+    letter-spacing: .1em; text-transform: uppercase;
+  }
+  #queueSendAll:hover { border-color: var(--alloy); color: var(--alloy); }
+  .q-row {
+    display: flex; align-items: flex-start; gap: 7px;
+    border-top: 1px solid rgba(255,255,255,.06); padding-top: 6px;
+  }
+  .q-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  textarea.q-text {
+    width: 100%; resize: none; overflow: hidden; min-height: 22px;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 7px; padding: 5px 7px;
+    font-family: inherit; font-size: 12.5px; line-height: 1.45;
+  }
+  textarea.q-text:focus { outline: none; border-color: var(--alloy); }
+  .q-att { display: flex; flex-wrap: wrap; gap: 5px; }
+  /* the attachment lines are NOT editable: the bytes are already in the
+     working folder and the path is what the seats will open */
+  .q-att .att-chip { font-size: 11px; padding: 2px 9px; color: var(--muted); }
+  .q-acts { display: flex; align-items: center; gap: 3px; }
+  .q-acts button {
+    background: none; border: 1px solid transparent; border-radius: 7px;
+    color: var(--muted); cursor: pointer; font: inherit; font-size: 12px;
+    line-height: 1; padding: 4px 6px;
+  }
+  .q-acts button:hover { color: var(--text); border-color: var(--line); }
+  .q-acts .q-send:hover { color: var(--alloy); border-color: var(--alloy); }
+  .q-acts .q-del.armed { color: var(--danger); border-color: var(--danger); }
+  #queueNote { color: var(--danger); font-size: 11px; }
+  #queueNote[hidden] { display: none; }
   .mention-hint {
     flex-basis: 100%; font-size: 11.5px; color: var(--alloy);
     padding: 0 2px;
@@ -2299,6 +2358,15 @@
         title="A seat is waiting on your answer — click to reopen the question"></button>
       <div id="sayGrip" title="Drag up or down to resize the message box (or focus and use ↑/↓)"
            role="separator" aria-label="Message box height" tabindex="0"></div>
+      <div id="queueDock" hidden>
+        <div id="queueHead">
+          <span class="q-count"></span>
+          <span class="q-note"></span>
+          <button id="queueSendAll" type="button" title="Send every queued message, in order">Send all</button>
+        </div>
+        <div id="queueList"></div>
+        <div id="queueNote" hidden></div>
+      </div>
       <div id="mentionHint" class="mention-hint" hidden></div>
       <div id="dropCue" class="mention-hint" hidden></div>
       <div id="attRow" hidden></div>
@@ -2308,6 +2376,9 @@
       <button id="micBtn" hidden
         title="Hold to dictate (or Ctrl+Shift+Space) — transcribed on this machine"
         aria-label="Dictate">🎤</button>
+      <button id="queueBtn" hidden
+        title="Queue this message instead of sending it (Ctrl+Enter) — edit or drop it later"
+        aria-label="Queue this message">⏱</button>
       <textarea id="say" rows="1" placeholder="Type your opening message — Send starts the conversation" autocomplete="off" spellcheck="false"></textarea>
       <button id="sayBtn" class="display">Send</button>
       <div id="composerBar">
@@ -2738,6 +2809,21 @@
 "use strict";
 const $ = id => document.getElementById(id);
 let running = false, canContinue = false;
+// The queue dock's state, declared HERE rather than beside its functions:
+// syncActiveRun (below) repaints the dock, and reading a `const` before its
+// declaration line has run is a TDZ ReferenceError, which in one inline
+// script silently deletes the rest of the app. Same rule the boot sequence
+// at the very end of this file follows.
+const QUEUE_KEY = "alloyQueued";
+const queued = new Map();          // chat id -> [{id, text, atts:[line]}]
+let queueSeq = 0;
+try {
+  const rawQueued = JSON.parse(localStorage.getItem(QUEUE_KEY) || "{}");
+  Object.keys(rawQueued || {}).forEach(k => {
+    if (Array.isArray(rawQueued[k]) && rawQueued[k].length)
+      queued.set(k, rawQueued[k]);
+  });
+} catch (e) { /* a corrupt store must not take the whole page down */ }
 let transcriptPath = null, workspacePath = null, customFolder = null;
 let rounds = 6;
 // Live budget bar state (see budgetApply): REPORTED spend only, plus this
@@ -2839,6 +2925,9 @@ function syncActiveRun(seed) {
   $("say").placeholder = running ? RUN_PH : canContinue ? CONT_PH : IDLE_PH;
   renderPermissionHud(run?.permission || $("permissionMode").value,
     !!run?.question && run.question.kind === "permission");
+  // the dock is per chat and the queue button is offered only while this one
+  // is busy, so both follow the focus switch and the liveness change
+  renderQueueDock();
 }
 
 function supervisorSeatName(owner) {
@@ -7669,6 +7758,193 @@ $("micBtn").addEventListener("pointercancel", () => micStop(true));
 const sayHist = [];          // most-recent-first, ↑ walks back through it
 let histIdx = -1;            // -1 = live text, not browsing history
 function takeAtt() { const a = pendingAtt.splice(0); renderAtt(); return a; }
+
+/* ---------- the queue dock (W2.1) ----------
+   Messages Josh has lined up for a busy chat but has not sent yet.
+
+   The hold is CLIENT-SIDE and that is the whole design. Once a line is on the
+   engine's queue the loops drain it at a moment no front end can predict --
+   the sequential loop reads it once per TURN, minutes apart -- so an "edit" or
+   a "delete" applied there would silently miss whenever the drain won the
+   race, and would look perfect in parallel and free mode where drains are
+   250 ms apart. A row here is provably still Josh's until he presses send.
+
+   Enter still sends immediately; nothing about today's flow changes. The dock
+   is what you get when you deliberately queue instead (the button, or
+   Ctrl+Enter).
+*/
+function queueSave() {
+  const out = {};
+  queued.forEach((rows, id) => { if (rows.length) out[id] = rows; });
+  try { localStorage.setItem(QUEUE_KEY, JSON.stringify(out)); } catch (e) {}
+}
+function queueRows(id) { return (id && queued.get(id)) || []; }
+// The twin of app.with_attachments: prose, a blank line, then one
+// "[Josh attached a file: <path>]" line per file. Kept in step by a test that
+// feeds the same three cases to both.
+function withAttachmentLines(prose, lines) {
+  const block = (lines || []).join("\n");
+  if (!block) return prose || "";
+  return prose ? prose + "\n\n" + block : block;
+}
+const ATT_LINE = /^\[Josh attached a file: .*\]$/;
+function queueNote(text) {
+  const n = $("queueNote");
+  if (!n) return;
+  n.textContent = text || "";
+  n.hidden = !text;
+}
+function renderQueueDock() {
+  const dock = $("queueDock"), list = $("queueList");
+  if (!dock || !list) return;
+  const rows = queueRows(activeId);
+  dock.hidden = !rows.length;
+  const btn = $("queueBtn");
+  if (btn) {
+    // offered only while THIS chat is busy: with nothing running, Send
+    // already delivers at once and a hold would just be a slower Send
+    btn.hidden = !running;
+    btn.classList.toggle("has", !!rows.length);
+  }
+  if (!rows.length) { list.replaceChildren(); queueNote(""); return; }
+  const head = dock.querySelector(".q-count");
+  if (head) head.textContent = rows.length + " queued";
+  const note = dock.querySelector(".q-note");
+  if (note) note.textContent = running ? ""
+    : "this chat is paused - sending queues it for the next turn";
+  list.replaceChildren();
+  rows.forEach((row, i) => {
+    const el = document.createElement("div");
+    el.className = "q-row"; el.dataset.qid = row.id;
+    const body = document.createElement("div"); body.className = "q-body";
+    const ta = document.createElement("textarea");
+    ta.className = "q-text"; ta.rows = 1; ta.value = row.text || "";
+    ta.title = "Edit before sending";
+    const grow = () => {
+      ta.style.height = "auto";
+      ta.style.height = (ta.scrollHeight || 22) + "px";
+    };
+    ta.oninput = () => { row.text = ta.value; queueSave(); grow(); };
+    body.appendChild(ta);
+    if ((row.atts || []).length) {
+      const at = document.createElement("div"); at.className = "q-att";
+      row.atts.forEach(line => {
+        const c = document.createElement("span");
+        c.className = "att-chip";
+        // the path is what the seats open: show its tail, keep the whole path
+        // in the tooltip, and never let it be edited away
+        const m = /\[Josh attached a file: (.*)\]$/.exec(line);
+        const p = m ? m[1] : line;
+        c.textContent = "📎 " + p.split(/[\\/]/).pop();
+        c.title = p;
+        at.appendChild(c);
+      });
+      body.appendChild(at);
+    }
+    const acts = document.createElement("div"); acts.className = "q-acts";
+    const up = document.createElement("button");
+    up.type = "button"; up.textContent = "↑"; up.title = "Move up";
+    up.onclick = () => {
+      if (i > 0) { rows.splice(i - 1, 0, rows.splice(i, 1)[0]); queueSave(); renderQueueDock(); }
+    };
+    const down = document.createElement("button");
+    down.type = "button"; down.textContent = "↓"; down.title = "Move down";
+    down.onclick = () => {
+      if (i < rows.length - 1) { rows.splice(i + 1, 0, rows.splice(i, 1)[0]); queueSave(); renderQueueDock(); }
+    };
+    const send = document.createElement("button");
+    send.type = "button"; send.className = "q-send"; send.textContent = "➤";
+    send.title = "Send this one now";
+    send.onclick = () => sendQueued(row.id);
+    const del = document.createElement("button");
+    del.type = "button"; del.className = "q-del"; del.textContent = "✕";
+    // Two-step, and the arm SAYS what it cannot undo: the attachment bytes
+    // were written into the working folder when the row was queued, so
+    // dropping the row leaves them there. Hiding that would be the lie.
+    del.title = (row.atts || []).length
+      ? "Drop this message (its attached files stay in the working folder)"
+      : "Drop this message";
+    del.onclick = () => {
+      if (!del.classList.contains("armed")) {
+        del.classList.add("armed");
+        del.textContent = (row.atts || []).length
+          ? "drop? (keeps " + row.atts.length + " file" + (row.atts.length === 1 ? "" : "s") + ")"
+          : "drop?";
+        setTimeout(() => { del.classList.remove("armed"); del.textContent = "✕"; }, 4000);
+        return;
+      }
+      dropQueued(row.id);
+    };
+    acts.append(up, down, send, del);
+    el.append(body, acts);
+    list.appendChild(el);
+    grow();
+  });
+}
+function dropQueued(qid) {
+  const rows = queueRows(activeId);
+  const i = rows.findIndex(r => r.id === qid);
+  if (i < 0) return;
+  rows.splice(i, 1);
+  if (!rows.length) queued.delete(activeId);
+  queueSave(); renderQueueDock();
+}
+function splitAttachmentLines(text) {
+  const all = String(text || "").split("\n");
+  const lines = all.filter(l => ATT_LINE.test(l));
+  if (!lines.length) return {prose: String(text || ""), lines: []};
+  return {prose: all.filter(l => !ATT_LINE.test(l)).join("\n").trim(), lines};
+}
+async function queueSay() {
+  const t = $("say").value.trim();
+  if ((!t && !pendingAtt.length) || starting) return;
+  if (!activeId) { queueNote("Start the conversation first."); return; }
+  if (t.startsWith("/")) {
+    queueNote("Commands are not queued - a slash line runs now or not at all.");
+    return;
+  }
+  const att = takeAtt();
+  const r = await pywebview.api.prepare_message(t, att, activeId);
+  if (r?.error) {
+    pendingAtt.push(...att); renderAtt();
+    queueNote(r.error);
+    return;
+  }
+  queueNote("");
+  const split = splitAttachmentLines(r.text);
+  const rows = queued.get(activeId) || [];
+  rows.push({id: "q" + (++queueSeq), text: split.prose, atts: split.lines});
+  queued.set(activeId, rows);
+  queueSave();
+  clearSay();
+  renderQueueDock();
+}
+async function sendQueued(qid) {
+  const chat = activeId;
+  const row = queueRows(chat).find(r => r.id === qid);
+  if (!row) return;
+  const full = withAttachmentLines((row.text || "").trim(), row.atts);
+  if (!full) { queueNote("That row is empty - write something or drop it."); return; }
+  if (full.startsWith("/")) {
+    queueNote("Commands are not queued - a slash line runs now or not at all.");
+    return;
+  }
+  const r = await pywebview.api.interject(full, null, chat);
+  if (r?.error) { queueNote(r.error); return; }
+  queueNote("");
+  dropQueued(qid);
+  const echo = addMsg("josh", "Josh", r?.text || full, "queued for next turn");
+  if (echo) echo.dataset.queued = (r?.text || full);
+}
+async function sendAllQueued() {
+  // in order, and stopping at the first refusal rather than silently
+  // scattering half the queue
+  for (const row of queueRows(activeId).slice()) {
+    const before = queueRows(activeId).length;
+    await sendQueued(row.id);
+    if (queueRows(activeId).length === before) return;
+  }
+}
 async function sendSay() {
   const t = $("say").value.trim();
   if ((!t && !pendingAtt.length) || starting) return;
@@ -7774,9 +8050,17 @@ async function sendSay() {
   $("say").placeholder = RUN_PH;
 }
 $("sayBtn").onclick = sendSay;
+$("queueBtn").onclick = queueSay;
+$("queueSendAll").onclick = sendAllQueued;
 $("say").addEventListener("input", () => { histIdx = -1; sayDraftSave($("say").value); autoGrow(); });
 addEventListener("resize", autoGrow);
 $("say").addEventListener("keydown", e => {
+  // Ctrl+Enter queues instead of sending. Enter and Shift+Enter are unchanged:
+  // a hold is something you ask for, never the new default, or a message typed
+  // in a hurry would sit in a dock nobody looked at.
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault(); queueSay(); return;
+  }
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendSay(); return; }
   // ↑/↓ recall previous sends — only when the box is empty or already browsing,
   // so arrows still move the caret through a draft you're editing.
@@ -9337,6 +9621,7 @@ function resetStage() {
   setSeated(false);   // no live seats to re-role — roles are typed again
   imgCache.clear(); resetEditing();
   clearSeatContexts();
+  renderQueueDock();  // the dock is per chat; a fresh stage holds nobody's
   refreshFiles();     // no active chat ⇒ the rail says so
 }
 

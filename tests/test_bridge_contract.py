@@ -124,6 +124,7 @@ class BridgeContractTests(unittest.TestCase):
             "list_workspace_files": 0,
             "command": 1,
             "interject": 2,
+            "prepare_message": 2,
             "apply_role": 3,
             "stop_seat": 0,
         }
