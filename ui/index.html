@@ -4024,10 +4024,10 @@ window.uiEvent = packet => {
       battleCtx.letters = letters;
       battleCtx.masked = true;
       battleCtx.revealed = false;
+      $("seatList")?.classList.add("battle-blind");
+      $("battleBar").hidden = false;
+      $("battleNote").textContent = "";
     }
-    $("seatList")?.classList.add("battle-blind");
-    $("battleBar").hidden = false;
-    $("battleNote").textContent = "";
   } else if (event === "battle_revealed") {
     revealBattle(payload);
   } else if (event === "run_status") {
