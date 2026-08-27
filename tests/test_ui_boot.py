@@ -2234,6 +2234,30 @@ if (topLevelError) {
                            total_tokens: 6});
     p.nothingReported = pill({});
   } catch (e) { more.usagePillError = (e && e.stack) || String(e); }
+  // ---- W2.2: the board-review switch is offered only where it works --------
+  // A checkbox that silently does nothing in four of six modes is the shape
+  // this repo calls "a control that does nothing"; the rule is to disable it
+  // with a stated reason, never to hide it.
+  try {
+    const p = more.boardSwitch = {};
+    await ctx.newChat();
+    const box = byId['boardReview'];
+    ctx.applyPreset('open_discussion');
+    p.offInConversation = !!box.disabled;
+    p.reasonInConversation = (box.parentElement || box).title;
+    ctx.applyPreset('build_execute');   // the KEY; the label is "Build Together"
+    p.onInBuildTogether = !box.disabled;
+    p.reasonInBuildTogether = (box.parentElement || box).title;
+    // ...but a switch that is ON is never taken away: that is how moderation
+    // once got stuck on with no way to turn it off
+    box.checked = true;
+    ctx.applyPreset('open_discussion');
+    p.stillEditableWhenOn = !box.disabled;
+    box.checked = false;
+    ctx.applyPreset('open_discussion');
+    await ctx.newChat();
+  } catch (e) { more.boardSwitchError = (e && e.stack) || String(e); }
+
   // ---- W2.2: the Supervisor board review -----------------------------------
   // A separate card, event and bridge call from Plan Mode's, sharing only the
   // stylesheet. What the card sends has to match what merge_board_edits
@@ -3237,6 +3261,25 @@ class UiBootTests(unittest.TestCase):
     def test_escape_clears_the_search_outright(self):
         self.assertEqual(self.report.get("valueAfterEscape"), "")
         self.assertTrue(self.report.get("railRestoredAfterEscape"))
+
+    # ---- W2.2: the board-review switch --------------------------------------
+    def _bswitch(self):
+        self.assertIsNone(self.report.get("boardSwitchError"),
+                          "board-switch probe threw: %s"
+                          % self.report.get("boardSwitchError"))
+        return self.report["boardSwitch"]
+
+    def test_the_board_switch_is_refused_with_a_reason_where_it_cannot_work(self):
+        b = self._bswitch()
+        self.assertTrue(b["offInConversation"])
+        self.assertIn("Supervisor", b["reasonInConversation"])
+        self.assertTrue(b["onInBuildTogether"])
+        self.assertIn("dispatches", b["reasonInBuildTogether"])
+
+    def test_a_switch_that_is_on_is_never_taken_away(self):
+        """Hiding one that is ON is how moderation got stuck on with no way to
+        turn it off."""
+        self.assertTrue(self._bswitch()["stillEditableWhenOn"])
 
     # ---- W2.2: the Supervisor board review ----------------------------------
     def _board(self):

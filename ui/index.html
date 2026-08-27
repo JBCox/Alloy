@@ -6497,6 +6497,23 @@ function fillSeat(seat) {
 function syncModCtl() {
   const mode = $("modeSel").value;
   const on = mode === "moderator" || mode === "supervisor";
+  // The board gate belongs to the Supervisor, so a room without one is told
+  // so rather than offered a checkbox that quietly does nothing — the same
+  // rule the mode pill follows for a seat count it cannot satisfy. Disabled,
+  // never hidden: a switch that vanishes when it is ON cannot be turned off.
+  const boardBox = $("boardReview");
+  const supervised = mode === "supervisor";
+  boardBox.disabled = seated || (!supervised && !boardBox.checked);
+  // the LABEL carries the tooltip, and a static element has no parent in
+  // the boot harness's flat parse -- the same absence guard this would
+  // want in a browser if the row were ever detached
+  (boardBox.parentElement || boardBox).title = supervised
+    ? "The Supervisor's task board pauses for you before each wave "
+      + "dispatches: drop tasks, reword them, reassign them, reorder them, "
+      + "or send the whole board back with a note it plans against. A board "
+      + "nobody answers dispatches nothing."
+    : "Only a room with a Supervisor has a task board — pick Build Together "
+      + "or Keep Improving.";
   // "Should an AI run this room?" is a primary question, not an Advanced one.
   // It lived only as `floorSel` inside the disclosure, so the picker below
   // could not appear until Josh had already found the knob that summons it.
