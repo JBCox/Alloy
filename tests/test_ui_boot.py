@@ -727,6 +727,78 @@ if (topLevelError) {
     more.desk.restoredJunk = String(sel.value);
   } catch (e) { more.deskError = (e && e.stack) || String(e); }
 
+  // ---- browser control: the same ceremony, its own state ------------------
+  try {
+    more.brws = {};
+    const bsel = byId['browserMode'];
+    more.brws.bootValue = String(bsel.value);
+    more.brws.sitesHiddenWhenOff = !!byId['browserSites'].hidden;
+    // the site list is offered at EVERY live rung, not only one: with no
+    // sites Chrome reaches nothing, so it is the difference between a
+    // working capability and a dead one at read, ask and full alike
+    bsel.value = 'read'; bsel.onchange();
+    more.brws.readOpensNothing =
+      !(byId['brwsModal'].className || '').includes('show');
+    more.brws.readNote = String(byId['browserNote'].textContent || '');
+    more.brws.sitesShownForRead = !byId['browserSites'].hidden;
+    bsel.value = 'ask'; bsel.onchange();
+    more.brws.sitesShownForAsk = !byId['browserSites'].hidden;
+    // ...and the unattended rung must stop and ask
+    // whatever the desktop picker happens to hold, cancelling the BROWSER
+    // modal must leave it there: separate prev-values, or one Cancel moves
+    // two controls
+    more.brws.desktopBefore = String(byId['desktopMode'].value);
+    bsel.value = 'full'; bsel.onchange();
+    more.brws.fullOpensModal =
+      (byId['brwsModal'].className || '').includes('show');
+    more.brws.okDisabledBeforeAck = !!byId['brwsOk'].disabled;
+    byId['brwsCancel'].onclick();
+    more.brws.valueAfterCancel = String(bsel.value);
+    more.brws.closedAfterCancel =
+      !(byId['brwsModal'].className || '').includes('show');
+    more.brws.desktopAfter = String(byId['desktopMode'].value);
+    bsel.value = 'full'; bsel.onchange();
+    byId['brwsAck'].checked = true; byId['brwsAck'].onchange();
+    more.brws.okAfterAck = !!byId['brwsOk'].disabled;
+    byId['brwsOk'].onclick();
+    more.brws.valueAfterOk = String(bsel.value);
+    more.brws.fullNote = String(byId['browserNote'].textContent || '');
+    // the payload the engine actually receives
+    byId['browserSiteList'].value = ' https://a.test/* , , https://b.test/* ';
+    more.brws.sites = ctx.browserSiteList();
+    // a reopened chat shows what it RAN with; anything unknown is off
+    ctx.restoreBrowser('read', ['https://a.test/*']);
+    more.brws.restored = String(bsel.value);
+    more.brws.restoredSites = String(byId['browserSiteList'].value);
+    ctx.restoreBrowser(undefined, undefined);
+    more.brws.restoredLegacy = String(bsel.value);
+    ctx.restoreBrowser('browse-anywhere', []);
+    more.brws.restoredJunk = String(bsel.value);
+  } catch (e) { more.brwsError = (e && e.stack) || String(e); }
+
+  // ---- the advisory ceiling: shown only where it is TRUE ------------------
+  try {
+    more.adv = {};
+    const psel = byId['permissionMode'], bsel = byId['browserMode'];
+    bsel.value = 'ask'; bsel.onchange();
+    psel.value = 'ask'; ctx.syncPermissionNote();
+    more.adv.hiddenWhenSupervised = !!byId['rungAdvisory'].hidden;
+    psel.value = 'full'; ctx.syncPermissionNote();
+    more.adv.shownAtFull = !byId['rungAdvisory'].hidden;
+    more.adv.textAtFull = String(byId['rungAdvisory'].textContent || '');
+    // The other end of the same honesty problem: at Read only the axes are
+    // not weak, they are INERT -- claude refuses every MCP tool in plan mode,
+    // so the engine registers nothing and the picker would otherwise keep
+    // showing a rung that was never handed to anybody.
+    psel.value = 'read_only'; ctx.syncPermissionNote();
+    more.adv.shownAtReadOnly = !byId['rungAdvisory'].hidden;
+    more.adv.textAtReadOnly = String(byId['rungAdvisory'].textContent || '');
+    // and it disappears again when neither axis is on
+    bsel.value = 'off'; bsel.onchange();
+    byId['desktopMode'].value = 'off'; byId['desktopMode'].onchange();
+    more.adv.hiddenWhenBothOff = !!byId['rungAdvisory'].hidden;
+  } catch (e) { more.advError = (e && e.stack) || String(e); }
+
   // ---- the rounds box, typed the way a user types it ---------------------
   // It used to be a <b> written with textContent; now it is a real input, so
   // the clamp and the focus guard are behaviour only an executing suite sees.
@@ -1658,6 +1730,77 @@ class UiBootTests(unittest.TestCase):
         self.assertEqual(d.get("valueAfterCancel"), "allowlist",
                          "cancel must restore the PREVIOUS rung")
         self.assertTrue(d.get("closedAfterCancel"))
+
+    def test_the_browser_script_block_did_not_throw(self):
+        self.assertIsNone(self.report.get("brwsError"))
+        self.assertIsNone(self.report.get("advError"))
+
+    def test_unattended_browsing_needs_an_acknowledgement(self):
+        b = self.report.get("brws") or {}
+        self.assertEqual(b.get("bootValue"), "off",
+                         "a capability you did not ask for starts off")
+        self.assertTrue(b.get("readOpensNothing"),
+                        "look-only is harmless and needs no ceremony")
+        self.assertTrue(b.get("fullOpensModal"))
+        self.assertTrue(b.get("okDisabledBeforeAck"),
+                        "OK must be locked until the box is ticked")
+        self.assertFalse(b.get("okAfterAck"), "ticking it unlocks OK")
+        self.assertEqual(b.get("valueAfterOk"), "full")
+        self.assertIn("No prompts", b.get("fullNote") or "")
+
+    def test_cancelling_unattended_browsing_reverts_only_its_own_picker(self):
+        """Cancel is a refusal — and the two axes keep SEPARATE revert
+        targets, or backing out of one modal silently moves the other
+        control."""
+        b = self.report.get("brws") or {}
+        self.assertEqual(b.get("valueAfterCancel"), "ask",
+                         "cancel must restore the PREVIOUS rung")
+        self.assertTrue(b.get("closedAfterCancel"))
+        self.assertEqual(b.get("desktopAfter"), b.get("desktopBefore"),
+                         "the desktop picker must not move")
+
+    def test_the_site_list_is_offered_at_every_live_rung(self):
+        """With no sites Chrome reaches nothing, so the field is the
+        difference between a working capability and a dead one — unlike the
+        desktop allowlist, which only means something at one rung."""
+        b = self.report.get("brws") or {}
+        self.assertTrue(b.get("sitesHiddenWhenOff"))
+        self.assertTrue(b.get("sitesShownForRead"))
+        self.assertTrue(b.get("sitesShownForAsk"))
+
+    def test_the_browser_payload_and_restore_are_honest(self):
+        b = self.report.get("brws") or {}
+        self.assertEqual(b.get("sites"),
+                         ["https://a.test/*", "https://b.test/*"],
+                         "blank entries dropped, each pattern trimmed")
+        self.assertEqual(b.get("restored"), "read")
+        self.assertEqual(b.get("restoredSites"), "https://a.test/*")
+        # A chat saved before browser control existed, and a junk value, both
+        # read as OFF — the one direction that must never happen by accident.
+        self.assertEqual(b.get("restoredLegacy"), "off")
+        self.assertEqual(b.get("restoredJunk"), "off")
+
+    def test_the_advisory_ceiling_appears_only_where_it_is_true(self):
+        """The rungs enforce at Read only and Ask first. At Workspace and Full
+        access the seat holds a shell and can go around them, so the app says
+        so rather than letting the picker imply otherwise."""
+        a = self.report.get("adv") or {}
+        self.assertTrue(a.get("hiddenWhenSupervised"))
+        self.assertTrue(a.get("shownAtFull"))
+        self.assertIn("guard against accident", a.get("textAtFull") or "")
+        self.assertIn("enforced inside Chrome", a.get("textAtFull") or "")
+        self.assertTrue(a.get("hiddenWhenBothOff"),
+                        "no ladder on means nothing to caveat")
+
+    def test_read_only_says_the_axes_are_inert_rather_than_weak(self):
+        """Measured with a real seat: read_only emits --permission-mode plan
+        and claude answers every MCP call with "Cannot call ... while in plan
+        mode", so the engine registers nothing at all."""
+        a = self.report.get("adv") or {}
+        self.assertTrue(a.get("shownAtReadOnly"))
+        text = a.get("textAtReadOnly") or ""
+        self.assertIn("get none of this", text)
+        self.assertIn("Raise the permission mode", text)
 
     def test_the_desktop_payload_and_restore_are_honest(self):
         d = self.report.get("desk") or {}

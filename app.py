@@ -1145,10 +1145,16 @@ class Api:
                            if port else "Could not bind a local port."})
                 return
             self._webhook = srv
+            # Tell the browser fence which port is Alloy's own front door, so
+            # a site pattern aimed at it is refused by NAME rather than only
+            # by the blanket loopback rule. The live port, not the configured
+            # one: `port: 0` means the OS picked it.
+            relay.WEBHOOK_PORT = srv.port
             self.emit("webhook_status", {"running": True, "url": srv.url,
                                          "token": token or ""})
         else:
             srv, self._webhook = self._webhook, None
+            relay.WEBHOOK_PORT = None
             if srv is not None:
                 srv.stop()
             self.emit("webhook_status", {"running": False})
@@ -1156,6 +1162,7 @@ class Api:
     def webhook_stop_all(self):
         """Shutdown path: release the socket so the process can exit."""
         srv, self._webhook = self._webhook, None
+        relay.WEBHOOK_PORT = None
         if srv is not None:
             try:
                 srv.stop()
@@ -2530,6 +2537,35 @@ class Api:
         desktop = relay.normalize_desktop(cfg.get("desktop"))
         desktop_allowlist = [str(p) for p in (cfg.get("desktop_allowlist") or ())
                              if str(p).strip()]
+        # Browser control — a THIRD axis, bounding the open web. The rung is
+        # CLAMPED against the site list here rather than taken as typed: a
+        # pattern Alloy refuses (file:, chrome:, Alloy's own webhook port)
+        # must not leave an unattended run believing its boundary is wider
+        # than it is, and a list with nothing usable must not offer clicking
+        # on a browser that can reach nothing.
+        browser = relay.normalize_browser(cfg.get("browser"))
+        browser_sites = [str(p) for p in (cfg.get("browser_sites") or ())
+                         if str(p).strip()]
+        # Collected here (the rung is needed before `started`, to build the
+        # agents) and SAID after it, as persisted system rows — so a reopened
+        # chat still shows why its boundary is what it is.
+        browser_notes = []
+        if browser != "off":
+            kept_sites, rejected_sites = relay.browser_site_report(browser_sites)
+            asked = browser
+            browser = relay.clamp_browser_rung(browser, browser_sites)
+            for pattern, why in rejected_sites:
+                browser_notes.append("Alloy refused the browser site %r: %s"
+                                     % (pattern, why))
+            if not kept_sites:
+                browser_notes.append(
+                    "No usable browser sites, so Chrome can reach nothing at "
+                    "all. Add a site to make browsing possible.")
+            if browser != asked:
+                browser_notes.append(
+                    "Browser control lowered from %r to %r for this chat."
+                    % (relay.BROWSER_RUNGS[asked]["label"],
+                       relay.BROWSER_RUNGS[browser]["label"]))
         mode, recipe, orchestration_adjustments = _app_orchestration_config(
             cfg, turns, until_done=until_done, ceiling=ceiling)
         if mode not in MODES:
@@ -2655,8 +2691,25 @@ class Api:
                     role=s.get("role") or None,
                     role_instructions=s.get("role_instructions") or None,
                     connectors=connectors,
-                    desktop=desktop, desktop_allowlist=desktop_allowlist))
+                    desktop=desktop, desktop_allowlist=desktop_allowlist,
+                    browser=browser, browser_sites=browser_sites))
             providers = [s["provider"] for s in picked]
+            # A room with no Claude seat accepts the desktop/browser pickers,
+            # the site list and the unattended acknowledgement — and delivers
+            # nothing, because only claude's build_cmd registers those servers.
+            # Recorded as a row rather than left to be discovered.
+            unreachable = relay.axis_unreachable_note(providers, desktop=desktop,
+                                                      browser=browser)
+            if unreachable:
+                browser_notes.append(unreachable)
+            # ...and the same for a permission rung that makes them
+            # uncallable. The servers are correctly not registered; this is
+            # what stops that being silent while the picker still shows the
+            # rung Josh chose.
+            blocked = relay.axis_blocked_by_permission_note(
+                permission, desktop=desktop, browser=browser)
+            if blocked:
+                browser_notes.append(blocked)
 
             # Full opener text is the title — the rail ellipsizes in CSS and uses
             # the rest as a tooltip, so truncating here would throw it away.
@@ -2674,6 +2727,7 @@ class Api:
                 "permission_grants": [],
                 "connectors": connectors,
                 "desktop": desktop, "desktop_allowlist": desktop_allowlist,
+                "browser": browser, "browser_sites": browser_sites,
                 "turns": turns, "store": store, "ended": False,
                 "pending": {i: [] for i in range(len(agents))},
                 "introduced": [False] * len(agents),
@@ -2745,6 +2799,12 @@ class Api:
         def brief_status_row(text):
             store.system(text, round=0)
             self.emit("status", {"text": text})
+
+        # Every browser-fence correction, as a row rather than a badge: the
+        # site list is the one control here that is actually enforcing, so a
+        # change Alloy made to it has to survive a reopen.
+        for note in browser_notes:
+            brief_status_row(note)
 
         brief = project_brief(workspace, self._session_dir,
                               spec=helper_spec([s.get("provider")

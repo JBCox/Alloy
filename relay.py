@@ -39,6 +39,11 @@ import uuid
 from outcome import write_outcome
 import retro
 import workstreams
+# The browser proxy is also a standalone server run as its own process, but
+# the relay imports it for ONE thing: the site-pattern classifier. Spelling
+# that rule twice is how the fence Josh configures and the fence Chrome
+# receives drift apart, and only one of them is enforcing.
+import browser_mcp
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSIONS_DIR = os.path.join(BASE_DIR, "sessions")
@@ -632,6 +637,12 @@ def desktop_capability_clause(agent):
     """
     if not desktop_enabled(agent):
         return []
+    # Same second gate as the browser clause, and for the same measured
+    # reason: at `read_only` build_cmd registers nothing, because claude
+    # refuses every MCP call in plan mode. A note gated only on the rung
+    # promises a seat control of the screen while it cannot make one call.
+    if agent.desktop_server_spec() is None:
+        return []
     rung = normalize_desktop(agent.desktop)
     seeing = ("SEEING AND CONTROLLING WINDOWS ON JOSH'S DESKTOP (read a "
               "window's controls, click, type, scroll, press keys)")
@@ -642,6 +653,276 @@ def desktop_capability_clause(agent):
                 "else waits for him"]
     return [seeing + " — every click or keystroke waits for Josh to approve "
             "it, so do not plan a long unattended sequence of them"]
+
+
+# ------------------------------------------------- browser control ------
+# A THIRD axis, sibling to `permission` and `desktop` rather than folded into
+# either. `permission` bounds the workspace, `desktop` bounds Josh's screen,
+# and this bounds the open web — three different promises, so three ladders,
+# three approval channels and three watchers. Off by default, and off is the
+# reading of anything unrecognised.
+#
+# The load-bearing control here is NOT this ladder. It is the site fence,
+# which is a Chrome flag (`--allowedUrlPattern`) enforced inside Chrome's own
+# network stack: it blocks navigations AND subresources and survives
+# `evaluate_script`, which walks straight through any allowlist applied at the
+# tool layer. See browser_mcp.py's header for the four measured rules.
+BROWSER_RUNGS = {
+    "off": {
+        "label": "Off",
+        "blurb": "Seats cannot open a browser at all. (Default.)",
+    },
+    "read": {
+        "label": "Look only",
+        "blurb": ("Seats may open and read pages on the sites you list. No "
+                  "clicking, typing or scripting. Opening a page is still a "
+                  "real request, so a link that acts by itself still acts."),
+    },
+    "ask": {
+        "label": "Ask before acting",
+        "blurb": ("As Look only, plus clicking and typing — and every one of "
+                  "those waits for you."),
+    },
+    "full": {
+        "label": "Unattended",
+        "blurb": ("Seats act on the listed sites with no prompt, including "
+                  "overnight. The site list is still the hard boundary."),
+    },
+}
+BROWSER_ORDER = ("off", "read", "ask", "full")
+DEFAULT_BROWSER = "off"
+# Tools reach the model as mcp__<this>__<tool>, so it is part of the
+# allowlist spelling and must differ from DESKTOP_SERVER — one --mcp-config
+# carries both, and two servers under one key would silently be one server.
+BROWSER_SERVER = "alloy_browser"
+_BROWSER_ALIASES = {
+    "none": "off", "no": "off", "disabled": "off", "false": "off", "": "off",
+    "look": "read", "read-only": "read", "read_only": "read",
+    "readonly": "read", "browse": "read", "view": "read", "observe": "read",
+    "on": "ask", "ask-first": "ask", "ask_first": "ask", "prompt": "ask",
+    "approve": "ask", "supervised": "ask", "interact": "ask",
+    "unattended": "full", "yolo": "full", "always": "full", "true": "full",
+}
+
+
+def normalize_browser(value, default=DEFAULT_BROWSER):
+    """Anything a human, a saved meta or a CLI flag can carry -> one rung.
+
+    Same fail-closed rule as `normalize_desktop`: never raises, and an
+    unrecognised value is OFF rather than `default`, because the failure mode
+    to avoid is a typo handing a seat the open web.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return "full" if value else "off"
+    key = str(value).strip().lower().replace(" ", "_")
+    if key in BROWSER_RUNGS:
+        return key
+    return _BROWSER_ALIASES.get(key.replace("_", "-"),
+                                _BROWSER_ALIASES.get(key, "off"))
+
+
+def browser_enabled(agent):
+    """True when this seat should be handed the browser server at all."""
+    return normalize_browser(getattr(agent, "browser", None)) != "off"
+
+
+# The port Alloy's own webhook is listening on RIGHT NOW, or None. Set by
+# app.py when the server binds and cleared when it stops -- a live value, not
+# a config one, because the webhook usually takes an ephemeral port and the
+# thing worth refusing is the socket that actually exists. When nothing is
+# listening there is nothing to aim at, and the loopback rule plus webhook.py's
+# own JSON-only check still stand.
+WEBHOOK_PORT = None
+
+
+def browser_site_report(sites, webhook_port=None):
+    """(kept, rejected) for a configured site list, through ONE classifier.
+
+    Delegated to browser_mcp so the patterns Josh sees judged in the UI and
+    the patterns Chrome is actually handed cannot disagree.
+    """
+    if webhook_port is None:
+        webhook_port = WEBHOOK_PORT
+    return browser_mcp.classify_sites(list(sites or ()),
+                                      webhook_port=webhook_port)[:2]
+
+
+def clamp_browser_rung(rung, sites, webhook_port=None):
+    """The rung a conversation may actually run at, given its site list.
+
+    Two clamps, both because a fence Josh mis-wrote must never become one he
+    did not ask for:
+
+    * A REJECTED pattern caps the rung at `ask`. The pattern itself is dropped
+      and said out loud, but dropping alone is not enough — an unattended run
+      would then proceed against a boundary he thinks is wider than it is.
+    * NO usable patterns caps the rung at `read`. Chrome can reach nothing, so
+      offering to click on it would be theatre.
+    """
+    rung = normalize_browser(rung)
+    if rung == "off":
+        return rung
+    kept, rejected = browser_site_report(sites, webhook_port)
+    if not kept:
+        return "read"
+    if rejected and rung == "full":
+        return "ask"
+    return rung
+
+
+# The providers whose adapter actually DELIVERS an MCP server. Only claude's
+# build_cmd reads the server specs, so only claude seats ever receive desktop
+# or browser tools. Spelled once, here, because the honest sentence a room
+# needs ("nothing in this room can use it") has to come from the same fact
+# build_cmd uses, not from a hand-kept list that drifts.
+MCP_DELIVERING_PROVIDERS = ("claude",)
+
+
+def axis_blocked_by_permission_note(permission, desktop=None, browser=None):
+    """One sentence when an access axis is on and the PERMISSION rung makes it
+    uncallable, or "" when there is nothing to say.
+
+    Measured, not assumed: `read_only` emits `--permission-mode plan`, and
+    claude refuses every MCP call in plan mode. The servers are therefore not
+    registered at all — which is honest, and silently so. This is the sentence
+    that makes it audible, because the picker Josh set is still showing the
+    rung he chose.
+    """
+    if normalize_permission(permission) != "read_only":
+        return ""
+    axes = []
+    if normalize_desktop(desktop) != "off":
+        axes.append("Desktop control")
+    if normalize_browser(browser) != "off":
+        axes.append("Browser control")
+    if not axes:
+        return ""
+    return ("%s %s set, but this conversation's permission mode is Read only "
+            "and Claude refuses every one of those tools in its read-only "
+            "mode. Nothing was handed to the seats. Raise the permission mode "
+            "to use %s."
+            % (" and ".join(axes), "are" if len(axes) > 1 else "is",
+               "them" if len(axes) > 1 else "it"))
+
+
+def axis_unreachable_note(providers, desktop=None, browser=None):
+    """One sentence when an access axis is on and NOTHING in the room can use
+    it, or "" when there is nothing to say.
+
+    Without this a GPT+Gemini room can set Browser control to Unattended, type
+    a site list, tick the acknowledgement modal — and the run is byte-identical
+    to browser=off, with every Josh-facing string still saying "Seats". Being
+    told a capability landed where it did not is exactly the failure the
+    capability contract exists to prevent; it just happens one level up, at
+    the room rather than the seat.
+    """
+    if any(p in MCP_DELIVERING_PROVIDERS for p in (providers or ())):
+        return ""
+    axes = []
+    if normalize_desktop(desktop) != "off":
+        axes.append("Desktop control")
+    if normalize_browser(browser) != "off":
+        axes.append("Browser control")
+    if not axes:
+        return ""
+    plural = len(axes) > 1
+    return ("%s %s set, but no seat in this room can use %s: only Claude "
+            "seats are handed those tools today. The %s recorded and will "
+            "apply if you add a Claude seat."
+            % (" and ".join(axes), "are" if plural else "is",
+               "them" if plural else "it",
+               "settings are" if plural else "setting is"))
+
+
+def browser_capability_clause(agent):
+    """The capability_note fragment for browser control — [] when off.
+
+    Same hard contract as the rest of that note: it describes what build_cmd
+    ACTUALLY hands this seat. It names the SITES as well as the rung, because
+    a peer deciding who should take a task needs to know the seat can reach
+    three domains rather than the web.
+    """
+    if not browser_enabled(agent):
+        return []
+    # The rung is not enough. `browser_server_spec()` has a SECOND way to
+    # return None — chrome-devtools-mcp not being on disk — and on such a
+    # machine build_cmd registers no server and the seat holds zero browser
+    # tools. A note gated only on the rung would then tell every peer this
+    # seat is driving Chrome while it cannot open a page, which is exactly
+    # the over-claim this whole contract exists to stop.
+    if agent.browser_server_spec() is None:
+        return []
+    rung = normalize_browser(agent.browser)
+    kept, _rejected = browser_site_report(getattr(agent, "browser_sites", ()))
+    _k2, _r2, loopback = browser_mcp.classify_sites(
+        list(getattr(agent, "browser_sites", ()) or ()))
+    where = (", ".join(kept) if kept else
+             "NOTHING — no sites are allowlisted, so the browser opens but "
+             "reaches nowhere")
+    seeing = "USING A REAL CHROME BROWSER, limited to %s" % where
+    if not kept:
+        return [seeing]
+    # Scripting disappears when a listed site could reach loopback, and that
+    # is the dev-server case — i.e. the rungs where it matters most. A peer
+    # routing "run this in the page" work has to know.
+    no_script = (" (it cannot run scripts in the page in this conversation)"
+                 if loopback else "")
+    if rung == "full":
+        return [seeing + " (reading pages and acting on them, no prompt)"
+                + no_script]
+    if rung == "ask":
+        return [seeing + " — reading pages is free, but every click or "
+                "keystroke waits for Josh, so do not plan a long unattended "
+                "sequence of them" + no_script]
+    return [seeing + " — reading pages ONLY: it cannot click, type or run "
+            "scripts, so hand interactive web work to someone else. Opening a "
+            "page is still a real request, so do not fetch a URL that acts by "
+            "itself"]
+
+
+def advisory_rung_note(agent):
+    """The honest ceiling on the desktop and browser ladders — or [].
+
+    Both ladders are ENFORCING controls only while this seat's `permission` is
+    `read_only` or `ask`. At `auto` and `full` the seat holds a shell, and a
+    shell can drive UIA directly, launch its own unfenced Chrome, or answer
+    the approval files this process writes — none of which pass through a
+    rung at all. Verified 2026-08-26: a proof-of-concept forged 5 of 5 desktop
+    approvals from a seat's own shell and Josh was asked 0 times.
+
+    So Alloy says it instead of implying otherwise. The alternative — letting
+    "ask" read as a constraint on a full-access seat — is the over-claim this
+    repo has already been bitten by twice, and `capability_note` exists
+    precisely to stop it.
+
+    What stays enforcing at EVERY permission level is the browser's site
+    fence, because it lives inside Chrome, in a process the seat cannot write
+    to. That is why it is named here.
+    """
+    ladders = []
+    if desktop_enabled(agent):
+        ladders.append("desktop")
+    if browser_enabled(agent):
+        ladders.append("browser")
+    if not ladders:
+        return []
+    if agent.effective_permission() not in ("auto", "full"):
+        return []
+    which = " and ".join(ladders)
+    # NOT "the site list still holds". It bounds the Chrome ALLOY spawned; a
+    # seat with a shell reaches any site with curl or a browser of its own.
+    # Saying otherwise hands back, in the last clause, exactly the over-claim
+    # the first clause just gave up — and a seat would read it as "the site
+    # list is the one thing I cannot get around".
+    tail = (" The site list still bounds the browser Alloy runs, but it does "
+            "not bound a shell." if "browser" in ladders else "")
+    return ["NOTE: because this conversation runs at %s access, the %s "
+            "approval settings are a guardrail against accident rather than "
+            "a boundary — a shell can go around them.%s"
+            % (PERMISSION_LEVELS[agent.effective_permission()]["label"],
+               which, tail)]
 
 
 # The four answers an approval modal offers. Order is the button order, and
@@ -809,7 +1090,8 @@ class Agent:
                  role=None, role_instructions=None, connectors=False,
                  permission=None, on_approval=None, lean=False, turn_cap=None,
                  desktop=None, on_desktop_approval=None,
-                 desktop_allowlist=None):
+                 desktop_allowlist=None,
+                 browser=None, on_browser_approval=None, browser_sites=None):
         self.workspace = workspace
         # DESKTOP CONTROL — a SEPARATE axis from `permission`, deliberately.
         # The permission ladder is about the workspace; this one is about
@@ -824,6 +1106,17 @@ class Agent:
         # Config, not a runtime button: the thing a standing grant must never
         # be is something a waiting run can talk him into.
         self.desktop_allowlist = list(desktop_allowlist or ())
+        # BROWSER CONTROL — a THIRD axis, for the same reason desktop is a
+        # second one. `on_browser_approval` is its own callback and
+        # `browser_dir()` its own directory: three channels, three watchers,
+        # three verdicts, so an answer Josh gave about a file write can never
+        # approve a click on a web page and vice versa.
+        self.browser = normalize_browser(browser)
+        self.on_browser_approval = on_browser_approval
+        # URLPatterns, not regexes, and not window titles: they are handed
+        # verbatim to Chrome, which does the enforcing. Config set up front,
+        # never a runtime button.
+        self.browser_sites = list(browser_sites or ())
         # PERMISSION LEVEL. The single source of truth for what this seat may
         # do; `yolo` survives only as the legacy way of saying "full" and as a
         # read-only property below, so every existing caller, saved meta and
@@ -966,6 +1259,17 @@ class Agent:
         """
         if not desktop_enabled(self):
             return None
+        if self.effective_permission() == "read_only":
+            # MEASURED 2026-08-26 with a real seat: read_only emits
+            # `--permission-mode plan`, and claude refuses every MCP call in
+            # it -- "Cannot call mcp__alloy_desktop__new_page while in plan
+            # mode." No allowlist can lift that. Registering anyway would
+            # advertise the tools, promise them in capability_note (which
+            # gates on this returning a spec) and deliver a seat that cannot
+            # make one call. Not registering is the honest answer, and it is
+            # per-TURN, so a conversation that drops into plan mode for a
+            # drafting turn gets it back afterwards.
+            return None
         exe = sys.executable or ""
         base, name = os.path.split(exe)
         if name.lower() == "pythonw.exe":
@@ -987,6 +1291,120 @@ class Agent:
         return {"command": exe,
                 "args": [os.path.join(BASE_DIR, "desktop_mcp.py")],
                 "env": env}
+
+    # ------------------------------------------------- browser control ----
+    def browser_dir(self):
+        """The browser server's OWN request dir — a THIRD directory.
+
+        Not `approval_dir()` and not `desktop_dir()`, for the reason spelled
+        out on desktop_dir: separate directories mean separate watchers mean
+        separate verdicts, and neither a standing "rest of this turn" nor an
+        answer about a desktop window may approve an action on a web page.
+        """
+        d = os.path.join(tempfile.gettempdir(), "alloy-browser", self.uid)
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def browser_server_spec(self):
+        """The MCP server definition for this seat, or None when off.
+
+        Everything the proxy is allowed to do rides in `env`, never in a tool
+        argument — the model writes the arguments. `ALLOY_BROWSER_VENDOR` is
+        PINNED here rather than resolved in the child, because the installed
+        1.7.0 advertises 1.8.0 on every startup and a surface that moves under
+        a curated republish is exactly what must not happen silently.
+        """
+        if not browser_enabled(self):
+            return None
+        if self.effective_permission() == "read_only":
+            # MEASURED 2026-08-26 with a real seat: read_only emits
+            # `--permission-mode plan`, and claude refuses every MCP call in
+            # it -- "Cannot call mcp__alloy_browser__new_page while in plan
+            # mode." No allowlist can lift that. Registering anyway would
+            # advertise the tools, promise them in capability_note (which
+            # gates on this returning a spec) and deliver a seat that cannot
+            # make one call. Not registering is the honest answer, and it is
+            # per-TURN, so a conversation that drops into plan mode for a
+            # drafting turn gets it back afterwards.
+            return None
+        vendor = browser_mcp.find_vendor()
+        if not vendor:
+            # Nothing to proxy. Registering a server that cannot start would
+            # hand the seat a capability note it cannot honour.
+            return None
+        exe = sys.executable or ""
+        base, name = os.path.split(exe)
+        if name.lower() == "pythonw.exe":
+            console = os.path.join(base, "python.exe")
+            if os.path.isfile(console):
+                exe = console
+        kept, _rejected = browser_site_report(self.browser_sites)
+        env = {
+            "ALLOY_BROWSER_RUNG": normalize_browser(self.browser),
+            "ALLOY_BROWSER_APPROVAL_DIR": self.browser_dir(),
+            "ALLOY_BROWSER_SEAT": self.name or "a seat",
+            # The RAW list, not the kept one: the proxy re-classifies so its
+            # instructions can name each rejection, and one classifier means
+            # the two can never disagree about what Chrome was handed.
+            "ALLOY_BROWSER_SITES": json.dumps(list(self.browser_sites)),
+            "ALLOY_BROWSER_VENDOR": vendor,
+            # node by ABSOLUTE path. An MCP client is free to hand a stdio
+            # server only the env the config names, so a bare "node" is a
+            # capability that works from the app and fails from somewhere
+            # else with a message about a missing file. Pinned like the
+            # vendor, and for the same reason.
+            "ALLOY_BROWSER_NODE": shutil.which("node") or "node",
+            # For confining `upload_file` — the one published tool that READS
+            # a path off this machine.
+            "ALLOY_BROWSER_WORKSPACE": self.workspace or "",
+            "ALLOY_APP_PID": str(os.getpid()),
+        }
+        port = WEBHOOK_PORT
+        if port:
+            # So a pattern aimed at Alloy's own front door is refused by name
+            # rather than merely by the loopback rule.
+            env["ALLOY_BROWSER_WEBHOOK_PORT"] = str(port)
+        return {"command": exe,
+                "args": [os.path.join(BASE_DIR, "browser_mcp.py")],
+                "env": env}
+
+    def _watch_browser(self, stop):
+        """Answer browser approval requests for the duration of one turn.
+
+        A third near-twin of `_watch_approvals`, and deliberately not shared
+        with either sibling: like the desktop watcher it consults no standing
+        verdict and offers no session-scoped grant, because those are the two
+        things that turn "allowed once" into a licence.
+        """
+        d = self.browser_dir()
+        while not stop.is_set():
+            try:
+                names = [n for n in os.listdir(d) if n.endswith(".req")]
+            except OSError:
+                names = []
+            for name in sorted(names):
+                path = os.path.join(d, name)
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        req = json.load(fh)
+                    os.remove(path)
+                except (OSError, ValueError):
+                    continue
+                req["seat"] = self.name
+                allow, reason = False, "Alloy could not ask Josh; declining."
+                try:
+                    verdict = (self.on_browser_approval(req, stop.is_set)
+                               if self.on_browser_approval else None)
+                    if isinstance(verdict, tuple):
+                        allow, reason = bool(verdict[0]), (verdict[1] or reason)
+                    elif verdict is not None:
+                        allow = bool(verdict)
+                        reason = ("Josh approved this." if allow
+                                  else "Josh declined this.")
+                except Exception as e:
+                    allow, reason = False, f"Alloy approval failed ({e})."
+                self._write_answer(d, req, allow, reason)
+            stop.wait(0.2)
 
     def _watch_desktop(self, stop):
         """Answer desktop approval requests for the duration of one turn.
@@ -1217,6 +1635,14 @@ class Agent:
             desktop_stop = threading.Event()
             threading.Thread(target=self._watch_desktop, args=(desktop_stop,),
                              daemon=True).start()
+        # A THIRD watcher, and only for the one rung that prompts: `read`
+        # refuses every mutator without asking anybody and `full` asks nobody,
+        # so a watcher there would sit idle for the whole turn.
+        browser_stop = None
+        if normalize_browser(self.browser) == "ask":
+            browser_stop = threading.Event()
+            threading.Thread(target=self._watch_browser, args=(browser_stop,),
+                             daemon=True).start()
         try:
             rc, stdout, stderr = self._run_streaming(cmd, env, on_line)
         except TurnCancelled:
@@ -1250,6 +1676,8 @@ class Agent:
                 approvals.set()
             if desktop_stop is not None:
                 desktop_stop.set()
+            if browser_stop is not None:
+                browser_stop.set()
             self._turn_approved = False
             self._turn_denial_reason = ""
             self._turn_verdict = None
@@ -1604,8 +2032,19 @@ class ClaudeAgent(Agent):
         # mcp_servers [('alloy_desktop','connected')] and exactly one mcp__
         # tool, while an empty config reported zero servers and zero tools out
         # of the 8 servers / 59 mcp__ tools this machine otherwise has.
+        #
+        # Browser control rides the identical mechanism under its own key. Two
+        # servers in one config is still a whitelist, and the two must never
+        # share a name: `{"mcpServers": {...}}` is a dict, so a shared key
+        # would silently be ONE server and the other capability would vanish
+        # while its capability note kept promising it.
+        extra = {}
         spec = self.desktop_server_spec()
-        extra = {DESKTOP_SERVER: spec} if spec else {}
+        if spec:
+            extra[DESKTOP_SERVER] = spec
+        spec = self.browser_server_spec()
+        if spec:
+            extra[BROWSER_SERVER] = spec
         if not self.connectors:
             # Whitelist: exactly the desktop server, which may be none at all.
             cmd += ["--strict-mcp-config",
@@ -1616,10 +2055,36 @@ class ClaudeAgent(Agent):
             # the connectors he switched on would silently disappear.
             cmd += ["--mcp-config", json.dumps({"mcpServers": extra})]
         if extra:
+            # Every server that got registered, not just the first one: an
+            # append that named one of two would auto-approve one capability
+            # and leave the other prompting on every call at rung `auto`.
+            #
+            # And APPEND-OR-ADD, not append-or-nothing. `--allowedTools=` is
+            # emitted only by the `auto` branch, so the loop below used to
+            # no-op at every other rung -- and `--allowedTools` is the ONE
+            # thing that gates MCP (the 2026-08-17 measurement). MEASURED
+            # 2026-08-26 with a real seat at `ask`: every call came back
+            # "Claude requested permissions to use mcp__alloy_browser__…, but
+            # you haven't granted it yet", i.e. a capability that registered,
+            # advertised its tools, promised itself in capability_note and
+            # could not be called once.
+            #
+            # Naming ONLY the two server prefixes keeps the ask rung intact:
+            # Write/Edit/Bash still route through the approval hook. These two
+            # are exempt because they have their OWN watcher and their own
+            # answer from Josh -- routing them through the tool-approval path
+            # as well is precisely what the separate-axis rule forbids.
+            # `full` needs nothing (--dangerously-skip-permissions bypasses
+            # every check) and `read_only` never gets here, because the specs
+            # refuse to build under plan mode at all.
+            names = ",".join("mcp__" + key for key in sorted(extra))
             for i, part in enumerate(cmd):
                 if str(part).startswith("--allowedTools="):
-                    cmd[i] = part + ",mcp__" + DESKTOP_SERVER
+                    cmd[i] = part + "," + names
                     break
+            else:
+                if self.effective_permission() == "ask":
+                    cmd.append("--allowedTools=" + names)
         return cmd
 
     @staticmethod
@@ -1830,6 +2295,8 @@ class ClaudeAgent(Agent):
         if self.connectors:
             can.append("its connected apps over MCP")
         can += desktop_capability_clause(self)
+        can += browser_capability_clause(self)
+        can += advisory_rung_note(self)
         return (f"{', '.join(can)}. CANNOT generate images "
                 f"(no image tool exists on this CLI)")
 
@@ -3664,6 +4131,8 @@ class SessionStore:
             # reopened chat quietly holding the screen.
             "desktop": normalize_desktop(state.get("desktop")),
             "desktop_allowlist": list(state.get("desktop_allowlist") or ()),
+            "browser": normalize_browser(state.get("browser")),
+            "browser_sites": list(state.get("browser_sites") or ()),
             "turns": state["turns"],
             "rnd": state["rnd"],
             "max": state["max"],
@@ -5077,6 +5546,8 @@ def session_summary(session_dir, meta=None):
         # (a chat saved before desktop control existed) normalizes to "off".
         "desktop": normalize_desktop(meta.get("desktop")),
         "desktop_allowlist": list(meta.get("desktop_allowlist") or ()),
+        "browser": normalize_browser(meta.get("browser")),
+        "browser_sites": list(meta.get("browser_sites") or ()),
         "moderator": meta.get("moderator"),
         "supervisor": meta.get("supervisor"),
         "supervisor_goal": meta.get("supervisor_goal"),
@@ -5334,7 +5805,9 @@ def rehydrate(meta, workspace=None):
             role_instructions=s.get("role_instructions") or None,
             connectors=bool(meta.get("connectors")),
             desktop=meta.get("desktop"),
-            desktop_allowlist=meta.get("desktop_allowlist"))
+            desktop_allowlist=meta.get("desktop_allowlist"),
+            browser=meta.get("browser"),
+            browser_sites=meta.get("browser_sites"))
         a.session_id = s.get("session_id") or None
         agents.append(a)
     return {
@@ -5348,6 +5821,21 @@ def rehydrate(meta, workspace=None):
         "yolo": bool(meta.get("yolo")),
         "permission": permission,
         "permission_grants": list(meta.get("permission_grants") or []),
+        # THE ACCESS AXES HAVE TO COME BACK INTO STATE, not just into the
+        # agents. `SessionStore.save` reads them off STATE, so a resumed chat
+        # whose state lacked them wrote `connectors: false`, `desktop: "off"`
+        # and `browser: "off"` over the real values on its very next save --
+        # and the rail, being fed from that meta, then reported no access for
+        # a chat that still had it, while the NEXT reopen built agents that
+        # genuinely had none. Silent, one-way, and it looked like the setting
+        # had simply been forgotten. Found by an adversarial review of the
+        # browser axis 2026-08-26; `connectors` and `desktop` had been losing
+        # themselves this way since they shipped.
+        "connectors": bool(meta.get("connectors")),
+        "desktop": normalize_desktop(meta.get("desktop")),
+        "desktop_allowlist": list(meta.get("desktop_allowlist") or ()),
+        "browser": normalize_browser(meta.get("browser")),
+        "browser_sites": list(meta.get("browser_sites") or ()),
         "turns": meta.get("turns", 10),
         "rnd": meta.get("rnd", 0),
         "max": meta.get("max", meta.get("rnd", 0)),
@@ -10315,6 +10803,41 @@ def run_rounds(state, io):
 
         agent.on_desktop_approval = ask_desktop
 
+    # Browser control, wired the same way and for the same reason: it is a
+    # third axis, so it gets a third callback rather than sharing either of
+    # the two above.
+    for i, agent in enumerate(state.get("agents") or ()):
+        if not browser_enabled(agent):
+            agent.on_browser_approval = None
+            continue
+
+        def ask_browser(req, abort=None, i=i, agent=agent):
+            where = str(req.get("url") or "the current page")
+            payload = {
+                "qid": "browser-" + str(req.get("id") or uuid.uuid4().hex[:8]),
+                "kind": "browser", "speaker": state["slot_ids"][i],
+                "provider": state["providers"][i], "asker": agent.name,
+                "question": f"{agent.name} wants to {req.get('detail') or 'act'}.",
+                "detail": str(req.get("detail") or ""),
+                "window": where,
+                "exe": "",
+                # TWO options, exactly as for desktop and for the same
+                # reason: there is no "rest of this turn" and no "always
+                # allow", because the way to stop being asked is the site
+                # list Josh sets up front, not a button offered to him while
+                # a run is waiting.
+                "options": ["Allow once", "Deny"],
+            }
+            answer = io.ask_human(payload, abort=abort)
+            text = str(answer or "").strip().lower()
+            allowed = text.startswith("allow")
+            return allowed, ("Josh approved this."
+                             if allowed else
+                             "Josh declined this." if text
+                             else "Josh did not answer, so this is declined.")
+
+        agent.on_browser_approval = ask_browser
+
     ended = None
     completion = state.get("completion")
     if not isinstance(completion, dict):
@@ -11902,6 +12425,20 @@ def main():
                     metavar="REGEX", dest="desktop_apps",
                     help="with --desktop allowlist: a pattern matched against "
                          "a window's title or executable. Repeatable")
+    ap.add_argument("--browser", nargs="?", const="ask", default="off",
+                    choices=list(BROWSER_ORDER),
+                    help="let seats drive a real Chrome, limited to the sites "
+                         "named by --browser-site: read (look, never touch), "
+                         "ask (every click waits for you), full (no prompt). "
+                         "Bare --browser means ask. Off by default")
+    ap.add_argument("--browser-site", action="append", default=[],
+                    metavar="URLPATTERN", dest="browser_sites",
+                    help="with --browser: a URL pattern Chrome is allowed to "
+                         "reach, e.g. https://example.com/* — an ALLOWLIST, "
+                         "so anything unlisted (including file:// and this "
+                         "machine's own ports) is blocked inside Chrome. "
+                         "Repeatable; with none given the browser reaches "
+                         "nothing at all")
     ap.add_argument("--workspace", default=None, metavar="PATH",
                     help="run the seats in an existing project folder instead "
                          "of a fresh scratch dir; its AI docs become shared "
@@ -12143,12 +12680,40 @@ def main():
     say_file = os.path.join(session_dir, "say.txt")
 
     turn_cap = int(args.turn_cap * 60) if args.turn_cap else None
+    # The browser rung a run may ACTUALLY use, given the sites it was given.
+    # Said out loud on the way past: a pattern Alloy refused, or a rung it
+    # lowered, must never be something Josh discovers from behaviour.
+    browser_rung = normalize_browser(getattr(args, "browser", None))
+    if browser_rung != "off":
+        _kept, _rejected = browser_site_report(
+            getattr(args, "browser_sites", []))
+        for _pattern, _why in _rejected:
+            print(f"  Refused --browser-site {_pattern!r}: {_why}")
+        browser_rung = clamp_browser_rung(browser_rung,
+                                          getattr(args, "browser_sites", []))
+        if browser_rung != normalize_browser(getattr(args, "browser", None)):
+            print(f"  Browser control lowered to '{browser_rung}' "
+                  f"({BROWSER_RUNGS[browser_rung]['label']}).")
+        if not _kept:
+            print("  No usable --browser-site patterns, so Chrome can reach "
+                  "nothing. Add one to make browsing possible.")
+    for _note in (axis_unreachable_note(
+                      [p for p, _m, _e, _l in seats],
+                      desktop=getattr(args, "desktop", None),
+                      browser=browser_rung),
+                  axis_blocked_by_permission_note(
+                      permission, desktop=getattr(args, "desktop", None),
+                      browser=browser_rung)):
+        if _note:
+            print("  " + _note)
     agents = [AGENT_TYPES[p](workspace, yolo=permission == "full",
                              permission=permission,
                              model=m, effort=e, name=lb,
                              connectors=args.connectors, turn_cap=turn_cap,
                              desktop=getattr(args, "desktop", None),
-                             desktop_allowlist=getattr(args, "desktop_apps", []))
+                             desktop_allowlist=getattr(args, "desktop_apps", []),
+                             browser=browser_rung,
+                             browser_sites=getattr(args, "browser_sites", []))
               for p, m, e, lb in seats]
     for a in agents:  # suffixed/custom labels inherit the provider's color
         COLORS.setdefault(a.name, COLORS.get(type(a).name, ""))
@@ -12259,6 +12824,8 @@ def main():
              "connectors": bool(args.connectors),
              "desktop": normalize_desktop(getattr(args, "desktop", None)),
              "desktop_allowlist": list(getattr(args, "desktop_apps", []) or []),
+             "browser": browser_rung,
+             "browser_sites": list(getattr(args, "browser_sites", []) or []),
              "turns": args.turns,
              "rnd": 0, "max": args.turns, "ended": False, "mode": mode,
              "orchestration": recipe,

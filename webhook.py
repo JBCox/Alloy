@@ -25,6 +25,10 @@ Security posture -- this module's reason to exist:
   an exactly-matching X-Alloy-Token header, compared with
   hmac.compare_digest (never ==, whose early-exit leaks prefix matches by
   timing). GET /health stays open so monitoring probes need no secret.
+- application/json REQUIRED on POST /start (415 otherwise), because a
+  cross-origin page can POST without a preflight only when the Content-Type
+  is one of the three CORS "simple" types -- and loopback is reachable from
+  any browser on this machine, including one a seat is driving.
 - NO TLS, deliberately: loopback traffic never leaves the machine, so
   encrypting it protects nothing against anyone who could already read this
   process's memory. A cert story would only add self-signed-trust mess. If a
@@ -62,6 +66,21 @@ WORKSPACE_MAX = 300           # Windows paths run long; this is generous
 OPTIONAL_KEYS = ("seats", "turns", "workspace")
 TOKEN_HEADER = "X-Alloy-Token"
 ERROR_EXCERPT_MAX = 300       # exception detail allowed into a response body
+# The ONLY media type POST /start accepts. This is not politeness about
+# content negotiation -- it is the second half of the loopback wall.
+#
+# A browser can issue a cross-origin POST with no preflight at all, provided
+# the request is a CORS "simple request", and the rule that makes it simple is
+# the Content-Type: only application/x-www-form-urlencoded, multipart/form-data
+# and text/plain qualify. `application/json` does NOT, so demanding it forces a
+# preflight, and the preflight fails here because nothing serves CORS headers.
+#
+# That matters because loopback is reachable from a page: any browser on this
+# machine -- including one an Alloy seat is driving -- can POST to
+# 127.0.0.1. Without this check a web page could start conversations in Alloy
+# through Alloy's own front door, which is the self-approval class one surface
+# over. Measured 2026-08-26 as part of the browser-use design.
+CONTENT_TYPE = "application/json"
 
 _NOT_FOUND = "Not found."
 
@@ -232,6 +251,19 @@ class _Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
                 return self._send_json(
                     401, {"error": "Missing or wrong %s header." % TOKEN_HEADER})
+
+        # Content-Type next, still before a byte of body is read -- see the
+        # CONTENT_TYPE constant for why this is a security check and not a
+        # nicety. Parameters are fine ("application/json; charset=utf-8"); the
+        # type itself must match exactly, and a MISSING header is refused too:
+        # a form POST sends x-www-form-urlencoded and a fetch() with no
+        # explicit header sends text/plain, so accepting "absent" would hand
+        # the simple-request path straight back.
+        ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0]
+        if ctype.strip().lower() != CONTENT_TYPE:
+            self.close_connection = True
+            return self._send_json(
+                415, {"error": "The body must be sent as %s." % CONTENT_TYPE})
 
         try:
             length = int(self.headers.get("Content-Length") or "")

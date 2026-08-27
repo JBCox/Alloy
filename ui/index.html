@@ -723,7 +723,7 @@
     font: 11px "Cascadia Mono", Consolas, monospace; padding: 1px 7px;
   }
   #acctModal, #roleModal, #askModal, #skillModal, #contModal, #kbdModal,
-  #hooksModal, #roomsModal, #deskModal {
+  #hooksModal, #roomsModal, #deskModal, #brwsModal {
     position: fixed; inset: 0; z-index: 50; display: none;
     align-items: flex-start; justify-content: center; padding-top: 9vh;
     background: rgba(10,8,14,.6);
@@ -747,10 +747,10 @@
   #roomEmpty { color: var(--muted); font-size: 12px; padding: 10px 0 4px; }
   #acctModal.show, #roleModal.show, #askModal.show, #skillModal.show,
   #contModal.show, #kbdModal.show, #hooksModal.show, #roomsModal.show,
-  #deskModal.show { display: flex; }
-  #deskModal .modal { width: min(560px, 94vw); border-left: 3px solid var(--danger); }
-  #deskModal ul { margin: 10px 0 0; padding-left: 18px; line-height: 1.65; }
-  #deskModal li { margin-bottom: 4px; }
+  #deskModal.show, #brwsModal.show { display: flex; }
+  #deskModal .modal, #brwsModal .modal { width: min(560px, 94vw); border-left: 3px solid var(--danger); }
+  #deskModal ul, #brwsModal ul { margin: 10px 0 0; padding-left: 18px; line-height: 1.65; }
+  #deskModal li, #brwsModal li { margin-bottom: 4px; }
   .hook-row { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
   .hook-row label {
     width: 120px; flex: none; font-family: Bahnschrift, sans-serif;
@@ -1975,6 +1975,20 @@
                placeholder="Notepad$, \.exe$ — window title or program, comma separated">
       </div>
       <div class="yolo-note" id="desktopNote" hidden></div>
+      <label class="check-div" for="browserMode">Browser control — a real Chrome, only where you say</label>
+      <select id="browserMode" title="Locked once the conversation starts">
+        <option value="off" selected>Off — seats cannot open a browser</option>
+        <option value="read">Look only — no clicking or typing</option>
+        <option value="ask">Ask before acting</option>
+        <option value="full">Unattended — no prompts</option>
+      </select>
+      <div id="browserSites" hidden>
+        <input id="browserSiteList" type="text" spellcheck="false"
+               placeholder="https://example.com/* — allowed sites, comma separated">
+        <div class="yolo-note">Chrome is blocked from everything not listed, including your files and this machine's own ports. Leave it empty and it reaches nothing.</div>
+      </div>
+      <div class="yolo-note" id="browserNote" hidden></div>
+      <div class="yolo-note danger" id="rungAdvisory" hidden></div>
     </div>
 
     <button id="skillBtn" title="Write skills once and give them to every seat; manage MCP servers">
@@ -2267,6 +2281,36 @@
     <div class="modal-foot">
       <button class="btn-sm" id="deskCancel">Cancel</button>
       <button class="btn-sm primary" id="deskOk" disabled>Turn it on</button>
+    </div>
+  </div>
+</div>
+
+<div id="brwsModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Unattended browser control</h2>
+      <button class="close" id="brwsClose" title="Cancel" aria-label="Cancel">✕</button>
+    </div>
+    <div id="contWarn">
+      <b>The seats will click and type on the sites you listed, with no prompt.</b>
+      A real Chrome, on your machine, driven while you are away.
+      <ul>
+        <li>Anything a visitor to those sites could do, a seat can do — submit
+            forms, post, buy, delete.</li>
+        <li>The site list is the boundary and it is a hard one: Chrome blocks
+            every address not on it, including your own files. That still does
+            not limit what happens <i>inside</i> a listed site.</li>
+        <li>A fresh, empty browser profile is used, so nothing you are signed
+            into elsewhere carries over.</li>
+      </ul>
+    </div>
+    <label class="check-row" style="margin-top:14px">
+      <input type="checkbox" id="brwsAck">
+      I understand these seats can act on the listed sites unattended.
+    </label>
+    <div class="modal-foot">
+      <button class="btn-sm" id="brwsCancel">Cancel</button>
+      <button class="btn-sm primary" id="brwsOk" disabled>Turn it on</button>
     </div>
   </div>
 </div>
@@ -5377,6 +5421,8 @@ function setSeated(on) {
   // mid-chat would show a promise the running seats cannot honour.
   $("desktopMode").disabled = seated;
   $("desktopAppList").disabled = seated;
+  $("browserMode").disabled = seated;
+  $("browserSiteList").disabled = seated;
   if (!seated) normalizePolicyControls();
 }
 
@@ -5989,6 +6035,7 @@ document.addEventListener("keydown", e => {
     closeContinuous(); closeKbd(); closeHooks();
     // false = refused, so Escape reverts the picker like Cancel does
     if ($("deskModal").classList.contains("show")) closeDeskModal(false);
+    if ($("brwsModal").classList.contains("show")) closeBrwsModal(false);
     closeModeMenu();                   // the composer's own popover
     if ($("findBar") && !$("findBar").hidden) findClose();
     if (micOn) micStop(true);          // a live mic is the one thing Escape must kill
@@ -6592,6 +6639,8 @@ async function sendSay() {
     connectors: $("connectors").checked, workspace: customFolder,
     desktop: $("desktopMode").value,
     desktop_allowlist: desktopAppList(),
+    browser: $("browserMode").value,
+    browser_sites: browserSiteList(),
     brief: $("projBrief").checked,
     mode: orchestration.legacy_mode,
     orchestration,
@@ -7043,7 +7092,50 @@ function syncPermissionNote() {
   $("permissionNote").textContent = PERMISSION_NOTES[mode] || "";
   $("permissionNote").classList.toggle("danger", mode === "full");
   syncPermPickLabel();
+  syncRungAdvisory();
   if (!activeId) renderPermissionHud(mode, false);
+}
+/* The honest ceiling on the desktop and browser ladders, shown only where
+   it is TRUE. Both are enforcing controls while the permission mode is
+   Read only or Ask first. At Workspace and Full access the seat holds a
+   shell, and a shell can drive the desktop directly or launch its own
+   unfenced Chrome without passing through a rung at all -- verified
+   2026-08-26, when a proof of concept forged five desktop approvals out of
+   five and Josh was asked none of the times. Letting "Ask every time" read
+   as a constraint it is not is the over-claim this app has already been
+   bitten by twice, so it is stated rather than implied.
+
+   A function declaration, not a const: syncPermissionNote calls it and
+   runs at boot, and the one thing that silently deletes the rest of this
+   script is reading a `let`/`const` binding before its line executes. */
+function syncRungAdvisory() {
+  const perm = $("permissionMode").value;
+  const on = [];
+  if ($("desktopMode").value !== "off") on.push("desktop");
+  if ($("browserMode").value !== "off") on.push("browser");
+  const box = $("rungAdvisory");
+  if (!on.length) { box.hidden = true; box.textContent = ""; return; }
+  // Read only is the other end of the same honesty problem: there the axes
+  // are not weak, they are INERT. Claude refuses every MCP tool in its
+  // read-only (plan) mode, so the engine registers nothing at all — measured
+  // with a real seat. Without this the picker keeps showing a rung that was
+  // never handed to anybody.
+  if (perm === "read_only") {
+    box.textContent = "At Read only the seats get none of this: Claude "
+      + "refuses " + on.join(" and ") + " tools in its read-only mode, so "
+      + "nothing is handed to them. Raise the permission mode to use it.";
+    box.hidden = false;
+    return;
+  }
+  const loose = perm === "auto" || perm === "full";
+  if (!loose) { box.hidden = true; box.textContent = ""; return; }
+  box.textContent = "At this permission mode the seats already have a shell, "
+    + "so the " + on.join(" and ") + " approval settings above are a guard "
+    + "against accident rather than a boundary."
+    + (on.includes("browser")
+       ? " The list of allowed sites is enforced inside Chrome and does hold."
+       : "");
+  box.hidden = false;
 }
 /* ---------- permission mode picker (composer bottom bar) ---------- */
 const PERM_MODES = [
@@ -7114,6 +7206,7 @@ function syncDesktopNote() {
   $("desktopNote").textContent = note;
   $("desktopNote").hidden = !note;
   $("desktopApps").hidden = mode !== "allowlist";
+  syncRungAdvisory();
 }
 /* Put the control back to what a chat or room actually ran with. Anything
    unrecognised — including a missing key from a chat saved before desktop
@@ -7159,6 +7252,90 @@ $("deskCancel").onclick = () => closeDeskModal(false);
 $("deskClose").onclick = () => closeDeskModal(false);
 $("deskModal").onclick = e => {
   if (e.target === $("deskModal")) closeDeskModal(false);
+};
+
+/* ---------- browser control ---------- */
+/* A THIRD axis: the permission pill bounds the working folder, desktop
+   control bounds Josh's screen, this bounds the open web. Same shape as the
+   block above -- its own prev-value, its own acknowledgement modal, Cancel
+   REVERTS -- and deliberately its own `browserPrev`, because a shared revert
+   target would make cancelling one modal move the other picker.
+
+   The site list is the part that actually enforces: it becomes a Chrome flag
+   (`--allowedUrlPattern`) checked inside the browser's network stack, so it
+   holds against a page's own scripts. The rung on top of it only decides
+   whether Josh is asked. That is why the list is visible at every live rung
+   rather than only at one, unlike the desktop allowlist. */
+const BROWSER_NOTES = {
+  off: "",
+  read: "Seats can open and read the sites below. No clicking, typing or "
+      + "scripting — but opening a page is still a real request, so a "
+      + "link that acts by itself still acts.",
+  ask: "Seats can read the sites below freely; every click or keystroke "
+     + "waits for you.",
+  full: "No prompts at all, including while you are away. The site list is "
+      + "still the hard boundary.",
+};
+let browserPrev = "off";
+
+function browserSiteList() {
+  return ($("browserSiteList").value || "").split(",")
+    .map(s => s.trim()).filter(Boolean);
+}
+function syncBrowserNote() {
+  const mode = $("browserMode").value;
+  const note = BROWSER_NOTES[mode] || "";
+  $("browserNote").textContent = note;
+  $("browserNote").hidden = !note;
+  // Shown at EVERY live rung, not just one: with no sites Chrome reaches
+  // nothing, so the field is the difference between a working capability and
+  // a dead one at read, ask and full alike.
+  $("browserSites").hidden = mode === "off";
+  syncRungAdvisory();
+}
+/* Put the control back to what a chat or room actually ran with. Anything
+   unrecognised -- including a missing key from a chat saved before browser
+   control existed -- reads as OFF, matching relay.normalize_browser. Note the
+   rung restored here is the one the chat RAN at, which the engine may have
+   clamped below what was asked for; showing the asked-for value would be the
+   app claiming a boundary the run never had. */
+function restoreBrowser(mode, sites) {
+  const known = ["off", "read", "ask", "full"];
+  const value = known.includes(mode) ? mode : "off";
+  $("browserMode").value = value;
+  browserPrev = value;
+  $("browserSiteList").value = (sites || []).join(", ");
+  syncBrowserNote();
+}
+function openBrwsModal() {
+  $("brwsAck").checked = false;
+  $("brwsOk").disabled = true;
+  $("brwsModal").classList.add("show");
+}
+function closeBrwsModal(accepted) {
+  $("brwsModal").classList.remove("show");
+  if (!accepted) {
+    $("browserMode").value = browserPrev;
+    syncBrowserNote();
+  }
+}
+$("browserMode").onchange = () => {
+  const mode = $("browserMode").value;
+  if (mode === "full") { openBrwsModal(); return; }
+  browserPrev = mode;
+  syncBrowserNote();
+};
+$("brwsAck").onchange = () => { $("brwsOk").disabled = !$("brwsAck").checked; };
+$("brwsOk").onclick = () => {
+  if (!$("brwsAck").checked) return;
+  browserPrev = "full";
+  closeBrwsModal(true);
+  syncBrowserNote();
+};
+$("brwsCancel").onclick = () => closeBrwsModal(false);
+$("brwsClose").onclick = () => closeBrwsModal(false);
+$("brwsModal").onclick = e => {
+  if (e.target === $("brwsModal")) closeBrwsModal(false);
 };
 
 function openPermMenu() {
@@ -7885,6 +8062,7 @@ async function openChat(id, findQuery, findExcerpt) {
   // out: no brief record means the seats were never given project context
   $("projBrief").checked = !!s.brief;
   restoreDesktop(s.desktop, s.desktop_allowlist);
+  restoreBrowser(s.browser, s.browser_sites);
   const helpers = (s.spawn || {}).max_helpers || 0;
   $("spawnSel").value = [0, 3, 10].includes(helpers) ? String(helpers) : "10";
   const teams = (s.spawn || {}).max_teams || 0;
@@ -8080,6 +8258,8 @@ function roomCfgFromStage() {
     connectors: $("connectors").checked,
     desktop: $("desktopMode").value,
     desktop_allowlist: desktopAppList(),
+    browser: $("browserMode").value,
+    browser_sites: browserSiteList(),
     workspace: customFolder,
     brief: $("projBrief").checked,
     mode: orchestration.legacy_mode,
@@ -8110,6 +8290,7 @@ function applyRoomToStage(room) {
   syncPermissionNote();
   $("connectors").checked = !!cfg.connectors;
   restoreDesktop(cfg.desktop, cfg.desktop_allowlist);
+  restoreBrowser(cfg.browser, cfg.browser_sites);
   setFolder(cfg.workspace || null);
   $("projBrief").checked = !!cfg.brief;
   restoreModerator(cfg.mode === "supervisor" ? cfg.supervisor : cfg.moderator);

@@ -364,6 +364,37 @@ terminal sandbox, and Ox denies `external_directory` so writes land in the
 working folder and nowhere else. **Full access** removes those guardrails on all providers and
 is only for work where arbitrary commands are acceptable.
 
+### Your screen and the web
+
+Two further switches, each independent of the permission profile above — that
+one bounds the *working folder*, these bound your *desktop* and the *open web*.
+Both are off by default, and anything Alloy doesn't recognise reads as off.
+
+**Desktop control** (`--desktop ask|allowlist|full`, or the sidebar picker) lets
+seats read a window's controls and click, type and scroll in it. The pointer
+never moves and windows are never brought to the front. Alloy always refuses its
+own windows and password fields.
+
+**Browser control** (`--browser read|ask|full`) gives a seat a real Chrome,
+limited to the sites you list (`--browser-site "https://example.com/*"`, or the
+box under the picker). The list is an **allowlist enforced inside Chrome**, not a
+suggestion: anything you don't list — including your own files and this machine's
+own ports — is blocked by the browser's network stack, so it holds even against a
+page's own scripts. Leave the list empty and the browser opens but reaches
+nothing. **Look only** reads pages and can't click, type or run scripts (though opening a page is still a real request); **Ask before acting**
+stops for you on every click and keystroke; **Unattended** doesn't stop at all
+and asks you to acknowledge that before it turns on. Chrome runs on a fresh,
+empty profile, so nothing you're signed into elsewhere carries over.
+
+One caveat Alloy states rather than hides: those two ladders are *enforcing*
+controls only while the permission profile is **Read only** or **Ask first**. At
+**Workspace** and **Full access** the seat already has a shell, and a shell can
+go around them. The browser's site list is the exception — it lives inside
+Chrome and holds at every profile. The app says so under the pickers.
+
+Browser and desktop control reach **Claude seats** today; the other CLIs have no
+equivalent per-conversation route, and the seats are told the truth about that.
+
 Seats are also told they may use their own CLI's built-in subagents (Claude's
 Task tool, Codex's multi-agent mode) for small side-tasks inside a turn — but
 only when their configuration actually grants it, so the relay never promises

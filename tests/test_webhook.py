@@ -8,6 +8,7 @@ shared secret this suite invents for its auth tests.
 Run:  python tests/test_webhook.py
 """
 
+import http.client
 import json
 import os
 import socket
@@ -249,6 +250,133 @@ class RejectionTests(WebhookCase):
         self.assertEqual(len(padded), webhook.BODY_MAX)
         status, _ = self.post_start(self.srv, raw=padded)
         self.assertEqual(status, 200)
+
+
+# ----------------------------------------------------------- content type --
+
+class ContentTypeTests(WebhookCase):
+    """POST /start must be application/json, and that is a security check.
+
+    A cross-origin page may POST without a preflight ONLY when the request is
+    a CORS "simple request", and the three media types that qualify are
+    x-www-form-urlencoded, multipart/form-data and text/plain. Demanding
+    application/json therefore forces a preflight that nothing here answers.
+    That matters because loopback is reachable from any browser on this
+    machine, including one an Alloy seat is driving.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.srv, self.cb = self.serve()
+
+    def raw_post(self, ctype):
+        """One POST with an exactly-controlled Content-Type, or none at all.
+
+        Hand-rolled over http.client rather than urllib, because urllib
+        supplies a Content-Type of its own when a body is present -- so the
+        one case that matters most (the header ABSENT) cannot be expressed
+        through the shared helper.
+        """
+        body = json.dumps({"topic": "hello"}).encode("utf-8")
+        conn = http.client.HTTPConnection(self.srv.host, self.srv.port,
+                                          timeout=10)
+        try:
+            conn.putrequest("POST", "/start", skip_host=False,
+                            skip_accept_encoding=True)
+            conn.putheader("Content-Length", str(len(body)))
+            if ctype is not None:
+                conn.putheader("Content-Type", ctype)
+            conn.endheaders()
+            conn.send(body)
+            resp = conn.getresponse()
+            return resp.status, _parse(resp.read())
+        finally:
+            conn.close()
+
+    def test_simple_request_content_types_refused(self):
+        # Exactly the three CORS-simple types a page can send with no
+        # preflight -- the whole reason this check exists.
+        for ctype in ("text/plain",
+                      "text/plain;charset=UTF-8",
+                      "application/x-www-form-urlencoded",
+                      "multipart/form-data; boundary=x"):
+            status, body = self.raw_post(ctype)
+            self.assertEqual(status, 415, ctype)
+            self.assertIn("application/json", body["error"])
+        self.assertEqual(self.cb.payloads, [])
+
+    def test_missing_content_type_refused(self):
+        # Absent must fail too: accepting it would hand the simple-request
+        # path straight back, since a header nobody sent is not one of the
+        # three forbidden strings.
+        status, body = self.raw_post(None)
+        self.assertEqual(status, 415, body)
+        self.assertEqual(self.cb.payloads, [])
+
+    def test_json_with_parameters_accepted(self):
+        # Charset and whitespace are ordinary; only the media type matters.
+        for ctype in ("application/json",
+                      "application/json; charset=utf-8",
+                      "  APPLICATION/JSON  ",
+                      "application/json;charset=UTF-8"):
+            status, _ = self.raw_post(ctype)
+            self.assertEqual(status, 200, ctype)
+        self.assertEqual(len(self.cb.payloads), 4)
+
+    def test_json_lookalikes_refused(self):
+        # A prefix or a suffix is a different media type, not a near miss.
+        for ctype in ("application/json-patch+json", "text/json",
+                      "application/jsonx", "json"):
+            status, _ = self.raw_post(ctype)
+            self.assertEqual(status, 415, ctype)
+
+    def test_wrong_type_refused_before_the_body_is_read(self):
+        # Same rule the auth check follows: a refused request buys no parse
+        # work. A body that would ALSO fail validation must still come back
+        # 415, proving the type was judged first.
+        conn = http.client.HTTPConnection(self.srv.host, self.srv.port,
+                                          timeout=10)
+        try:
+            junk = b"{not json at all"
+            conn.putrequest("POST", "/start")
+            conn.putheader("Content-Type", "text/plain")
+            conn.putheader("Content-Length", str(len(junk)))
+            conn.endheaders()
+            conn.send(junk)
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 415)
+        finally:
+            conn.close()
+
+    def test_health_needs_no_content_type(self):
+        # GET /health stays open: a monitor should need neither a secret nor
+        # a media type to ask whether the process is alive.
+        conn = http.client.HTTPConnection(self.srv.host, self.srv.port,
+                                          timeout=10)
+        try:
+            conn.putrequest("GET", "/health")
+            conn.endheaders()
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            self.assertTrue(_parse(resp.read())["ok"])
+        finally:
+            conn.close()
+
+    def test_auth_still_outranks_content_type(self):
+        # An unauthenticated request must buy nothing at all -- including the
+        # information that its media type was wrong.
+        srv, cb = self.serve(token="s3cret")
+        conn = http.client.HTTPConnection(srv.host, srv.port, timeout=10)
+        try:
+            conn.putrequest("POST", "/start")
+            conn.putheader("Content-Type", "text/plain")
+            conn.putheader("Content-Length", "0")
+            conn.endheaders()
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 401)
+        finally:
+            conn.close()
+        self.assertEqual(cb.payloads, [])
 
 
 # ------------------------------------------------------------------- auth --
