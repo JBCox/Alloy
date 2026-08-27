@@ -368,6 +368,10 @@ const api = new Proxy({}, {
 
 const savedTabs = [], autoResumeNoted = [], continued = [], apiCalls = [];
 const playbookCalls = [];    // W1.5: what set_playbook_rule was asked to do
+const memCalls = [];         // Wave 3: what the memory bridge was asked to do
+// what get_memory / save_memory / forget_memory hand back; the probe swaps it
+let memReply = {scope: 'global', label: '', global_scope: 'global',
+                truncated: false, error: null, entries: []};
 const reactCalls = [];       // W1.7: what react_message was asked to do
 let reactionsReply = {};     // what get_reactions hands a reopened chat
 // undefined = leave the real inline editor alone; anything else is what
@@ -385,6 +389,9 @@ function apiReply(name, args) {
       return {ok: true};
     case 'get_reactions': return reactionsReply;
     case 'get_playbook': return {ok: true};
+    case 'get_memory': memCalls.push([name, args[0]]); return memReply;
+    case 'save_memory':
+    case 'forget_memory': memCalls.push([name].concat(args)); return memReply;
     case 'set_playbook_rule':
       playbookCalls.push(args);
       return playbookReply || {ok: true, rules: []};
@@ -999,6 +1006,92 @@ if (topLevelError) {
       .filter(c => (c.className || '').includes('msg'))
       .map(deepText).filter(t => t.includes('No conversation is running'));
   } catch (e) { more.newTabError = (e && e.stack) || String(e); }
+  // ---- memory: the modal, driven like a user -----------------------------
+  // Wave 3. Three things only an executed page can see: that the row's OWN
+  // scope (not the chat's) is what a Forget sends, that the first click only
+  // ARMS, and that a note's text reaches the DOM as text rather than markup.
+  try {
+    const p = more.mem = {};
+    const modal = byId['memModal'];
+    p.present = !!modal;
+    p.hiddenAtBoot = modal ? !modal.classList.contains('show') : null;
+    memReply = {
+      scope: 'proj-1234abcd', label: 'ai-chat', global_scope: 'global',
+      truncated: false, error: null,
+      entries: [
+        {id: 'm1', kind: 'josh', who: 'Josh', when: '2026-08-27',
+         scope: 'proj-1234abcd', text: 'The gate is <b>run_all</b>.'},
+        {id: 'm2', kind: 'seat', who: null, when: null,
+         scope: 'global', text: 'a global note'},
+      ],
+    };
+    memCalls.length = 0;
+    await ctx.openMemory();
+    p.openCall = memCalls.slice();
+    p.shown = modal.classList.contains('show');
+    const rows = () => [...byId['memList'].children]
+      .filter(c => String(c.className || '').split(/\s+/).includes('mem-row'));
+    p.rowCount = rows().length;
+    p.firstText = deepText(rows()[0]);
+    // a note's text is TEXT: the store is hand-editable, so its content is
+    // arbitrary and must never reach the page as markup. Read off the TEXT
+    // NODE, not the row -- the row's _html is empty either way, so a probe
+    // pointed there passes whether textContent or innerHTML was used.
+    const cell = c => [...c.children].concat(
+      [...c.children].flatMap(k => [...(k.children || [])]))
+      .filter(k => String(k.className || '').split(/\s+/).includes('mem-text'))[0];
+    p.firstTextProp = cell(rows()[0]).textContent || '';
+    p.firstHtmlProp = cell(rows()[0])._html || '';
+    p.scopeLine = deepText(byId['memScope']);
+    // an unattributed seat note says who it was, never borrows the row above
+    p.secondText = deepText(rows()[1]);
+    // the "everywhere" tag only appears inside a PROJECT chat's list
+    p.taggedRows = rows().filter(r => deepText(r).includes('everywhere')).length;
+    p.everywhereOffered = !byId['memEverywhereLbl'].hidden;
+
+    // Forget: first click ARMS, second sends -- and it sends the ROW's scope
+    const del = rows()[1].querySelector('button');
+    memCalls.length = 0;
+    del.onclick();
+    p.armedLabel = del.textContent;
+    p.callsAfterArm = memCalls.slice();
+    await del.onclick();
+    p.callsAfterConfirm = memCalls.slice();
+
+    // Adding: an empty box refuses without calling the bridge
+    memCalls.length = 0;
+    byId['memText'].value = '   ';
+    await ctx.memAdd();
+    p.emptyCalls = memCalls.slice();
+    p.emptyNote = deepText(byId['memNote']);
+    // a real note goes with the checkbox's value and the active chat id
+    byId['memText'].value = 'remember this';
+    byId['memEverywhere'].checked = true;
+    memReply = Object.assign({}, memReply, {note: 'trimmed to 1000 characters'});
+    await ctx.memAdd();
+    p.addCalls = memCalls.slice();
+    p.textCleared = byId['memText'].value === '';
+    // a trim or an eviction is STATED, never silently applied
+    p.addNote = deepText(byId['memNote']);
+
+    // a global-scope chat does not offer the checkbox and tags nothing
+    memReply = {scope: 'global', label: '', global_scope: 'global',
+                truncated: true, error: null,
+                entries: [{id: 'm3', kind: 'josh', who: 'Josh',
+                           when: '2026-08-27', scope: 'global', text: 'g'}]};
+    await ctx.openMemory();
+    p.globalOffersEverywhere = !byId['memEverywhereLbl'].hidden;
+    p.globalTagged = rows().filter(r => deepText(r).includes('everywhere')).length;
+    p.globalScopeLine = deepText(byId['memScope']);
+
+    // an error is shown instead of an empty list pretending nothing is stored
+    memReply = {error: 'Memory could not be read: disk on fire'};
+    await ctx.openMemory();
+    p.errorNote = deepText(byId['memNote']);
+
+    ctx.closeMemory();
+    p.closed = !modal.classList.contains('show');
+  } catch (e) { more.memError = (e && e.stack) || String(e); }
   // ---- the keyboard shortcuts cheat sheet, driven like a user -------------
   // The overlay's whole contract: exists, hidden until asked for, the toggle
   // opens AND closes it, and Escape closes it through the REAL document
@@ -2719,6 +2812,116 @@ class UiBootTests(unittest.TestCase):
     def test_escape_clears_the_search_outright(self):
         self.assertEqual(self.report.get("valueAfterEscape"), "")
         self.assertTrue(self.report.get("railRestoredAfterEscape"))
+
+    # ---- memory modal (Wave 3) ---------------------------------------------
+    def _mem(self):
+        self.assertIsNone(self.report.get("memError"),
+                          "memory probe threw: %s" % self.report.get("memError"))
+        return self.report["mem"]
+
+    def test_the_memory_modal_exists_and_starts_hidden(self):
+        m = self._mem()
+        self.assertTrue(m["present"])
+        self.assertTrue(m["hiddenAtBoot"])
+        self.assertTrue(m["shown"])
+        self.assertTrue(m["closed"])
+
+    def test_opening_it_asks_the_bridge_for_THIS_chats_memory(self):
+        self.assertEqual(self._mem()["openCall"], [["get_memory", None]])
+
+    def test_a_notes_text_reaches_the_page_as_text_not_markup(self):
+        # the store is a hand-editable markdown file, so its content is
+        # arbitrary and a note containing tags must render as those tags
+        m = self._mem()
+        self.assertIn("The gate is <b>run_all</b>.", m["firstText"])
+        # the two halves together: the tags arrive as TEXT, and nothing was
+        # ever handed to innerHTML. Asserting only the first passes either
+        # way, because the stub's deepText reads both properties.
+        self.assertEqual(m["firstTextProp"], "The gate is <b>run_all</b>.")
+        self.assertEqual(m["firstHtmlProp"], "")
+
+    def test_an_unattributed_note_says_who_rather_than_borrowing(self):
+        self.assertIn("a seat", self._mem()["secondText"])
+        self.assertIn("undated", self._mem()["secondText"])
+
+    def test_a_project_chat_marks_which_notes_come_from_everywhere(self):
+        m = self._mem()
+        self.assertIn("ai-chat", m["scopeLine"])
+        self.assertEqual(m["rowCount"], 2)
+        self.assertEqual(m["taggedRows"], 1)
+        self.assertTrue(m["everywhereOffered"])
+
+    def test_a_global_chat_offers_no_scope_choice_and_tags_nothing(self):
+        # with one scope in play the checkbox would be a control that does
+        # nothing and the tag would be on every row
+        m = self._mem()
+        self.assertFalse(m["globalOffersEverywhere"])
+        self.assertEqual(m["globalTagged"], 0)
+        self.assertIn("no project folder", m["globalScopeLine"])
+
+    def test_a_truncated_store_says_so_in_the_modal_too(self):
+        self.assertIn("too large to read in full", self._mem()["globalScopeLine"])
+
+    def test_forget_arms_before_it_sends_and_sends_the_ROWS_scope(self):
+        # the list mixes two files; deleting by id alone would have to guess
+        m = self._mem()
+        self.assertEqual(m["armedLabel"], "Really forget?")
+        self.assertEqual(m["callsAfterArm"], [])
+        self.assertEqual(m["callsAfterConfirm"],
+                         [["forget_memory", "m2", "global", None]])
+
+    def test_an_empty_note_is_refused_without_calling_the_bridge(self):
+        m = self._mem()
+        self.assertEqual(m["emptyCalls"], [])
+        self.assertIn("Type something", m["emptyNote"])
+
+    def test_adding_sends_the_text_the_scope_choice_and_the_chat(self):
+        m = self._mem()
+        self.assertEqual(m["addCalls"],
+                         [["save_memory", "remember this", True, None]])
+        self.assertTrue(m["textCleared"])
+
+    def test_a_trim_or_an_eviction_is_stated_rather_than_silent(self):
+        self.assertIn("trimmed", self._mem()["addNote"])
+
+    def test_an_unreadable_store_shows_the_error_not_an_empty_list(self):
+        self.assertIn("disk on fire", self._mem()["errorNote"])
+
+    def test_the_memory_modal_is_registered_in_all_three_places(self):
+        # miss one and it is invisible, or Escape leaves it open
+        with open(UI, encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("#statsModal, #memModal {", src)
+        self.assertIn("#memModal.show { display: flex; }", src)
+        self.assertIn("closeStats(); closeMemory();", src)
+
+    def test_every_sidebar_button_is_in_the_shared_style_rule(self):
+        """Found in a real browser, invisible everywhere else.
+
+        The sidebar buttons are styled by ONE id-list selector, and both
+        #statsBtn (shipped 2026-08-27) and #memBtn were left out of it -- so
+        they rendered as raw browser defaults, Arial on white with a square
+        2px black border, among four styled siblings. No text-level test and
+        no node harness can see that; only getComputedStyle on a real page
+        can. This reads the ids straight out of the <aside> so the NEXT
+        button is caught by the same check.
+        """
+        with open(UI, encoding="utf-8") as f:
+            src = f.read()
+        # the bottom action group, anchored on the last thing above it --
+        # indentation is not consistent enough to select on, and the buttons
+        # higher in the aside (stop, new tab, the rounds steppers) are styled
+        # by their own rules
+        aside = src.split("<aside", 1)[1].split("</aside>", 1)[0]
+        aside = aside.split('id="rungAdvisory"', 1)[1]
+        ids = re.findall(r'<button id="(\w+)"', aside)
+        self.assertIn("memBtn", ids)
+        self.assertIn("statsBtn", ids)
+        # keep the anchor IN the slice, or #acctBtn reads as missing from
+        # the very rule it opens
+        rule = "#acctBtn, " + src.split("#acctBtn, ", 1)[1].split("{", 1)[0]
+        missing = [i for i in ids if "#" + i not in rule]
+        self.assertEqual(missing, [], "sidebar buttons with no shared style")
 
     # ---- spawn-lineage tree (t6) -------------------------------------------
     def _lineage(self):

@@ -535,10 +535,13 @@ class UiTests(unittest.TestCase):
         self.assertNotIn("book-directive\">' +", body)
 
     def test_the_modal_is_registered_in_all_three_places(self):
-        # miss one and it is invisible, or Escape leaves it open
-        self.assertIn("#deskModal, #brwsModal, #statsModal {", self.ui)
-        self.assertIn("#brwsModal.show, #statsModal.show { display: flex; }",
-                      self.ui)
+        # miss one and it is invisible, or Escape leaves it open. The two
+        # selector lists GROW as modals are added (memory joined them in Wave
+        # 3), so these pin #statsModal's place in each list rather than the
+        # whole line -- a whole-line pin fails for the next modal too, which
+        # teaches people to loosen the test instead of reading it.
+        self.assertIn("#deskModal, #brwsModal, #statsModal,", self.ui)
+        self.assertIn("#brwsModal.show, #statsModal.show,", self.ui)
         self.assertIn("closeHooks(); closeStats();", self.ui)
 
 

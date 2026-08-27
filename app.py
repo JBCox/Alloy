@@ -25,6 +25,7 @@ import speaker
 import webhook as webhook_mod
 import export as export_mod
 import fork as fork_mod
+import memory as memory_mod
 import outcome
 import relay
 import retro as retro_mod
@@ -1600,6 +1601,83 @@ class Api:
     # recheck_auth shape: answer {"ok": True} at once, work on a worker
     # thread, and deliver the truth as an event. A bridge-thread scan of 300
     # session folders would freeze the window.
+
+    # ------------------------------------------------------------ memory --
+    # Bounded file I/O only -- a few hundred short notes -- so these answer on
+    # the BRIDGE thread like get_skills/save_skill, not through the
+    # recheck_auth worker shape that get_stats needs for its uncapped scan.
+
+    def _memory_scope(self, chat_id=None):
+        """This chat's memory scope, or the global one when no chat is open.
+
+        The modal can be opened before any conversation exists, and a global
+        scope is a true answer there -- Josh's own notes reach every chat. It
+        is NOT _active_workspace's rule relaxed: an unknown chat_id still must
+        never resolve to the FOCUSED chat's project, so this uses the same
+        lookup and falls back to `global`, never to whatever is on screen.
+        """
+        run = self._runs.get(chat_id) if chat_id else self._runs.focused()
+        if run is None:
+            return memory_mod.GLOBAL_SCOPE, ""
+        ws = (run.state or {}).get("workspace") or run.view_workspace
+        return relay.memory_scope_for(run.session_dir or "", ws or "")
+
+    def _memory_payload(self, scope, label):
+        got = memory_mod.collect(relay.MEMORY_DIR, scope)
+        return {"scope": scope, "label": label, "entries": got["entries"],
+                "truncated": bool(got.get("truncated")),
+                "error": got.get("error"),
+                "global_scope": memory_mod.GLOBAL_SCOPE}
+
+    def get_memory(self, chat_id=None):
+        """Exactly what this chat's seats are shown, each row tagged with the
+        file it came from."""
+        try:
+            scope, label = self._memory_scope(chat_id)
+            return self._memory_payload(scope, label)
+        except Exception as e:
+            return {"error": relay.error_excerpt(e)}
+
+    def save_memory(self, text, everywhere=False, chat_id=None):
+        """Josh's own note. `everywhere` forces the global scope.
+
+        The picker is the ONLY way a josh-global note can be written from a
+        project chat, and without it the crossing rule that carries his notes
+        into every project would be reachable from scratch chats alone.
+        """
+        try:
+            scope, label = self._memory_scope(chat_id)
+            target = memory_mod.GLOBAL_SCOPE if everywhere else scope
+            got = memory_mod.remember(relay.MEMORY_DIR, target, text,
+                                      kind=memory_mod.KIND_JOSH, who="Josh")
+            if "error" in got:
+                return {"error": got["error"]}
+            out = self._memory_payload(scope, label)
+            out.update(ok=True, id=got["id"], note=got.get("note") or "")
+            return out
+        except Exception as e:
+            return {"error": relay.error_excerpt(e)}
+
+    def forget_memory(self, entry_id, scope=None, chat_id=None):
+        """Remove one note. The scope must be one this chat can actually see.
+
+        Checked rather than trusted: the id and the scope both arrive from
+        the page, and an unchecked scope would let a stray value reach any
+        project's file -- the one operation here that cannot be undone.
+        """
+        try:
+            own, label = self._memory_scope(chat_id)
+            target = scope or own
+            if target not in (own, memory_mod.GLOBAL_SCOPE):
+                return {"error": "That note does not belong to this chat."}
+            got = memory_mod.forget(relay.MEMORY_DIR, target, entry_id)
+            if "error" in got:
+                return {"error": got["error"]}
+            out = self._memory_payload(own, label)
+            out.update(ok=True, removed=got["removed"])
+            return out
+        except Exception as e:
+            return {"error": relay.error_excerpt(e)}
 
     def get_stats(self):
         """Cross-session totals, per provider and per model."""

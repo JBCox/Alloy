@@ -744,7 +744,13 @@
     color: var(--muted); user-select: all; overflow-wrap: anywhere;
   }
   .btn-sm.danger { border-color: var(--danger); color: var(--danger); }
-  #acctBtn, #skillBtn, #roomsBtn, #soundBtn, #hooksBtn {
+  /* EVERY sidebar button belongs in this list. #statsBtn was left out when
+     it shipped and rendered as a raw browser default -- Arial, white, square,
+     2px black border -- among five styled ones, which no text-level test and
+     no node harness can see, only getComputedStyle on a real page. There is
+     now a test that reads the button ids straight out of the <aside> and
+     checks each one appears here. */
+  #acctBtn, #skillBtn, #memBtn, #statsBtn, #roomsBtn, #soundBtn, #hooksBtn {
     width: 100%; display: flex; align-items: center; gap: 8px;
     background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
     color: var(--text); padding: 9px 12px; margin-top: 16px; cursor: pointer;
@@ -752,18 +758,22 @@
     text-transform: uppercase;
   }
   #skillBtn { margin-top: 16px; font-size: 11px; }
+  #memBtn { margin-top: 6px; font-size: 11px; }
+  #statsBtn { margin-top: 6px; font-size: 11px; }
   #roomsBtn { margin-top: 6px; font-size: 11px; }
   #soundBtn { margin-top: 6px; font-size: 11px; }
   #soundBtn.off { color: var(--muted); }
   #hooksBtn { margin-top: 6px; font-size: 11px; }
   #acctBtn { margin-top: 6px; }
-  #acctBtn:hover, #skillBtn:hover, #roomsBtn:hover, #soundBtn:hover, #hooksBtn:hover { border-color: rgba(255,255,255,.25); }
+  #acctBtn:hover, #skillBtn:hover, #memBtn:hover, #statsBtn:hover,
+  #roomsBtn:hover, #soundBtn:hover,
+  #hooksBtn:hover { border-color: rgba(255,255,255,.25); }
   #acctBadge {
     margin-left: auto; background: var(--danger); color: #fff; border-radius: 999px;
     font: 11px "Cascadia Mono", Consolas, monospace; padding: 1px 7px;
   }
   #acctModal, #roleModal, #askModal, #skillModal, #contModal, #kbdModal,
-  #hooksModal, #roomsModal, #deskModal, #brwsModal, #statsModal {
+  #hooksModal, #roomsModal, #deskModal, #brwsModal, #statsModal, #memModal {
     position: fixed; inset: 0; z-index: 50; display: none;
     align-items: flex-start; justify-content: center; padding-top: 9vh;
     background: rgba(10,8,14,.6);
@@ -787,10 +797,44 @@
   #roomEmpty { color: var(--muted); font-size: 12px; padding: 10px 0 4px; }
   #acctModal.show, #roleModal.show, #askModal.show, #skillModal.show,
   #contModal.show, #kbdModal.show, #hooksModal.show, #roomsModal.show,
-  #deskModal.show, #brwsModal.show, #statsModal.show { display: flex; }
+  #deskModal.show, #brwsModal.show, #statsModal.show,
+  #memModal.show { display: flex; }
   #deskModal .modal, #brwsModal .modal { width: min(560px, 94vw); border-left: 3px solid var(--danger); }
   #deskModal ul, #brwsModal ul { margin: 10px 0 0; padding-left: 18px; line-height: 1.65; }
   #deskModal li, #brwsModal li { margin-bottom: 4px; }
+  /* ---------- memory ---------- */
+  #memModal .modal { width: min(620px, 94vw); }
+  #memScope { color: var(--muted); font-size: 12px; line-height: 1.6; margin-bottom: 8px; }
+  #memScope b { color: var(--text); font-weight: 600; }
+  #memAddRow { margin-bottom: 10px; }
+  #memText {
+    width: 100%; box-sizing: border-box; background: var(--surface);
+    color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+    padding: 7px 9px; font: 13px inherit; resize: vertical;
+  }
+  #memAddFoot {
+    display: flex; align-items: center; gap: 10px; margin-top: 6px;
+  }
+  #memEverywhereLbl {
+    flex: 1; color: var(--muted); font-size: 12px; display: flex;
+    align-items: center; gap: 6px; cursor: pointer;
+  }
+  #memNote { color: var(--danger); font-size: 11px; min-height: 15px; margin-bottom: 4px; }
+  #memEmpty { color: var(--muted); font-size: 12px; padding: 10px 0 4px; }
+  #memList { max-height: 46vh; overflow-y: auto; }
+  .mem-row {
+    display: flex; align-items: flex-start; gap: 8px; padding: 8px 0;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+  }
+  .mem-row:last-child { border-bottom: none; }
+  .mem-body { flex: 1; min-width: 0; }
+  .mem-text { white-space: pre-wrap; word-break: break-word; font-size: 13px; }
+  .mem-meta { color: var(--muted); font-size: 10px; margin-top: 3px; }
+  .mem-tag {
+    border: 1px solid var(--line); border-radius: 999px; padding: 0 5px;
+    margin-left: 5px;
+  }
+  .mem-row .mem-del { flex: none; }
   /* ---------- stats + playbook ---------- */
   #stHead, #bookHead {
     color: var(--muted); font-size: 12px; line-height: 1.6; margin-bottom: 10px;
@@ -2153,6 +2197,9 @@
     <button id="skillBtn" title="Write skills once and give them to every seat; manage MCP servers">
       <span>Skills &amp; Connections</span>
     </button>
+    <button id="memBtn" title="What Alloy remembers between sessions — your notes, what the seats recorded, and what past runs delivered">
+      <span>Memory</span>
+    </button>
     <button id="statsBtn" title="What every provider has actually cost, how long it took, how much came from cache — and the playbook those outcomes derived">
       <span>Stats &amp; playbook</span>
     </button>
@@ -2378,6 +2425,27 @@
     </div>
 
     <div id="connPane" hidden></div>
+  </div>
+</div>
+
+<div id="memModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Memory</h2>
+      <button class="close" id="memClose" title="Close" aria-label="Close">✕</button>
+    </div>
+    <div id="memNote" hidden></div>
+    <div id="memScope"></div>
+    <div id="memAddRow">
+      <textarea id="memText" rows="2" maxlength="1000" spellcheck="false"
+                placeholder="Something worth remembering next time — a preference, a fact, a decision"></textarea>
+      <div id="memAddFoot">
+        <label id="memEverywhereLbl"><input type="checkbox" id="memEverywhere"> Remember everywhere, not just here</label>
+        <button class="btn-sm" id="memAddBtn">Remember</button>
+      </div>
+    </div>
+    <div id="memList"></div>
+    <div id="memEmpty" hidden>Nothing remembered yet. Notes written here are given to every seat at the start of a chat.</div>
   </div>
 </div>
 
@@ -6450,6 +6518,112 @@ $("stTabStats").onclick = () => statsTab("stats");
 $("stTabBook").onclick = () => statsTab("book");
 $("statsModal").onclick = e => { if (e.target === $("statsModal")) closeStats(); };
 
+/* ---------- memory ---------- */
+// What Alloy carries between sessions. The list is exactly what the SEATS are
+// shown (the same collect() the preamble uses), not a raw read of one file --
+// a project chat is also given Josh's global notes, and a viewer that hid
+// them would answer a different question than "what do they know".
+let memRows = [], memScopeId = "", memGlobalId = "global";
+
+function setMemNote(text) {
+  const n = $("memNote");
+  n.hidden = !text; n.textContent = text || "";
+}
+function memWho(e) {
+  if (e.who) return e.who;
+  return e.kind === "josh" ? "Josh" : e.kind === "structural" ? "Alloy" : "a seat";
+}
+function renderMemory(p) {
+  if (p && p.error) { setMemNote(p.error); return; }
+  memRows = (p && p.entries) || [];
+  memScopeId = (p && p.scope) || "";
+  memGlobalId = (p && p.global_scope) || "global";
+  const label = p && p.label;
+  const head = $("memScope");
+  head.innerHTML = "";
+  head.appendChild(document.createTextNode(
+    label ? "Given to every seat working in "
+          : "Given to every seat, everywhere — this chat has no project folder."));
+  if (label) {
+    const b = document.createElement("b");
+    b.textContent = label;
+    head.appendChild(b);
+    head.appendChild(document.createTextNode("."));
+  }
+  if (p && p.truncated) {
+    const t = document.createElement("div");
+    t.textContent = "The notes file was too large to read in full, so there may be more.";
+    head.appendChild(t);
+  }
+  // the checkbox only means something where the two scopes differ
+  $("memEverywhereLbl").hidden = !label;
+  const list = $("memList");
+  list.innerHTML = "";
+  $("memEmpty").hidden = memRows.length > 0;
+  memRows.forEach(e => {
+    const row = document.createElement("div");
+    row.className = "mem-row";
+    const body = document.createElement("div");
+    body.className = "mem-body";
+    const txt = document.createElement("div");
+    txt.className = "mem-text";
+    txt.textContent = e.text || "";
+    const meta = document.createElement("div");
+    meta.className = "mem-meta";
+    meta.textContent = memWho(e) + " · " + (e.when || "undated") + " · " + e.id;
+    if (label && e.scope === memGlobalId) {
+      const tag = document.createElement("span");
+      tag.className = "mem-tag";
+      tag.textContent = "everywhere";
+      meta.appendChild(tag);
+    }
+    body.appendChild(txt); body.appendChild(meta);
+    const del = document.createElement("button");
+    del.className = "btn-sm danger mem-del";
+    del.textContent = "Forget";
+    del.onclick = () => memForget(del, e);
+    row.appendChild(body); row.appendChild(del);
+    list.appendChild(row);
+  });
+}
+async function memForget(btn, e) {
+  if (!btn.dataset.arm) {
+    btn.dataset.arm = "1"; btn.textContent = "Really forget?";
+    setTimeout(() => {
+      if (btn.dataset.arm) { delete btn.dataset.arm; btn.textContent = "Forget"; }
+    }, 8000);
+    return;
+  }
+  delete btn.dataset.arm; btn.disabled = true;
+  setMemNote("");
+  // the row's OWN scope, never the chat's: the list mixes two files, and
+  // deleting by id alone would have to guess which one
+  renderMemory(await pywebview.api.forget_memory(e.id, e.scope || null, activeId));
+}
+async function memAdd() {
+  const text = $("memText").value.trim();
+  if (!text) { setMemNote("Type something to remember first."); return; }
+  setMemNote("");
+  const p = await pywebview.api.save_memory(text, $("memEverywhere").checked, activeId);
+  if (p && p.error) { setMemNote(p.error); return; }
+  $("memText").value = "";
+  renderMemory(p);
+  // a trim or an eviction is stated, never silently applied
+  if (p && p.note) setMemNote(p.note);
+}
+async function openMemory() {
+  setMemNote("");
+  $("memText").value = "";
+  $("memEverywhere").checked = false;
+  $("memModal").classList.add("show");
+  renderMemory(await pywebview.api.get_memory(activeId));
+}
+function closeMemory() { $("memModal").classList.remove("show"); }
+$("memBtn").onclick = openMemory;
+$("memClose").onclick = closeMemory;
+$("memAddBtn").onclick = memAdd;
+$("memModal").onclick = e => { if (e.target === $("memModal")) closeMemory(); };
+
 /* ---------- skills & connections ---------- */
 // Skills are folders holding SKILL.md, and the format is identical for all
 // three CLIs — so one skill written here installs verbatim everywhere. The
@@ -6943,7 +7117,7 @@ $("kbdModal").onclick = e => { if (e.target === $("kbdModal")) closeKbd(); };
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
     closeAccounts(); closeRole(); hideAsk(); closeSkills(); closeRooms();
-    closeContinuous(); closeKbd(); closeHooks(); closeStats();
+    closeContinuous(); closeKbd(); closeHooks(); closeStats(); closeMemory();
     // false = refused, so Escape reverts the picker like Cancel does
     if ($("deskModal").classList.contains("show")) closeDeskModal(false);
     if ($("brwsModal").classList.contains("show")) closeBrwsModal(false);

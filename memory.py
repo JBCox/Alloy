@@ -515,12 +515,21 @@ def collect(root, scope, cross_global=True):
     entries = list(data["entries"])
     errors = [data["error"]] if data.get("error") else []
     truncated = bool(data.get("truncated"))
+    # Each entry carries the scope it came FROM, because this list mixes two
+    # files and a caller that deletes by id alone would have to guess which
+    # one -- and guessing wrong either misses or, with a hand-copied id, hits
+    # the other project's note.
+    for e in entries:
+        e["scope"] = scope
     if cross_global and scope != GLOBAL_SCOPE:
         g = load(root, GLOBAL_SCOPE)
         if g.get("error"):
             errors.append(g["error"])
         truncated = truncated or bool(g.get("truncated"))
-        entries += [e for e in g["entries"] if e.get("kind") == KIND_JOSH]
+        for e in g["entries"]:
+            if e.get("kind") == KIND_JOSH:
+                e["scope"] = GLOBAL_SCOPE
+                entries.append(e)
     # Two stable passes rather than one clever key: newest first WITHIN a
     # kind needs the date descending and the kind ascending, and Python's sort
     # cannot mix directions in one tuple without inverting the string by hand.

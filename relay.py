@@ -4533,6 +4533,7 @@ CLEAR_NOTE = ("(Josh cleared your context: you are rejoining the conversation "
 HELP_TEXT = ("Commands: /clear [seat] · /compact [seat] · /next <seat> · "
              "/stats · "
              "/files [N] · "
+             "/remember <note> · /forget <id> · /memory · "
              "/retro · /turns N · "
              "/ceiling N (until-done chats) · "
              "/checkin · /objective <text> · /limits (Keep Improving) · "
@@ -5782,6 +5783,101 @@ def memory_record(state, root=None):
     return {"status": "ok" if got["entries"] else "none", "scope": scope,
             "label": label, "entries": got["entries"],
             "truncated": bool(got.get("truncated")), "error": None}
+
+
+def memory_scope_label(state):
+    """How to name this chat's memory scope in a sentence Josh reads."""
+    _scope, label = memory_scope(state)
+    return "this project (%s)" % label if label else "everywhere"
+
+
+def format_memories(state, limit=None):
+    """/memory's answer: exactly what the seats are shown, and where from.
+
+    Deliberately the same collect() the preamble uses rather than a plain
+    read of one file, because the question Josh is really asking is "what do
+    they know", and a project chat is also shown his global notes.
+    """
+    mem = memory_record(state)
+    if mem["status"] == "failed":
+        return "Memory could not be read: %s" % mem["error"]
+    project = memory_scope(state)[1]
+    where = memory_scope_label(state)
+    total = len(mem["entries"])
+    if not total:
+        return ("Nothing is remembered for %s yet. /remember <note> writes "
+                "one." % where)
+    rows = mem["entries"] if limit is None else mem["entries"][:limit]
+    lines = ["Remembered for %s (%d note%s):"
+             % (where, total, "" if total == 1 else "s")]
+    for e in rows:
+        who = e.get("who") or memory_store._WHO_FALLBACK.get(e.get("kind"),
+                                                             "unknown")
+        # only worth marking inside a PROJECT chat, where the list mixes two
+        # files; in a global chat every row is global and the tag is noise
+        tag = (", everywhere"
+               if project and e.get("scope") == memory_store.GLOBAL_SCOPE
+               else "")
+        lines.append("  %s  [%s, %s%s] %s"
+                     % (e["id"], who, e.get("when") or "undated", tag,
+                        " ".join((e.get("text") or "").split())[:160]))
+    if len(rows) < total:
+        lines.append("  ... and %d more." % (total - len(rows)))
+    if mem["truncated"]:
+        lines.append("  (The notes file was too large to read in full.)")
+    lines.append("/forget <id> removes one.")
+    return "\n".join(lines)
+
+
+def command_remember(state, text):
+    """/remember <note>. Writes to THIS chat's scope, and says which."""
+    if not text:
+        return ("Usage: /remember <what to remember>. It is kept for %s."
+                % memory_scope_label(state))
+    scope, _label = memory_scope(state)
+    got = memory_store.remember(MEMORY_DIR, scope, text,
+                                kind=memory_store.KIND_JOSH, who="Josh")
+    if "error" in got:
+        return got["error"]
+    return ("Remembered for %s as %s%s"
+            % (memory_scope_label(state), got["id"],
+               (" (%s)" % got["note"]) if got.get("note") else ""))
+
+
+def command_forget(state, arg):
+    """/forget. The arm is STATELESS: an exact id acts, anything else only
+    reports what it resolved to.
+
+    No armed flag anywhere -- an armed delete that survives a reopened chat,
+    a second window, or a crash is a delete waiting to fire at whatever is
+    under the cursor later. Printing the id and requiring it back costs one
+    keystroke and cannot mis-fire.
+    """
+    if not arg:
+        return "Usage: /forget <id> — /memory lists the ids."
+    scope, _label = memory_scope(state)
+    exact = [e for e in memory_store.load(MEMORY_DIR, scope)["entries"]
+             if e["id"] == arg]
+    if not exact and memory_scope(state)[1]:
+        # a global note shown to this chat is forgettable from it, but only
+        # by its exact id -- the same confirmed form, one file over
+        exact = [e for e in memory_store.load(
+            MEMORY_DIR, memory_store.GLOBAL_SCOPE)["entries"]
+            if e["id"] == arg and e.get("kind") == memory_store.KIND_JOSH]
+        if exact:
+            scope = memory_store.GLOBAL_SCOPE
+    if exact:
+        got = memory_store.forget(MEMORY_DIR, scope, arg)
+        return got.get("error") or ("Forgot %s." % arg)
+    hits = memory_store.resolve(MEMORY_DIR, scope, arg)
+    if not hits:
+        return "Nothing in %s matches %r." % (memory_scope_label(state), arg)
+    lines = ["Did you mean:"]
+    for e in hits[:5]:
+        lines.append("  %s  %s" % (e["id"],
+                                   " ".join((e.get("text") or "").split())[:120]))
+    lines.append("Run /forget <id> with one of those exact ids.")
+    return "\n".join(lines)
 
 
 def brief_content_len(brief):
@@ -8202,6 +8298,13 @@ def dispatch_command(state, text, io):
             # minutes would be its own kind of broken.
             state["continuous"]["checkin_now"] = True
             note = "Check-in armed — it runs at the next turn boundary."
+        io.emit("status", {"text": note})
+        state["store"].system(note, round=state["rnd"])
+        state["store"].save(state)
+    elif cmd in ("remember", "forget", "memory"):
+        note = (command_remember(state, arg) if cmd == "remember" else
+                command_forget(state, arg) if cmd == "forget" else
+                format_memories(state))
         io.emit("status", {"text": note})
         state["store"].system(note, round=state["rnd"])
         state["store"].save(state)

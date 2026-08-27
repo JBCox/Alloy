@@ -610,6 +610,243 @@ class InjectionTests(unittest.TestCase):
         self.assertNotIn("What Alloy remembers", without)
 
 
+# --------------------------------------------------- slash commands --------
+class CommandTests(unittest.TestCase):
+    """Driven through the REAL dispatch_command, not the helpers it calls."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="alloy-mem-cmd-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.mem = os.path.join(self.tmp, "memory")
+        old = relay.MEMORY_DIR
+        relay.MEMORY_DIR = self.mem
+        self.addCleanup(setattr, relay, "MEMORY_DIR", old)
+        self.io = RecordingIO()
+
+    def chat(self, project=False):
+        ws = None
+        if project:
+            ws = os.path.join(self.tmp, "myproj")
+            os.makedirs(ws, exist_ok=True)
+        return build_state(self.tmp, [["a"]], turns=1, workspace=ws)
+
+    def cmd(self, state, text):
+        relay.dispatch_command(state, text, self.io)
+        last = self.io.events[-1]
+        self.assertEqual(last[0], "status", last)
+        return last[1]["text"]
+
+    def test_remember_writes_and_names_the_scope_it_wrote_to(self):
+        st = self.chat()
+        got = self.cmd(st, "/remember The gate is run_all.")
+        self.assertIn("Remembered for everywhere", got)
+        self.assertIn("The gate is run_all.",
+                      [e["text"]
+                       for e in memory.load(self.mem, "global")["entries"]])
+
+    def test_a_project_chat_writes_to_its_own_scope(self):
+        st = self.chat(project=True)
+        got = self.cmd(st, "/remember Local fact.")
+        self.assertIn("this project (myproj)", got)
+        self.assertEqual(memory.load(self.mem, "global")["entries"], [])
+        scope = relay.memory_scope(st)[0]
+        self.assertEqual([e["text"]
+                          for e in memory.load(self.mem, scope)["entries"]],
+                         ["Local fact."])
+
+    def test_remember_with_no_text_says_where_it_would_have_gone(self):
+        got = self.cmd(self.chat(project=True), "/remember")
+        self.assertIn("Usage", got)
+        self.assertIn("this project (myproj)", got)
+
+    def test_memory_lists_what_the_seats_are_actually_shown(self):
+        st = self.chat(project=True)
+        memory.remember(self.mem, "global", "A global note.", who="Josh")
+        self.cmd(st, "/remember A project note.")
+        got = self.cmd(st, "/memory")
+        self.assertIn("A project note.", got)
+        self.assertIn("A global note.", got)
+        self.assertIn("everywhere", got)          # marked as crossing in
+
+    def test_memory_on_an_empty_store_says_so_and_how_to_write_one(self):
+        got = self.cmd(self.chat(), "/memory")
+        self.assertIn("Nothing is remembered", got)
+        self.assertIn("/remember", got)
+
+    def test_forget_with_a_partial_match_only_REPORTS_the_id(self):
+        # the arm is STATELESS: nothing is stored between the two commands,
+        # so it cannot fire later at whatever is under the cursor then
+        st = self.chat()
+        self.cmd(st, "/remember The gate is run_all.")
+        before = memory.load(self.mem, "global")["entries"]
+        got = self.cmd(st, "/forget gate")
+        self.assertIn("Did you mean", got)
+        self.assertIn(before[0]["id"], got)
+        self.assertEqual(len(memory.load(self.mem, "global")["entries"]), 1)
+
+    def test_forget_with_the_exact_id_acts(self):
+        st = self.chat()
+        self.cmd(st, "/remember Something.")
+        mid = memory.load(self.mem, "global")["entries"][0]["id"]
+        self.assertIn("Forgot", self.cmd(st, "/forget " + mid))
+        self.assertEqual(memory.load(self.mem, "global")["entries"], [])
+
+    def test_forget_of_nothing_matching_says_so(self):
+        self.assertIn("matches", self.cmd(self.chat(), "/forget zzzzz"))
+
+    def test_forget_with_no_argument_points_at_the_list(self):
+        self.assertIn("/memory", self.cmd(self.chat(), "/forget"))
+
+    def test_a_project_chat_can_forget_a_global_note_by_its_exact_id(self):
+        # it is shown one, so it must be able to drop one -- but only in the
+        # confirmed form, never through a fuzzy match
+        st = self.chat(project=True)
+        memory.remember(self.mem, "global", "A global note.", who="Josh")
+        mid = memory.load(self.mem, "global")["entries"][0]["id"]
+        self.assertIn("Forgot", self.cmd(st, "/forget " + mid))
+        self.assertEqual(memory.load(self.mem, "global")["entries"], [])
+
+    def test_a_fuzzy_match_never_reaches_the_global_file_from_a_project(self):
+        st = self.chat(project=True)
+        memory.remember(self.mem, "global", "A global note.", who="Josh")
+        got = self.cmd(st, "/forget global")
+        self.assertNotIn("Forgot", got)
+        self.assertEqual(len(memory.load(self.mem, "global")["entries"]), 1)
+
+    def test_the_three_commands_are_in_the_help_text(self):
+        for c in ("/remember", "/forget", "/memory"):
+            self.assertIn(c, relay.HELP_TEXT)
+
+    def test_an_unknown_command_still_says_unknown(self):
+        self.assertIn("Unknown command", self.cmd(self.chat(), "/rememberrr x"))
+
+
+# ------------------------------------------------------------- bridge ------
+class BridgeTests(unittest.TestCase):
+    """Real app.Api against a fake window -- registered is not callable."""
+
+    def setUp(self):
+        import app
+        from test_app_headless import FakeWindow
+        self.tmp = tempfile.mkdtemp(prefix="alloy-mem-bridge-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        old_s, old_m = relay.SESSIONS_DIR, relay.MEMORY_DIR
+        # sessions/ and the project folder must be SIBLINGS: a workspace
+        # inside SESSIONS_DIR is a scratch workspace by definition, so
+        # nesting them here would make every project chat resolve to global
+        # and the suite would be testing nothing
+        self.sessions = os.path.join(self.tmp, "sessions")
+        os.makedirs(self.sessions, exist_ok=True)
+        relay.SESSIONS_DIR = self.sessions
+        relay.MEMORY_DIR = os.path.join(self.tmp, "memory")
+        self.addCleanup(setattr, relay, "SESSIONS_DIR", old_s)
+        self.addCleanup(setattr, relay, "MEMORY_DIR", old_m)
+        self.api = app.Api()
+        self.api._window = FakeWindow()
+
+    def _project_run(self):
+        ws = os.path.join(self.tmp, "someproj")
+        os.makedirs(ws, exist_ok=True)
+        run = self.api._runs.focused()
+        run.session_dir = os.path.join(self.sessions, "chat-1")
+        run.state = {"workspace": ws}
+        return ws
+
+    def test_with_no_conversation_the_modal_still_shows_global_notes(self):
+        memory.remember(relay.MEMORY_DIR, "global", "Josh writes CRLF.",
+                        who="Josh")
+        got = self.api.get_memory()
+        self.assertEqual(got["scope"], memory.GLOBAL_SCOPE)
+        self.assertEqual([e["text"] for e in got["entries"]],
+                         ["Josh writes CRLF."])
+
+    def test_a_project_chat_gets_its_own_scope_and_the_crossing_notes(self):
+        ws = self._project_run()
+        memory.remember(relay.MEMORY_DIR, "global", "global one", who="Josh")
+        memory.remember(relay.MEMORY_DIR, memory.project_key(ws),
+                        "project one", who="Josh")
+        got = self.api.get_memory()
+        self.assertEqual(got["label"], "someproj")
+        self.assertEqual(sorted(e["text"] for e in got["entries"]),
+                         ["global one", "project one"])
+        self.assertEqual({e["scope"] for e in got["entries"]},
+                         {memory.GLOBAL_SCOPE, memory.project_key(ws)})
+
+    def test_an_unknown_chat_id_resolves_to_global_not_the_focused_chat(self):
+        # the _active_workspace rule: answering an unknown id from whatever
+        # is on screen is how chat A's notes start appearing under chat B
+        ws = self._project_run()
+        memory.remember(relay.MEMORY_DIR, memory.project_key(ws), "secret",
+                        who="Josh")
+        got = self.api.get_memory("no-such-chat")
+        self.assertEqual(got["scope"], memory.GLOBAL_SCOPE)
+        self.assertEqual(got["entries"], [])
+
+    def test_save_writes_to_the_chats_scope_by_default(self):
+        ws = self._project_run()
+        got = self.api.save_memory("a project note")
+        self.assertTrue(got["ok"])
+        self.assertEqual([e["text"] for e in
+                          memory.load(relay.MEMORY_DIR,
+                                      memory.project_key(ws))["entries"]],
+                         ["a project note"])
+
+    def test_save_everywhere_writes_what_a_project_chat_otherwise_cannot(self):
+        # without this the crossing rule would only be reachable from a
+        # scratch chat, i.e. dead for anyone working in a project
+        self._project_run()
+        self.assertTrue(self.api.save_memory("everywhere please", True)["ok"])
+        rows = memory.load(relay.MEMORY_DIR, memory.GLOBAL_SCOPE)["entries"]
+        self.assertEqual([e["text"] for e in rows], ["everywhere please"])
+        self.assertEqual(rows[0]["kind"], memory.KIND_JOSH)
+
+    def test_save_returns_the_refreshed_list_so_the_page_never_guesses(self):
+        self.api.save_memory("one")
+        got = self.api.save_memory("two")
+        self.assertEqual(sorted(e["text"] for e in got["entries"]),
+                         ["one", "two"])
+
+    def test_an_empty_note_comes_back_as_an_error(self):
+        self.assertIn("error", self.api.save_memory("   "))
+
+    def test_a_trim_rides_back_as_a_note_rather_than_happening_silently(self):
+        got = self.api.save_memory("z" * 5000)
+        self.assertIn("trimmed", got["note"])
+
+    def test_forget_removes_the_note_and_returns_the_new_list(self):
+        self.api.save_memory("one")
+        mid = self.api.get_memory()["entries"][0]["id"]
+        got = self.api.forget_memory(mid)
+        self.assertEqual(got["removed"], 1)
+        self.assertEqual(got["entries"], [])
+
+    def test_forget_REFUSES_a_scope_this_chat_cannot_see(self):
+        # the id and the scope both arrive from the page; an unchecked scope
+        # would reach any project's file, and this is the one operation here
+        # that cannot be undone
+        other = memory.project_key(os.path.join(self.tmp, "elsewhere"))
+        memory.remember(relay.MEMORY_DIR, other, "another project's note",
+                        who="Josh")
+        mid = memory.load(relay.MEMORY_DIR, other)["entries"][0]["id"]
+        got = self.api.forget_memory(mid, other)
+        self.assertIn("error", got)
+        self.assertEqual(len(memory.load(relay.MEMORY_DIR, other)["entries"]),
+                         1)
+
+    def test_a_project_chat_may_forget_the_global_note_it_is_shown(self):
+        self._project_run()
+        self.api.save_memory("everywhere please", True)
+        mid = memory.load(relay.MEMORY_DIR,
+                          memory.GLOBAL_SCOPE)["entries"][0]["id"]
+        self.assertTrue(
+            self.api.forget_memory(mid, memory.GLOBAL_SCOPE)["ok"])
+        self.assertEqual(
+            memory.load(relay.MEMORY_DIR, memory.GLOBAL_SCOPE)["entries"], [])
+
+    def test_forgetting_something_absent_is_an_error_not_a_silent_ok(self):
+        self.assertIn("error", self.api.forget_memory("mzzzzzzzz"))
+
+
 class SiblingTests(unittest.TestCase):
     def test_a_memory_folder_INSIDE_sessions_would_ship_a_phantom_rail_row(self):
         # the reason MEMORY_DIR is a sibling, kept as a live demonstration
