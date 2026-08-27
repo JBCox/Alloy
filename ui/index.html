@@ -1597,6 +1597,33 @@
   .act-icon {
     display: inline-block; width: 1.1em; opacity: .7; font-style: normal;
   }
+  /* ---------- the seat's checklist ----------
+     Pinned OUTSIDE .act-log on purpose: that log drops its firstChild past
+     ACT_LOG_MAX lines, which would delete the strip on exactly the long
+     turns it exists for. */
+  .act-todo {
+    margin: 4px 0 0 17px; padding: 5px 9px 6px;
+    border-left: 2px solid var(--who, var(--line));
+    background: rgba(255, 255, 255, .025); border-radius: 0 4px 4px 0;
+  }
+  .act-todo .todo-head {
+    font: 10.5px "Cascadia Mono", Consolas, monospace;
+    letter-spacing: .04em; text-transform: uppercase;
+    color: var(--muted); opacity: .8; margin-bottom: 2px;
+  }
+  .act-todo .todo-head b { color: var(--who, var(--text)); font-weight: 600; }
+  .todo-item {
+    /* Longhands, never the `font` shorthand — its family slot rejects
+       `inherit`, and an invalid shorthand silently drops the whole rule. */
+    font-family: inherit; font-size: 11.5px; line-height: 1.5;
+    color: var(--text); opacity: .8;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .todo-item .todo-mark { display: inline-block; width: 1.1em; opacity: .75; }
+  .todo-item.s-done { opacity: .45; text-decoration: line-through; }
+  .todo-item.s-active { opacity: 1; color: var(--who, var(--text)); }
+  .todo-item.s-active .todo-mark { opacity: 1; }
+  .todo-item.s-pending { opacity: .62; }
   /* A long turn is dozens of steps; keep the newest visible and let the rest
      scroll rather than silently dropping them out of the live view. */
   .typing .act-log { max-height: 190px; overflow-y: auto; }
@@ -3390,10 +3417,28 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
   // what the seat DID before this reply — the stored row's capped activity
   // list, rendered as a collapsed block ABOVE the body (escaped: command
   // lines and file names are arbitrary text from the CLIs)
-  const think = Array.isArray(activity) && activity.length
-    ? `<details class="think-block"><summary>${esc(name)} worked through ` +
-      `${activity.length} step${activity.length === 1 ? "" : "s"}</summary>` +
-      activity.map(a => actLineHtml(a)).join("") + `</details>`
+  // The checklist is not a step, so it is counted separately — otherwise a
+  // reply whose only narration was "planned 3 things" would claim it worked
+  // through a step it never took. The engine keeps exactly one todo act and
+  // keeps it last, so this finds the seat's final plan state.
+  const acts = Array.isArray(activity) ? activity : [];
+  const todoAct = acts.filter(
+    a => a && String(a.kind) === "todo" && a.todo).pop();
+  const stepCount = acts.filter(a => !a || String(a.kind) !== "todo").length;
+  let summary = "";
+  if (stepCount) {
+    summary = `${esc(name)} worked through ${stepCount} step` +
+              `${stepCount === 1 ? "" : "s"}`;
+    if (todoAct) summary += ` · plan ${esc(String(todoAct.todo.done))}/` +
+                            `${esc(String(todoAct.todo.total))}`;
+  } else if (todoAct) {
+    const t = Number(todoAct.todo.total) || 0;
+    summary = `${esc(name)} planned ${esc(String(t))} step` +
+              `${t === 1 ? "" : "s"} · ${esc(String(todoAct.todo.done))} done`;
+  }
+  const think = acts.length && summary
+    ? `<details class="think-block"><summary>${summary}</summary>` +
+      acts.map(a => actLineHtml(a)).join("") + `</details>`
     : "";
   d.innerHTML = `<div class="msg-head"><span class="who">${esc(name)}</span>` +
     (meta ? `<span class="meta">${esc(meta)}</span>` : "") + costPill + delivery + refusal + clock +
@@ -3555,10 +3600,46 @@ function dropQueuedEcho(text) {
 const ACT_ICONS = {command: "", edit: "\u270e", read: "\u25a4",
                    search: "\u2315", tool: "\u2699", result: "\u21b3",
                    say: "\u201c", reasoning: "\u201c", progress: "\u25cc",
-                   note: "\u00b7"};
+                   todo: "\u2611", note: "\u00b7"};
+// One mark per checklist state, in the engine's own TODO_STATES vocabulary.
+// Anything else falls back to the empty box: a state we cannot read is not
+// a state we may draw as finished.
+const TODO_MARKS = {done: "\u2713", active: "\u25b8", pending: "\u25cb"};
+// The checklist a seat is working to, rendered as a block rather than a
+// line. Everything here is escaped: item text is whatever the model typed.
+// Split in two on purpose — the live strip sets the INNER half on one
+// element it keeps, so the checklist updates in place instead of being
+// destroyed and rebuilt under the reader forty times a turn.
+function todoItemsHtml(t) {
+  const items = Array.isArray(t && t.items) ? t.items : [];
+  if (!items.length) return "";
+  const total = Number(t.total) || items.length;
+  const done = Number(t.done) || items.filter(
+    i => i && i.state === "done").length;
+  return `<div class="todo-head">plan <b>${esc(String(done))}/` +
+    `${esc(String(total))}</b></div>` +
+    items.map(i => {
+      const st = i && TODO_MARKS[i.state] ? String(i.state) : "pending";
+      return `<div class="todo-item s-${esc(st)}">` +
+        `<span class="todo-mark">${esc(TODO_MARKS[st])}</span> ` +
+        `${esc(String((i && i.text) || ""))}</div>`;
+    }).join("");
+}
+function todoBlockHtml(t, cls = "") {
+  const inner = todoItemsHtml(t);
+  return inner ? `<div class="act-todo${cls}">${inner}</div>` : "";
+}
 function actLineHtml(a, extra = "") {
   const kind = String(a.kind || "note");
   const text = String(a.text || "");
+  // A checklist is the one act that is not one line. It still carries a
+  // `text` for renderers that know nothing about it (export.py, the CLI
+  // echo, an older persisted row), so falling through to the plain line
+  // when the structured payload is missing is the honest default.
+  if (kind === "todo" && a.todo && Array.isArray(a.todo.items)
+      && a.todo.items.length) {
+    return todoBlockHtml(a.todo, extra ? " " + extra.trim() : "");
+  }
   // a failed step is the one line in the log nobody may miss
   const bad = kind === "result" && /^failed\b/.test(text) ? " bad" : "";
   return `<div class="act-line k-${esc(kind)}${bad}${extra}">` +
@@ -3730,6 +3811,26 @@ function typingActivity(speakerId, payload) {
     log.className = "act-log";
     el.appendChild(log);
   }
+  if (payload.kind === "todo") {
+    // The checklist is a STATE, so it gets exactly one element and is
+    // replaced in place — and it lives OUTSIDE .act-log, whose
+    // ACT_LOG_MAX trim removes firstChild and would otherwise delete the
+    // strip on precisely the forty-step turns it was built for. It is not
+    // a step either, so it does not touch dataset.steps: the header's
+    // counter is a count of things the seat DID, the same rule the engine's
+    // sink follows when it refuses to persist a progress tick.
+    const inner = todoItemsHtml(payload.todo);
+    if (!inner) return;
+    let strip = el.querySelector(".act-todo");
+    if (!strip) {
+      strip = document.createElement("div");
+      strip.className = "act-todo";
+    }
+    strip.innerHTML = inner;
+    el.appendChild(strip);       // also keeps it last when it already existed
+    stickBottom();
+    return;
+  }
   if (payload.kind === "progress") {
     // a ticking counter, not a step: keep ONE line and update it in place
     let p = log.querySelector(".k-progress");
@@ -3753,6 +3854,9 @@ function typingActivity(speakerId, payload) {
   }
   const prog = log.querySelector(".k-progress");
   if (prog) log.appendChild(prog);       // counter stays last
+  // and the checklist stays last of all, whichever arrived first
+  const strip = el.querySelector(".act-todo");
+  if (strip) el.appendChild(strip);
   // A step is only a step if the seat DID something; the running token
   // counter is a stopwatch and must not inflate the count (same rule the
   // engine's sink follows when it refuses to persist progress acts).

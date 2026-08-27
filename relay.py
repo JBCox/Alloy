@@ -1343,11 +1343,21 @@ class Agent:
         chat permanently view-only. A named method is the cheapest way to
         make the pairing discoverable from any of its call sites.
 
+        A seat's checklist is the third half of the same fact (see
+        ClaudeAgent's `_todo`): it belongs to the CLI conversation, survives
+        into a resumed turn, and a strip still showing yesterday's plan
+        after a /clear would be describing a thread that no longer exists.
+        The base class clears it unconditionally so no adapter has to
+        remember to — an adapter with no checklist just has None set to
+        None.
+
         `introduced` is deliberately NOT here: it lives on the loop's state,
         not the agent, and the callers reset it themselves.
         """
         self.session_id = None
         self.usage_baseline = None
+        self._todo = None
+        self._todo_pending = None
 
     @property
     def yolo(self):
@@ -2095,6 +2105,73 @@ def _edit_size(inp):
     return " (+%d/-%d)" % (len(new.splitlines()), len(old.splitlines()))
 
 
+# A checklist's three states, and the ONE order they render in. Every CLI
+# here spells its own statuses differently (claude: pending/in_progress/
+# completed; codex: a bare `completed` bool; opencode: the same three words
+# as claude) — they are normalized to these before anything downstream sees
+# them, so the strip cannot mean different things for different seats.
+TODO_STATES = ("pending", "active", "done")
+TODO_ITEM_MAX = 90          # per line; the strip is a glance, not a document
+TODO_ITEMS_MAX = 40         # a plan longer than this is not a plan
+
+
+def _todo_state(status, completed=None):
+    """Normalize one CLI's checklist status word to a TODO_STATES member.
+
+    `completed` is codex's shape (a bool and nothing else — measured
+    2026-08-27, its todo_list items carry no status field at all), so it wins
+    only when there is no usable status word. Anything unrecognized is
+    `pending`: a state we cannot read is not a state we may claim is done."""
+    status = str(status or "").strip().lower()
+    if status in ("completed", "complete", "done", "finished"):
+        return "done"
+    if status in ("in_progress", "in-progress", "active", "running"):
+        return "active"
+    if status in ("pending", "todo", "not_started", "queued", ""):
+        if status == "" and completed is True:
+            return "done"
+        return "pending"
+    return "pending"
+
+
+def _todo_act(items):
+    """One `todo` act from a canonical [{text, state}] list.
+
+    Shared by every adapter so the caption cannot drift between them — the
+    same reason `_result_note` is one function and not four. Returns () for
+    an empty list, because a checklist with nothing on it says nothing.
+
+    The act carries BOTH a `text` (which every existing renderer already
+    understands — the CLI echo, export.py, the generic `.act-line`) and a
+    structured `todo` payload for the strip. A consumer that knows nothing
+    about checklists still shows something true."""
+    rows = []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        text = _clip(it.get("text"), TODO_ITEM_MAX)
+        if not text:
+            continue
+        state = it.get("state")
+        rows.append({"text": text,
+                     "state": state if state in TODO_STATES else "pending"})
+        if len(rows) >= TODO_ITEMS_MAX:
+            break
+    if not rows:
+        return ()
+    done = sum(1 for r in rows if r["state"] == "done")
+    active = next((r for r in rows if r["state"] == "active"), None)
+    if active is not None:
+        tail = active["text"]
+    elif done >= len(rows):
+        tail = "all done"
+    else:
+        tail = next(r["text"] for r in rows if r["state"] != "done")
+    return [{"kind": "todo",
+             "text": "plan %d/%d · %s" % (done, len(rows), tail),
+             "todo": {"items": rows, "done": done, "total": len(rows)}}]
+
+
 def _tool_result_text(block):
     """A tool_result's content is a string OR a list of typed blocks."""
     content = block.get("content")
@@ -2118,6 +2195,173 @@ class ClaudeAgent(Agent):
 
     def before_run(self):
         self._tool_names = {}
+        self._todo_pending = {}
+
+    # ---- the seat's own checklist (W1.2) ---------------------------------
+    # MEASURED 2026-08-27 against claude 2.1.233, because the shape is not
+    # what the plan assumed. This build exposes NO `TodoWrite` at all (the
+    # string is in the binary; the tool list this account gets carries
+    # TaskCreate/TaskGet/TaskList/TaskUpdate instead), and the task list is
+    # INCREMENTAL — no single event ever carries the whole checklist:
+    #   TaskCreate {subject, description} -> result "Task #1 created
+    #                                        successfully: <subject>"
+    #   TaskUpdate {taskId, status}       -> result "Updated task #1 status"
+    #   TaskList   {}                     -> result "#1 [pending] alpha", one
+    #                                        line per task, [status] in brackets
+    # so the state has to be accumulated. It is accumulated PER THREAD, not
+    # per turn: a resumed turn's TaskList returned both tasks created in the
+    # turn before it (measured), so resetting in before_run would make every
+    # second turn's TaskUpdate arrive for an item we had thrown away. That
+    # puts it in the same family as session_id and usage_baseline — state
+    # belonging to the provider thread — so forget_thread() drops it.
+    #
+    # `_todo_pending` IS per turn: it holds TaskCreate tool_use ids waiting
+    # for the result that names their number, and an id can never outlive
+    # the turn that issued it.
+    _todo = None            # ordered {task id: {"text":…, "state":…}}
+    _todo_pending = None    # {tool_use id: subject}, this turn only
+
+    def _todo_items(self):
+        return [{"text": v["text"], "state": v["state"]}
+                for v in (self._todo or {}).values()]
+
+    def _todo_note(self):
+        """The current checklist as an act — or () when we cannot honestly
+        draw one.
+
+        A task we have only ever seen through an UPDATE (created before this
+        process was watching, which is every resumed chat) is tracked but
+        `known` is False, and that means our view of the list is INCOMPLETE.
+        Drawing a checklist from an incomplete view invents its denominator:
+        one update on a five-item plan would read "plan 1/1 · all done".
+        That is the same rule W1.4 states as no measured denominator, no
+        ring — so no complete list, no strip. A TaskList or a TaskCreate
+        makes the view whole again and the strip returns."""
+        rows = (self._todo or {}).values()
+        if not rows or not all(r.get("known") for r in rows):
+            return ()
+        return _todo_act(self._todo_items())
+
+    def _todo_set(self, key, text=None, state=None, known=False):
+        if self._todo is None:
+            self._todo = {}
+        row = self._todo.get(key)
+        if row is None:
+            if len(self._todo) >= TODO_ITEMS_MAX:
+                return
+            row = self._todo[key] = {"text": "", "state": "pending",
+                                     "known": False}
+        if text:
+            row["text"] = text
+        if state:
+            row["state"] = state
+        if known:
+            row["known"] = True
+
+    def _todo_created(self, tid, result_text):
+        """Bind a finished TaskCreate to the number its RESULT names.
+
+        The id exists nowhere else — the tool_use block carries only the
+        subject — so it is parsed out of the CLI's own sentence. Falling
+        back to the tool_use id when that sentence changes shape keeps the
+        item visible (its text is certainly right) while guaranteeing no
+        later TaskUpdate can bind to the wrong row: an unparseable create is
+        a task we cannot track, not a task we may track incorrectly."""
+        subject = (self._todo_pending or {}).pop(tid, None)
+        if not subject:
+            return ()
+        m = re.search(r"[Tt]ask #(\d+)", str(result_text or ""))
+        self._todo_set(m.group(1) if m else "tool:" + str(tid),
+                       text=_clip(subject, TODO_ITEM_MAX), known=True)
+        return self._todo_note()
+
+    def _describe_todo(self, name, inp, tid):
+        """The four checklist tools, each answered at the moment it is
+        actually knowable.
+
+        TaskCreate says nothing here on purpose: the tool_use block carries
+        only the subject, and the number that identifies the task appears
+        for the first time in the RESULT — so the act is emitted there
+        instead (see the `user` branch). TaskUpdate carries everything it
+        needs right here, and is answered immediately for the same reason
+        an `edit` act is: the point of a live strip is that it moves while
+        the seat works, not one round trip later. TaskList likewise waits
+        for its result, which is the whole list."""
+        if name == "TaskCreate":
+            subject = inp.get("subject") or inp.get("description")
+            if isinstance(subject, str) and subject.strip():
+                if self._todo_pending is None:
+                    self._todo_pending = {}
+                if isinstance(tid, str) and tid:
+                    self._todo_pending[tid] = subject.strip()
+            return ()
+        if name == "TaskUpdate":
+            key = inp.get("taskId")
+            if key in (None, ""):
+                return ()
+            key = str(key)
+            subject = inp.get("subject")
+            state = _todo_state(inp.get("status"))
+            named = isinstance(subject, str) and subject.strip()
+            self._todo_set(key,
+                           text=_clip(subject, TODO_ITEM_MAX) if named
+                           else None,
+                           state=state, known=bool(named))
+            # A task first seen through an update was created before this
+            # process was watching. Naming it by its number is true;
+            # inventing a subject for it would not be, and a TaskList later
+            # fills it in. Until then _todo_note() withholds the whole
+            # strip rather than count a list it knows is short — so the
+            # event still gets said, as the one line it actually is.
+            row = (self._todo or {}).get(key)
+            if row is not None and not row["text"]:
+                row["text"] = "task #%s" % key
+            note = self._todo_note()
+            if note:
+                return note
+            return [{"kind": "tool",
+                     "text": "task #%s marked %s" % (key, state)}]
+        if name == "TaskList":
+            return ()
+        # TodoWrite — the whole-list snapshot shape. NOT MEASURED LIVE on
+        # this install: claude 2.1.233 does not expose the tool to this
+        # account at all (its tool list carries the Task* family instead).
+        # The schema is taken from the binary's own prose — `content`,
+        # `status` (pending | in_progress | completed) and `activeForm` —
+        # so this branch is a defensive read, not a claim that it works.
+        todos = inp.get("todos")
+        if not isinstance(todos, list):
+            return ()
+        self._todo = {}
+        for i, row in enumerate(todos[:TODO_ITEMS_MAX]):
+            if not isinstance(row, dict):
+                continue
+            text = row.get("content") or row.get("text") or row.get("activeForm")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            self._todo_set(str(row.get("id") or i),
+                           text=_clip(text, TODO_ITEM_MAX),
+                           state=_todo_state(row.get("status")), known=True)
+        return self._todo_note()
+
+    def _todo_listed(self, result_text):
+        """Reconcile against a TaskList result — the one event that carries
+        the WHOLE list. Free full-state recovery for tasks this process
+        never saw created (a previous turn, before Alloy started watching).
+        Lines look like `#2 [in_progress] read hello.txt back`."""
+        rows = []
+        for line in str(result_text or "").splitlines():
+            m = re.match(r"\s*#(\d+)\s*\[([^\]]*)\]\s*(.*)", line)
+            if m:
+                rows.append((m.group(1), m.group(2), m.group(3).strip()))
+        if not rows:
+            return ()
+        # authoritative: it is the CLI's own view of its whole list
+        self._todo = {}
+        for key, status, text in rows[:TODO_ITEMS_MAX]:
+            self._todo_set(key, text=_clip(text, TODO_ITEM_MAX),
+                           state=_todo_state(status), known=True)
+        return self._todo_note()
 
     def build_cmd(self, message):
         # Claude Code's print-mode resume path requires the prompt to be the
@@ -2351,8 +2595,23 @@ class ClaudeAgent(Agent):
                         or block.get("type") != "tool_result":
                     continue
                 tool = self._tool_names.get(block.get("tool_use_id")) or ""
-                note = _result_note(tool, _tool_result_text(block),
-                                    bool(block.get("is_error")))
+                text = _tool_result_text(block)
+                failed = bool(block.get("is_error"))
+                if tool in ("TaskCreate", "TaskList", "TaskUpdate"):
+                    # The checklist speaks for itself. A generic "Task #1
+                    # created successfully" line beside a strip that already
+                    # says 0/3 is the same fact twice, and the second copy
+                    # is the one with no state in it.
+                    if failed:
+                        acts.append({"kind": "result",
+                                     "text": _result_note(tool, text, True)})
+                    elif tool == "TaskCreate":
+                        acts.extend(self._todo_created(
+                            block.get("tool_use_id"), text))
+                    elif tool == "TaskList":
+                        acts.extend(self._todo_listed(text))
+                    continue
+                note = _result_note(tool, text, failed)
                 if note:
                     acts.append({"kind": "result", "text": note})
             # () not [] when there is nothing to say: the hook's contract is
@@ -2396,6 +2655,8 @@ class ClaudeAgent(Agent):
         inp = block.get("input")
         if not isinstance(inp, dict):
             inp = {}
+        if name in ("TaskCreate", "TaskUpdate", "TaskList", "TodoWrite"):
+            return self._describe_todo(name, inp, tid)
         if name == "Bash":
             c = _clip(inp.get("command"), 150)
             return [{"kind": "command", "text": "$ " + c}] if c else []
@@ -2689,10 +2950,34 @@ class CodexAgent(Agent):
             return ()
         typ = evt.get("type") or ""
         item = evt.get("item")
-        if typ not in ("item.started", "item.completed") \
-                or not isinstance(item, dict):
+        if not isinstance(item, dict):
             return ()
         ityp = item.get("type") or item.get("item_type") or ""
+        if ityp == "todo_list":
+            # MEASURED 2026-08-27: codex streams the WHOLE checklist on
+            # every change, as item.started -> item.updated x N ->
+            # item.completed, each carrying `items: [{text, completed}]`
+            # under one stable item id. `item.updated` is the shape this
+            # hook's gate never accepted, so every checklist change after
+            # the first was being dropped on the floor.
+            if typ not in ("item.started", "item.updated", "item.completed"):
+                return ()
+            rows = []
+            for row in item.get("items") or []:
+                if not isinstance(row, dict):
+                    continue
+                # `completed` is the only state this payload carries. The
+                # `status` read is defensive and unmeasured: codex's own
+                # update_plan tool has an in_progress state, so if it ever
+                # reaches exec --json the strip will show it rather than
+                # calling an in-flight step pending.
+                rows.append({"text": row.get("text") or row.get("content"),
+                             "state": _todo_state(
+                                 row.get("status"),
+                                 completed=row.get("completed") is True)})
+            return _todo_act(rows)
+        if typ not in ("item.started", "item.completed"):
+            return ()
         if ityp == "reasoning" and typ == "item.completed":
             text = _clip(item.get("text"))
             return [{"kind": "reasoning", "text": text}] if text else ()
@@ -3244,6 +3529,12 @@ class OpenCodeAgent(Agent):
         acts = list(self._describe_tool(tool, inp))
         # opencode reports a tool call ONCE, already completed, with its
         # output attached — so the call and its outcome arrive together.
+        if tool == "todowrite":
+            # its `output` is the same list again as pretty-printed JSON
+            # (measured: 16 lines for a 3-item plan), so the generic note
+            # would read "16 lines: [" directly under a strip that already
+            # says 1/3. The checklist is the outcome.
+            return acts
         if state.get("status") == "completed":
             note = _result_note(tool, state.get("output"))
             if note:
@@ -3258,6 +3549,16 @@ class OpenCodeAgent(Agent):
     @staticmethod
     def _describe_tool(tool, inp):
         # opencode's tool names are lowercase and its file arg is `filePath`.
+        if tool == "todowrite":
+            # A whole-list snapshot, like codex's. The keys are the binary's
+            # own: its renderer reads `o.content` and maps `o.status`
+            # completed -> [check], in_progress -> [dot], anything else to a
+            # blank box, which is exactly _todo_state's mapping.
+            return _todo_act([
+                {"text": row.get("content") or row.get("text"),
+                 "state": _todo_state(row.get("status"))}
+                for row in (inp.get("todos") or [])
+                if isinstance(row, dict)])
         if tool == "bash":
             c = _clip(inp.get("command"), 150)
             return [{"kind": "command", "text": "$ " + c}] if c else []
@@ -10391,6 +10692,42 @@ def make_activity_sink(io, key, provider, name, workspace):
     matching the Files-rail row keys."""
     acts = []
     last_progress = [None]
+    # The seat's checklist is a STATE, not a step, so exactly one of these
+    # ever exists per turn and it is kept at the END of `acts`. Both halves
+    # matter: one slot means a seat that re-plans forty times spends one of
+    # ACTIVITY_MAX rather than forty, and last means commit_reply's
+    # `[-ACTIVITY_KEEP:]` tail slice can never be the thing that drops the
+    # strip off a long turn's finished row.
+    todo_slot = [None]
+    # what the consecutive-repeat check compares against. It used to be
+    # acts[-1], which stops being the previous STEP the moment a checklist
+    # is parked at the end of the list.
+    last_real = [None]
+
+    def park_todo():
+        """Keep the checklist as the LAST entry of `acts`.
+
+        commit_reply persists `[-ACTIVITY_KEEP:]`, i.e. it trims from the
+        FRONT — so a plan that settled early in a 400-step turn would be
+        among the first things dropped, from exactly the long turns the
+        strip exists for.
+
+        Moved by identity for COST, not correctness: there is only ever one
+        checklist in the list, so `acts.remove(slot)` would find the same
+        entry — but this runs on every act, and remove() deep-compares a
+        nested dict against every element on the way. `is` is a pointer
+        check. (Said plainly rather than dressed up as a rule: a RED pass
+        swapping `is` for `==` changed no behaviour, and the repo has been
+        burned before by a comment promoting an equivalent line to a
+        rule — see the normcase note in CLAUDE.md.)"""
+        slot = todo_slot[0]
+        if slot is None or (acts and acts[-1] is slot):
+            return
+        for i, a in enumerate(acts):
+            if a is slot:
+                del acts[i]
+                break
+        acts.append(slot)
     # ONE-SLOT HOLD for `say` (the model's own running commentary). Every CLI
     # streams that prose, and the LAST piece of it is the reply itself — so
     # narrating each one as it arrives would echo the whole answer into the
@@ -10417,6 +10754,29 @@ def make_activity_sink(io, key, provider, name, workspace):
                                  "name": name, "kind": "progress",
                                  "text": text})
             return
+        if (act.get("kind") or "") == "todo":
+            entry = {"kind": "todo", "text": text}
+            todo = act.get("todo")
+            if isinstance(todo, dict):
+                entry["todo"] = todo
+            if todo_slot[0] is None and len(acts) >= ACTIVITY_MAX:
+                return          # a first checklist still respects the cap
+            changed = entry != todo_slot[0]
+            if todo_slot[0] is not None:
+                try:
+                    acts.remove(todo_slot[0])
+                except ValueError:      # trimmed or never landed; harmless
+                    pass
+            todo_slot[0] = entry
+            acts.append(entry)
+            if changed:
+                # An unchanged checklist is still moved back to the end (so
+                # the tail slice keeps protecting it) but is NOT re-emitted:
+                # codex repeats the final list verbatim on item.completed,
+                # and a strip that flashes for no change is noise.
+                io.emit("activity", {"speaker": key, "provider": provider,
+                                     "name": name, **entry})
+            return
         if len(acts) >= ACTIVITY_MAX:
             if len(acts) == ACTIVITY_MAX:
                 entry = {"kind": "note", "text": "… further activity not shown"}
@@ -10431,9 +10791,11 @@ def make_activity_sink(io, key, provider, name, workspace):
             if real is None:
                 return
             entry["path"] = os.path.relpath(real, os.path.realpath(workspace))
-        if acts and acts[-1] == entry:      # dedupe consecutive repeats
+        if last_real[0] == entry:           # dedupe consecutive repeats
             return
+        last_real[0] = entry
         acts.append(entry)
+        park_todo()
         io.emit("activity", {"speaker": key, "provider": provider,
                              "name": name, **entry})
 

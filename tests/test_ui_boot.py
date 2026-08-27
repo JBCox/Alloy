@@ -1573,6 +1573,101 @@ if (topLevelError) {
     p.replay = arts();
   } catch (e) { more.artifactsError = (e && e.stack) || String(e); }
 
+  // ---- W1.2: the per-seat todo strip --------------------------------------
+  // Driven through the REAL activity/message events. The named trap is a
+  // rendering one: ACT_LOG_MAX removes log.firstChild, so a strip pinned
+  // inside the activity log is deleted on exactly the long turns it exists
+  // for. The DOM stub parses innerHTML FLAT and never derives a parent's
+  // textContent, so content is read out of the element's own _html.
+  try {
+    const p = more.todo = {};
+    const marks = h => (String(h).match(/todo-mark">([^<]*)</g) || [])
+      .map(s => s.replace(/todo-mark">|</g, ''));
+    const texts = h => (String(h).match(/<\/span> ([^<]*)</g) || [])
+      .map(s => s.replace(/<\/span> |</g, ''));
+    const head = h => {
+      const m = String(h).match(/plan <b>([^<]*)<\/b>/);
+      return m ? 'plan ' + m[1] : null;
+    };
+    await ctx.newChat();
+    const feed = byId['feed'];
+    const plan = (done, items) => ({items, done, total: items.length});
+    const P = plan(1, [{text: 'write it', state: 'done'},
+                       {text: 'test it', state: 'active'},
+                       {text: 'ship it', state: 'pending'}]);
+    const act = (extra) => ctx.uiEvent({event: 'activity', payload: Object.assign(
+      {speaker: 0, provider: 'claude', name: 'Claude'}, extra)});
+    ctx.uiEvent({event: 'thinking', payload: {speaker: 0, provider: 'claude',
+                                              name: 'Claude'}});
+    act({kind: 'command', text: '$ pytest'});
+    act({kind: 'todo', text: 'plan 1\/3 \u00b7 test it', todo: P});
+    const ind = [...feed.children].filter(
+      c => (c.className || '').includes('typing')).pop();
+    let strip = ind.querySelector('.act-todo');
+    p.head = head(strip._html);
+    p.marks = marks(strip._html);
+    p.texts = texts(strip._html);
+    p.classes = strip.querySelectorAll('.todo-item').map(e => e.className);
+    // outside .act-log, whose trim removes firstChild
+    p.stripOutsideLog = !!strip && !ind.querySelector('.act-log')
+      .querySelector('.act-todo');
+    // a step is a thing the seat DID; a checklist is a state
+    p.stepsAfterTodo = String(ind.dataset.steps || '');
+    // 40 more steps drives the real ACT_LOG_MAX trim
+    for (let i = 0; i < 40; i++) act({kind: 'command', text: '$ step ' + i});
+    act({kind: 'todo', text: 'plan 3\/3', todo: plan(3, [
+      {text: 'write it', state: 'done'}, {text: 'test it', state: 'done'},
+      {text: 'ship it', state: 'done'}])});
+    strip = ind.querySelector('.act-todo');
+    p.survivesTrim = !!strip;
+    p.afterTrimHead = strip ? head(strip._html) : null;
+    p.stripCount = ind.querySelectorAll('.act-todo').length;
+    // the finished row: the plan is legible without expanding anything
+    const rowHtml = () => {
+      const rows = [...feed.children].filter(
+        c => (c.className || '').includes('msg'));
+      return rows.length ? String(rows[rows.length - 1]._html || '') : '';
+    };
+    const summaryOf = h => {
+      const m = String(h).match(/<summary>([\s\S]*?)<\/summary>/);
+      return m ? m[1] : null;
+    };
+    ctx.uiEvent({event: 'message', payload: {
+      speaker: 0, provider: 'claude', name: 'Claude', text: 'done', round: 1,
+      message_id: 'm1', activity: [
+        {kind: 'command', text: '$ pytest'},
+        {kind: 'read', text: 'reading a.py'},
+        {kind: 'todo', text: 'plan 1\/3 \u00b7 test it', todo: P}]}});
+    p.rowSummary = summaryOf(rowHtml());
+    p.rowMarks = marks(rowHtml());
+    ctx.uiEvent({event: 'message', payload: {
+      speaker: 0, provider: 'claude', name: 'Claude', text: 'planned', round: 2,
+      message_id: 'm2', activity: [
+        {kind: 'todo', text: 'plan 1\/3', todo: P}]}});
+    p.planOnlySummary = summaryOf(rowHtml());
+    ctx.uiEvent({event: 'message', payload: {
+      speaker: 0, provider: 'claude', name: 'Claude', text: 'x', round: 3,
+      message_id: 'm3', activity: [{kind: 'command', text: '$ a'},
+                                   {kind: 'command', text: '$ b'}]}});
+    p.noPlanSummary = summaryOf(rowHtml());
+    // replay: a strip that only appeared live would vanish on reopen
+    ctx.addMsg('claude', 'Claude', 'replayed', 'round 4', null,
+               '2026-08-27T10:00:00',
+               [{kind: 'command', text: '$ pytest'},
+                {kind: 'read', text: 'reading a.py'},
+                {kind: 'todo', text: 'plan 1\/3', todo: P}], null,
+               {message_id: 'm4', delivered_to: [], speaker: 0});
+    p.replayMarks = marks(rowHtml());
+    // the renderer itself: fallback, empty, escaping, unknown state
+    p.fallbackHtml = ctx.actLineHtml({kind: 'todo', text: 'plan 1\/2 x'});
+    p.emptyHtml = ctx.todoBlockHtml({items: [], done: 0, total: 0});
+    p.escapedHtml = ctx.todoBlockHtml(plan(0, [
+      {text: '<img src=x onerror=1>', state: 'pending'}]));
+    p.unknownStateMark = marks(ctx.todoBlockHtml(plan(0, [
+      {text: 'a', state: 'blocked'}])))[0];
+    ctx.hideAllTyping();
+  } catch (e) { more.todoError = (e && e.stack) || String(e); }
+
   // ---- W1.3: the usage pill's clock ---------------------------------------
   // claude reports duration_ms, codex reports neither duration_ms nor cost —
   // so before wall_ms every GPT row showed no time at all.

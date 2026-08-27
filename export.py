@@ -154,17 +154,43 @@ def _card(row):
     parts.append("<div class='body'>%s</div>" % _esc(row.get("text")))
     activity = row.get("activity")
     if isinstance(activity, list) and activity:
-        items = []
+        items, plan = [], None
         for act in activity:
-            if isinstance(act, dict):
-                text = act.get("text") or act.get("kind") or ""
-                if text:
-                    items.append("<li>%s</li>" % _esc(text))
+            if not isinstance(act, dict):
+                continue
+            # The seat's checklist is a state, not a step: it is rendered as
+            # a list of its own and left out of the step count, so a reply
+            # that only planned does not claim to have worked. The engine
+            # keeps exactly one and keeps it last (relay.make_activity_sink).
+            todo = act.get("todo")
+            if act.get("kind") == "todo" and isinstance(todo, dict) \
+                    and isinstance(todo.get("items"), list):
+                plan = todo
+                continue
+            text = act.get("text") or act.get("kind") or ""
+            if text:
+                items.append("<li>%s</li>" % _esc(text))
         if items:
             parts.append(
                 "<details><summary>Worked through %d step%s</summary><ul>%s</ul>"
                 "</details>" % (len(items), "" if len(items) == 1 else "s",
                                 "".join(items)))
+        if plan:
+            rows = []
+            for it in plan["items"]:
+                if not isinstance(it, dict) or not it.get("text"):
+                    continue
+                mark = {"done": "[x]", "active": "[>]"}.get(it.get("state"),
+                                                            "[ ]")
+                # _esc on the mark too: no exceptions to "everything in a
+                # row is escaped", and one of these marks is a bare ">".
+                rows.append("<li>%s %s</li>" % (_esc(mark), _esc(it["text"])))
+            if rows:
+                parts.append(
+                    "<details><summary>Plan &mdash; %s of %s done</summary>"
+                    "<ul>%s</ul></details>"
+                    % (_esc(plan.get("done")), _esc(plan.get("total")),
+                       "".join(rows)))
     # The files this turn produced, verified on disk by the engine before the
     # row was recorded (relay.artifact_descriptors). Rendered here for the
     # same reason the activity block is: an export is the SECOND renderer

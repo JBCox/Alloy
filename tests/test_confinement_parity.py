@@ -322,7 +322,8 @@ class TwoCopiesOnPurposeTests(unittest.TestCase):
         # in src` check matched that sentence and failed on the prose that
         # promises the property. Same family as the wrap-token bug -- a
         # substring match cannot tell a statement from a mention.
-        src = open(browser_mcp.__file__, encoding="utf-8").read()
+        with open(browser_mcp.__file__, encoding="utf-8") as f:
+            src = f.read()
         banned = re.compile(r"(?m)^[ \t]*(?:import|from)[ \t]+"
                             r"(relay|app|webview)\b")
         hit = banned.search(src)
