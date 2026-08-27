@@ -2044,7 +2044,13 @@
   .q-acts button:hover { color: var(--text); border-color: var(--line); }
   .q-acts .q-send:hover { color: var(--alloy); border-color: var(--alloy); }
   .q-acts .q-del.armed { color: var(--danger); border-color: var(--danger); }
-  #queueNote { color: var(--danger); font-size: 11px; }
+  /* flex-basis like #attRow and .mention-hint: it is a full-width row in
+     the composer's flex box, and `auto` only happened to wrap because
+     the pane was narrow. */
+  #queueNote {
+    flex-basis: 100%; color: var(--danger); font-size: 11px;
+    padding: 0 2px 4px;
+  }
   #queueNote[hidden] { display: none; }
   .mention-hint {
     flex-basis: 100%; font-size: 11.5px; color: var(--alloy);
