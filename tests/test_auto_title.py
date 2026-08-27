@@ -161,12 +161,14 @@ class AutoTitleTests(unittest.TestCase):
             api = types.SimpleNamespace(_side_calls_enabled=enabled)
             api.emit = lambda event, payload=None: None   # capture-free stub
             io._api = api
-            io._run = types.SimpleNamespace(
-                id="fake-run", stop_flag=threading.Event(),
-                human_q=queue.Queue(), thinking={}, staged_roles=[],
-                # _AppIO.emit reads it on every event: a stand-in for a Run
-                # has to carry the fields the real component consumes
-                background=False)
+            # A REAL Run, not a SimpleNamespace standing in for one. The
+            # hand-built version needed a new field every time _AppIO.emit
+            # learned to read one (background, then clock_lock), and each
+            # time the whole suite failed with an AttributeError from inside
+            # the loop. The Api is still faked — that is what this test is
+            # about — but the object _AppIO consumes is the object it
+            # consumes in production.
+            io._run = app_mod.Run("fake-run")
             return io
 
         io = make_io(False)

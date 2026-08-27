@@ -390,6 +390,13 @@ class Run:
         # Per-run on purpose: a global one made a question in chat B queue
         # invisibly behind an unanswered question in chat A.
         self.ask_lock = threading.Lock()
+        # `thinking` and `working` below are written from SEAT threads and read
+        # from the bridge thread, and `list(d.values())` raises RuntimeError if
+        # the dict changes size mid-iteration. open_session got away with an
+        # unguarded read because it happens once, when Josh clicks; Api.jobs is
+        # POLLED across every run at once, which turns a theoretical race into
+        # a likely one. Held only around a dict copy — never around I/O.
+        self.clock_lock = threading.Lock()
         self.status = "idle"         # the RunState vocabulary (see set_status)
         self.pending_ask = None
         # NO `unread` here on purpose. There used to be one; it was set to 0 in
@@ -413,6 +420,18 @@ class Run:
 
     def is_running(self):
         return bool(self.thread and self.thread.is_alive())
+
+    def clocks(self):
+        """(seats mid-turn, relay work) as copies, safe to read anywhere.
+
+        The ONE read path for both dicts. Copying each entry as well as the
+        list matters: the caller serializes these to the UI, and a shared dict
+        handed out under a lock stops being protected the moment the lock is
+        released.
+        """
+        with self.clock_lock:
+            return ([dict(v) for v in self.thinking.values()],
+                    [dict(v) for v in self.working.values()])
 
 
 class RunManager:
@@ -604,25 +623,28 @@ class _AppIO(LoopIO):
         # a pure enqueue, and rather than in the loop, which would have to
         # learn about front-end state it has no business knowing.
         if event == "thinking":
-            self._run.thinking[str(payload.get("speaker"))] = {
-                "speaker": payload.get("speaker"),
-                "provider": payload.get("provider"),
-                "name": payload.get("name"),
-                "limit": payload.get("limit"),
-                "idle": payload.get("idle"),
-                "started": time.time()}
+            with self._run.clock_lock:
+                self._run.thinking[str(payload.get("speaker"))] = {
+                    "speaker": payload.get("speaker"),
+                    "provider": payload.get("provider"),
+                    "name": payload.get("name"),
+                    "limit": payload.get("limit"),
+                    "idle": payload.get("idle"),
+                    "started": time.time()}
         elif event == "thinking_done":
-            self._run.thinking.pop(str(payload.get("speaker")), None)
+            with self._run.clock_lock:
+                self._run.thinking.pop(str(payload.get("speaker")), None)
         elif event == "working":
             wid = str(payload.get("id") or "")
-            if payload.get("done"):
-                self._run.working.pop(wid, None)
-            elif wid:
-                self._run.working[wid] = {
-                    "id": wid, "phase": payload.get("phase"),
-                    "what": payload.get("what"),
-                    "detail": payload.get("detail"),
-                    "started": payload.get("started") or time.time()}
+            with self._run.clock_lock:
+                if payload.get("done"):
+                    self._run.working.pop(wid, None)
+                elif wid:
+                    self._run.working[wid] = {
+                        "id": wid, "phase": payload.get("phase"),
+                        "what": payload.get("what"),
+                        "detail": payload.get("detail"),
+                        "started": payload.get("started") or time.time()}
         self._api.emit(event, payload)
 
     def drain_human(self):
@@ -823,6 +845,42 @@ class Api:
                           "running": r.is_running(),
                           "background": r.background,
                           "pending_ask": r.pending_ask} for r in runs]}
+
+    def jobs(self):
+        """Every chat this window is holding, and what each is doing RIGHT NOW.
+
+        Bridge-thread synchronous, like `run_status` and `list_sessions`: it
+        is a bounded in-memory read with no file I/O and no subprocess. It
+        takes NO conversation lock — not `state["lock"]`, not the store's —
+        because it is polled while runs are mid-turn and a jobs view that can
+        block behind a seat is worse than no jobs view. The only lock it takes
+        is each Run's own `clock_lock`, held for a dict copy.
+
+        No title here on purpose: a Run does not carry one (the rail gets it
+        from the session summary), and inventing one from the session id would
+        put a slug where Josh expects the name he gave the chat.
+
+        `now` rides along so the UI's clocks are anchored to the same instant
+        the numbers were read, rather than to whenever the reply happened to
+        arrive.
+        """
+        out = []
+        for r in self._runs.all():
+            thinking, working = r.clocks()
+            out.append({
+                "chat_id": r.id,
+                "status": r.status,
+                "running": r.is_running(),
+                "background": r.background,
+                "pending_ask": r.pending_ask,
+                # Josh's own lines still waiting to be picked up. The engine
+                # queue, not the client-side dock — this is the half he cannot
+                # take back (see HumanQueue).
+                "queued": r.human_q.qsize(),
+                "thinking": thinking,
+                "working": working,
+            })
+        return {"jobs": out, "now": time.time()}
 
     # ---------------------------------------------------------- to the UI --
     def emit(self, event, payload=None):
@@ -1997,15 +2055,16 @@ class Api:
         if existing is not None and existing.state is not None \
                 and existing.session_dir:
             self._runs.focus(session_id)
+            thinking, working = existing.clocks()
             return {"ok": True,
                     "session": session_summary(existing.session_dir),
                     "messages": read_messages(existing.session_dir),
                     # so the UI can put the typing indicators back rather than
                     # showing a grinding chat as an idle one
-                    "thinking": list(existing.thinking.values()),
+                    "thinking": thinking,
                     # same rule for the relay's own work: a chat reopened
                     # mid-plan must not render as idle either
-                    "working": list(existing.working.values()),
+                    "working": working,
                     "live": existing.is_running()}
         path = session_path(session_id)
         if not path:
@@ -2825,7 +2884,10 @@ class Api:
             self._stop_flag.set()      # nothing live: still honour the press
             return {"ok": True, "stopped": 0, "note": err}
         run.stop_flag.set()            # THAT chat's flag, not the focused one
-        run.status = "stopping"
+        # through _set_status, not a bare assignment: this was the one status
+        # write that emitted nothing, so the rail and the jobs view could not
+        # see a chat enter "stopping" until something else happened to emit
+        self._set_status(run, "stopping")
         killed = relay.cancel_all(run.state)
         if killed:
             self.emit("status", {"text": f"Stopping — interrupted {killed} "

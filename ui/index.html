@@ -300,6 +300,54 @@
   .chat-row .lin { opacity: .55; color: var(--alloy); font-size: 11px; }
   .chat-row .lin.open { opacity: 1; background: var(--surface2); }
   .chat-row .lin:hover { opacity: 1; }
+  /* Background jobs: what every chat this window holds is doing right now,
+     including the ones not on screen. Alloy chrome, never a provider colour —
+     this is the app reporting on itself. */
+  #jobsBar {
+    position: relative; margin: 0 6px 6px; display: flex;
+  }
+  #jobsBar[hidden] { display: none; }
+  #jobsBtn {
+    flex: 1; display: flex; align-items: center; gap: 7px;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 9px; color: var(--text); cursor: pointer;
+    padding: 6px 9px; font-family: inherit; font-size: 11.5px;
+  }
+  #jobsBtn:hover { border-color: rgba(255,255,255,.25); }
+  #jobsBtn.attention { border-color: var(--alloy); color: var(--alloy); }
+  #jobsBtn .jobs-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--alloy);
+    flex: none;
+  }
+  #jobsBtn .jobs-caret { margin-left: auto; color: var(--muted); }
+  #jobsPop { top: 100%; left: 0; right: 0; max-height: 300px; }
+  .job-row {
+    display: flex; flex-direction: column; gap: 2px; padding: 6px 7px;
+    border-radius: 7px; cursor: pointer;
+  }
+  .job-row:hover { background: var(--surface2); }
+  .job-row + .job-row { border-top: 1px solid rgba(255,255,255,.06); }
+  .job-head {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12.5px; color: var(--text);
+  }
+  .job-head .job-title {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .job-head .job-state {
+    color: var(--muted); font-size: 10px; letter-spacing: .06em;
+    text-transform: uppercase; flex: none;
+  }
+  .job-row[data-attention="1"] .job-state { color: var(--alloy); }
+  .job-line {
+    font-size: 11px; color: var(--muted); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .job-line .late { color: var(--danger); }
+  .job-line .job-clock { font-family: "Cascadia Mono", Consolas, monospace; }
+  #jobsEmpty { color: var(--muted); font-size: 12px; padding: 8px 7px; }
+
   .lineage-pop {
     position: absolute; top: 100%; left: 6px; right: 3px; z-index: 40;
     background: var(--bg); border: 1px solid rgba(255,255,255,.14);
@@ -2087,6 +2135,18 @@
       <input id="chatSearch" type="text" placeholder="Search all chats…" spellcheck="false" autocomplete="off" />
       <button id="chatSearchClear" title="Clear search" aria-label="Clear search" hidden>✕</button>
     </div>
+    <div id="jobsBar" hidden>
+      <button id="jobsBtn" type="button" aria-haspopup="true" aria-expanded="false"
+              title="What every chat in this window is doing right now">
+        <span class="jobs-dot"></span><span id="jobsLabel">1 running</span>
+        <span class="jobs-caret">⌄</span>
+      </button>
+      <div id="jobsPop" class="lineage-pop" hidden>
+        <div class="lineage-h">Background jobs</div>
+        <div id="jobsList"></div>
+        <div id="jobsEmpty" hidden>Nothing is running.</div>
+      </div>
+    </div>
     <div id="chatList"></div>
   </nav>
 
@@ -2838,8 +2898,125 @@ const EMPTY_HTML = document.getElementById("feed").innerHTML;
 // transparently retain the original single-chat behaviour.
 const chatRuns = new Map();       // chat id -> live state + attention metadata
 const LIVE_RUN_STATES = new Set(["running", "thinking", "waiting", "stopping"]);
+// Background jobs. Declared here, above renderJobsBadge's first caller
+// (uiEvent and renderChats both reach it), because a top-level `const` read
+// before its declaration line has run is a TDZ ReferenceError, and in one
+// inline script that silently deletes the rest of the app.
+let jobsTimer = null;      // polls api.jobs() only while the popover is open
+let jobsData = null;       // the last {jobs, now} answer
 const RUN_STATE_ALIASES = {waiting_human: "waiting", completed: "done", failed: "failed"};
 function canonicalRunState(status) { return RUN_STATE_ALIASES[status] || status; }
+// Chats that want Josh: live ones, and anything holding a question. A chat
+// that merely finished is NOT one of them — that is what the rail's own
+// completion tick is for.
+function jobRuns() {
+  const out = [];
+  chatRuns.forEach((run, id) => {
+    if (LIVE_RUN_STATES.has(run.status) || run.question) out.push([id, run]);
+  });
+  return out;
+}
+// Repainted from `chatRuns`, which uiEvent maintains ABOVE its not-my-chat
+// return — so a background chat starting, thinking or finishing moves this
+// counter even though none of its rows reach the transcript on screen.
+function renderJobsBadge() {
+  const bar = $("jobsBar"), btn = $("jobsBtn"), label = $("jobsLabel");
+  if (!bar || !btn || !label) return;
+  const rows = jobRuns();
+  const waiting = rows.filter(([, r]) => r.question || r.status === "waiting");
+  bar.hidden = !rows.length;
+  if (!rows.length) { closeJobs(); return; }
+  label.textContent = waiting.length
+    ? `${waiting.length} waiting on you`
+    : `${rows.length} running`;
+  btn.classList.toggle("attention", !!waiting.length);
+}
+function closeJobs() {
+  const pop = $("jobsPop");
+  if (pop) pop.hidden = true;
+  const btn = $("jobsBtn");
+  if (btn) btn.setAttribute("aria-expanded", "false");
+  if (jobsTimer) { clearInterval(jobsTimer); jobsTimer = null; }
+}
+async function refreshJobs() {
+  try { jobsData = await pywebview.api.jobs(); }
+  catch (e) { jobsData = null; }
+  renderJobsList();
+}
+function renderJobsList() {
+  const list = $("jobsList"), empty = $("jobsEmpty");
+  if (!list) return;
+  list.replaceChildren();
+  const byId = new Map(((jobsData && jobsData.jobs) || []).map(j => [j.chat_id, j]));
+  const rows = jobRuns();
+  if (empty) empty.hidden = !!rows.length;
+  // The engine's clock, anchored to the instant IT read the numbers rather
+  // than to whenever the reply arrived.
+  const now = (jobsData && jobsData.now) || Date.now() / 1000;
+  rows.forEach(([id, run]) => {
+    const job = byId.get(id) || {};
+    const row = document.createElement("div");
+    row.className = "job-row"; row.dataset.chat = id;
+    row.dataset.attention = (run.question || run.status === "waiting") ? "1" : "0";
+    const head = document.createElement("div"); head.className = "job-head";
+    const title = document.createElement("span"); title.className = "job-title";
+    const s = sessions.find(x => x.id === id);
+    title.textContent = (s && s.title) || id;
+    const state = document.createElement("span"); state.className = "job-state";
+    state.textContent = run.question ? "needs you" : (run.status || "running");
+    head.append(title, state);
+    row.appendChild(head);
+    // Seats mid-turn, on THE shared clock rule — age always, "of X" only when
+    // a real duration bound exists. `limit` is the deadline; `idle` is a
+    // silence window and is not one.
+    (job.thinking || []).forEach(t => {
+      const line = document.createElement("div"); line.className = "job-line";
+      const {text, late} = turnClockText(now, t.started, t.limit, t.idle,
+                                         t.started);
+      const who = document.createElement("span");
+      who.textContent = (t.name || "A seat") + " · ";
+      const clock = document.createElement("span");
+      clock.className = "job-clock" + (late ? " late" : "");
+      clock.textContent = text;
+      line.append(who, clock);
+      row.appendChild(line);
+    });
+    (job.working || []).forEach(w => {
+      const line = document.createElement("div"); line.className = "job-line";
+      const clock = document.createElement("span"); clock.className = "job-clock";
+      clock.textContent = fmtClock(now - Number(w.started || now));
+      line.append(document.createTextNode((w.what || w.phase || "working") + " · "),
+                  clock);
+      row.appendChild(line);
+    });
+    if (job.queued) {
+      const line = document.createElement("div"); line.className = "job-line";
+      line.textContent = job.queued === 1
+        ? "1 message waiting for the next turn"
+        : `${job.queued} messages waiting for the next turn`;
+      row.appendChild(line);
+    }
+    row.onclick = e => {
+      e.stopPropagation();
+      closeJobs();
+      if (id !== activeId) openChat(id);
+    };
+    list.appendChild(row);
+  });
+}
+function toggleJobs() {
+  const pop = $("jobsPop");
+  if (!pop) return;
+  if (!pop.hidden) { closeJobs(); return; }
+  pop.hidden = false;
+  $("jobsBtn").setAttribute("aria-expanded", "true");
+  refreshJobs();
+  // Polled, not event-driven: a background chat's `thinking` never reaches
+  // this transcript, so its clocks have no other source. Only while the
+  // popover is open — an always-armed interval keeps the node boot harness
+  // alive forever (the typing ticker's lesson).
+  if (!jobsTimer) jobsTimer = setInterval(refreshJobs, 1000);
+}
 function eventChatId(packet) {
   const p = packet.payload || {};
   return packet.chat_id || p.chat_id || p.session_id || p.session?.id || null;
@@ -4250,28 +4427,43 @@ function fmtClock(sec) {
 // permanent setInterval: an always-armed timer keeps the node boot harness
 // alive forever, and an idle window has nothing to count.
 let typingTimer = null;
+// THE rule for how long a seat has been in a turn, and whether that is
+// worrying. ONE function, because the jobs popover shows the same clock for
+// background chats and two copies would drift — the shared-table lesson from
+// the desktop scroll directions.
+//
+// `limit` (Agent.turn_timeout) is a real DEADLINE and is the only thing that
+// earns "of X". `idle` (Agent.idle_timeout) is a silence window: a seat with
+// one has no deadline at all while it keeps working, so counting to it was
+// the "0:00 of 15:00" lie that made a healthy 14-minute turn read as a hung
+// app. In the desktop app claude, gpt and ox ALWAYS have limit absent (the
+// turn cap is a CLI-only flag) and only gemini carries one, so conflating the
+// two fields is wrong for three providers out of four, always.
+function turnClockText(now, started, limit, idle, lastact) {
+  started = Number(started || 0);
+  limit = Number(limit || 0);
+  idle = Number(idle || 0);
+  const elapsed = now - started;
+  const quiet = now - Number(lastact || started);
+  let text = fmtClock(elapsed);
+  let late = false;
+  if (limit > 0) {                       // a real duration bound (agy, or a
+    text += ` of ${fmtClock(limit)}`;    // hard cap Josh set) — count to it
+    late = elapsed > limit * 0.6;
+  } else if (idle > 0 && quiet > idle * 0.5) {
+    text += ` · quiet ${fmtClock(quiet)} of ${fmtClock(idle)}`;
+    late = true;
+  }
+  return {text, late};
+}
 function tickTyping() {
   const now = Date.now() / 1000;
   typingEls.forEach(el => {
     const clock = el.querySelector(".tclock");
     if (!clock || !el.dataset.started) return;
-    const elapsed = now - Number(el.dataset.started);
-    const limit = Number(el.dataset.limit || 0);
-    const idle = Number(el.dataset.idle || 0);
-    // A seat with an idle watchdog has NO deadline while it keeps working, so
-    // showing "of 15:00" was the lie that made a healthy 14-minute turn read
-    // as a hung app. Show the age; surface the quiet clock only once silence
-    // is actually heading for the window that can end the turn.
-    const quiet = now - Number(el.dataset.lastact || el.dataset.started);
-    let text = fmtClock(elapsed);
-    let late = false;
-    if (limit > 0) {                       // a real duration bound (agy, or a
-      text += ` of ${fmtClock(limit)}`;    // hard cap Josh set) — count to it
-      late = elapsed > limit * 0.6;
-    } else if (idle > 0 && quiet > idle * 0.5) {
-      text += ` · quiet ${fmtClock(quiet)} of ${fmtClock(idle)}`;
-      late = true;
-    }
+    const {text, late} = turnClockText(
+      now, el.dataset.started, el.dataset.limit, el.dataset.idle,
+      el.dataset.lastact);
     clock.textContent = text;
     clock.classList.toggle("late", late);
     // How much has actually happened, and how long the CURRENT step has been
@@ -4733,6 +4925,12 @@ window.uiEvent = packet => {
   } else if (chatId && event === "error") {
     setRunStatus(chatId, "error", {question: null});
   }
+  // HOISTED above the not-my-chat return below, and below the rail-keeping
+  // prelude above that maintains chatRuns. The badge counts every chat this
+  // window holds, so deriving it only from events that survive the routing
+  // gate would freeze it on exactly the background chats it exists to
+  // surface. Cheap: it reads chatRuns and writes one label.
+  renderJobsBadge();
   if (chatId && chatId !== activeId) {
     const run = runFor(chatId);
     if (event === "message") {
@@ -7239,6 +7437,7 @@ document.addEventListener("keydown", e => {
     if ($("deskModal").classList.contains("show")) closeDeskModal(false);
     if ($("brwsModal").classList.contains("show")) closeBrwsModal(false);
     closeModeMenu();                   // the composer's own popover
+    closeJobs();                       // and the rail's
     if ($("findBar") && !$("findBar").hidden) findClose();
     if (micOn) micStop(true);          // a live mic is the one thing Escape must kill
   }
@@ -8059,6 +8258,7 @@ async function sendSay() {
 }
 $("sayBtn").onclick = sendSay;
 $("queueBtn").onclick = queueSay;
+$("jobsBtn").onclick = e => { e.stopPropagation(); toggleJobs(); };
 $("queueSendAll").onclick = sendAllQueued;
 $("say").addEventListener("input", () => { histIdx = -1; sayDraftSave($("say").value); autoGrow(); });
 addEventListener("resize", autoGrow);
@@ -9388,6 +9588,9 @@ function showTabMenu(evt, id) {
 function hideTabMenu() { $("tabMenu").classList.remove("show"); }
 document.addEventListener("click", e => {
   if (!e.target.closest("#tabMenu")) hideTabMenu();
+  // A click anywhere but inside the jobs bar closes its popover — and closing
+  // it stops the poll, which is the only reason it must not be left open.
+  if (!e.target.closest("#jobsBar")) closeJobs();
 });
 
 function setTabColor(id, color) {

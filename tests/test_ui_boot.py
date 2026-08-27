@@ -415,6 +415,7 @@ let interjectReply = null;   // set to {error} to drive the refusal path
 const dockCalls = [];        // W2.1: what the queue dock asked the bridge to do
 let prepareReply = null;     // what prepare_message hands back; null = an echo
 let openSessionExtra = {};   // merged into the reopened chat's session summary
+let jobsReply = {jobs: [], now: 1000};   // W2.3: what Api.jobs() hands back
 function apiReply(name, args) {
   apiCalls.push(name);
   switch (name) {
@@ -491,6 +492,7 @@ function apiReply(name, args) {
          {lifecycle: 'active', goal_verdict: 'unknown'}},
         openSessionExtra),
     };
+    case 'jobs': return jobsReply;
     case 'list_workspace_files': return [];
     case 'list_runs': return {runs: []};
     case 'folder_exists': return false;
@@ -2193,6 +2195,80 @@ if (topLevelError) {
                            total_tokens: 6});
     p.nothingReported = pill({});
   } catch (e) { more.usagePillError = (e && e.stack) || String(e); }
+  // ---- W2.3: the background jobs badge and popover -------------------------
+  // The badge counts every chat this window holds, including the ones whose
+  // rows never reach the transcript on screen — which is the whole point, and
+  // the reason its repaint is hoisted above uiEvent's not-my-chat return.
+  try {
+    const p = more.jobs = {};
+    await ctx.newChat();
+    // Earlier probes left live runs in the shared chatRuns map, and the badge
+    // counts every chat this window holds — which is exactly right in the
+    // app and exactly wrong for an isolated assertion.
+    vm.runInContext('chatRuns.clear()', ctx);
+    ctx.renderJobsBadge();
+    const bar = byId['jobsBar'], pop = byId['jobsPop'];
+    p.hiddenWithNothingLive = !!bar.hidden;
+    // a BACKGROUND chat starts: nothing of it reaches this transcript
+    ctx.uiEvent({event: 'started', payload: {
+      background: true,
+      session: {id: 'sess-bgjob', title: 'From a script', participants: [],
+                mode: 'round_robin', can_continue: false},
+      transcript: 'y/transcript.md', workspace: '', mode: 'round_robin'}});
+    p.shownForBackground = !bar.hidden;
+    p.labelForBackground = deepText(byId['jobsLabel']);
+    // ...and a question in it flips the badge to attention
+    ctx.uiEvent({event: 'question', payload: {
+      chat_id: 'sess-bgjob', qid: 'q1', question: 'which one?', options: []}});
+    p.labelWhenWaiting = deepText(byId['jobsLabel']);
+    p.attentionClass = byId['jobsBtn'].classList.contains('attention');
+    ctx.uiEvent({event: 'question_done', payload: {chat_id: 'sess-bgjob', qid: 'q1'}});
+
+    // the popover reads its clocks from the bridge, because a background
+    // chat's `thinking` never reaches this transcript
+    jobsReply = {now: 2000, jobs: [{
+      chat_id: 'sess-bgjob', status: 'thinking', running: true,
+      background: true, pending_ask: null, queued: 2,
+      thinking: [
+        // no duration bound: age only ("of X" here would be the 0:00 of
+        // 15:00 lie)
+        {speaker: 0, provider: 'claude', name: 'Claude',
+         limit: null, idle: 300, started: 1900},
+        // a real deadline: count to it
+        {speaker: 1, provider: 'gemini', name: 'Gemini',
+         limit: 600, idle: 600, started: 1880},
+      ],
+      working: [{id: 'w1', phase: 'plan', what: 'Planning the work',
+                 detail: '', started: 1970}],
+    }]};
+    await ctx.toggleJobs();
+    await new Promise(r => setImmediate(r));
+    p.popShown = !pop.hidden;
+    const rows = () => [...byId['jobsList'].children]
+      .filter(c => String(c.className || '').split(/\s+/).includes('job-row'));
+    p.rowCount = rows().length;
+    p.rowText = deepText(rows()[0]);
+    p.clocks = [...rows()[0].children]
+      .filter(c => String(c.className || '').includes('job-line'))
+      .map(deepText);
+    // clicking a row opens that chat
+    apiCalls.length = 0;
+    rows()[0].onclick({stopPropagation() {}});
+    await new Promise(r => setImmediate(r));
+    p.openedOnClick = apiCalls.includes('open_session');
+    p.popClosedAfterClick = !!pop.hidden;
+    jobsReply = {jobs: [], now: 1000};
+    // Starting a NEW chat must not hide it: the background one is still
+    // running, which is the entire reason this bar exists.
+    await ctx.newChat();
+    p.stillShownAfterNewChat = !byId['jobsBar'].hidden;
+    // ...and it goes away when that chat actually finishes
+    ctx.uiEvent({event: 'done', payload: {
+      chat_id: 'sess-bgjob', background: true, transcript: null,
+      session: {id: 'sess-bgjob'}, can_continue: true}});
+    p.hiddenOnceItFinished = !!byId['jobsBar'].hidden;
+  } catch (e) { more.jobsError = (e && e.stack) || String(e); }
+
   // ---- W2.4: the Master goal chip shows the MANAGER's goal -----------------
   // `goal` on a session summary is meta["topic"] — the words Josh typed to
   // open the chat — so a supervised run showed its opening message as its
@@ -3046,6 +3122,53 @@ class UiBootTests(unittest.TestCase):
     def test_escape_clears_the_search_outright(self):
         self.assertEqual(self.report.get("valueAfterEscape"), "")
         self.assertTrue(self.report.get("railRestoredAfterEscape"))
+
+    # ---- W2.3: the background jobs view -------------------------------------
+    def _jobs(self):
+        self.assertIsNone(self.report.get("jobsError"),
+                          "jobs probe threw: %s" % self.report.get("jobsError"))
+        return self.report["jobs"]
+
+    def test_the_bar_is_hidden_with_nothing_live(self):
+        j = self._jobs()
+        self.assertTrue(j["hiddenWithNothingLive"])
+        self.assertTrue(j["hiddenOnceItFinished"])
+
+    def test_starting_a_new_chat_does_not_hide_a_running_one(self):
+        """Walking away from a chat is what the bar is FOR."""
+        self.assertTrue(self._jobs()["stillShownAfterNewChat"])
+
+    def test_a_background_chat_moves_the_badge(self):
+        """Its rows never reach the transcript on screen, so the repaint has
+        to be hoisted above uiEvent's not-my-chat return."""
+        j = self._jobs()
+        self.assertTrue(j["shownForBackground"])
+        self.assertEqual(j["labelForBackground"], "1 running")
+
+    def test_a_question_turns_the_badge_into_a_summons(self):
+        j = self._jobs()
+        self.assertEqual(j["labelWhenWaiting"], "1 waiting on you")
+        self.assertTrue(j["attentionClass"])
+
+    def test_the_popover_uses_the_transcripts_clock_rule_verbatim(self):
+        """`limit` is a real deadline and earns "of X"; `idle` is a silence
+        window and does not. Three of four providers always have no limit in
+        the desktop app, so conflating them is the 0:00 of 15:00 lie."""
+        j = self._jobs()
+        self.assertTrue(j["popShown"])
+        self.assertEqual(j["rowCount"], 1)
+        self.assertEqual(j["clocks"][0], "Claude · 1:40")
+        self.assertEqual(j["clocks"][1], "Gemini · 2:00 of 10:00")
+
+    def test_the_popover_shows_the_relays_own_work_and_the_queue(self):
+        j = self._jobs()
+        self.assertIn("Planning the work · 0:30", j["clocks"][2])
+        self.assertIn("2 messages waiting for the next turn", j["rowText"])
+
+    def test_clicking_a_job_opens_that_chat_and_closes_the_popover(self):
+        j = self._jobs()
+        self.assertTrue(j["openedOnClick"])
+        self.assertTrue(j["popClosedAfterClick"])
 
     # ---- W2.4: the Master goal chip ----------------------------------------
     def _goal(self):
