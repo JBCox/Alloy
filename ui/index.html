@@ -2429,8 +2429,8 @@
           <button id="queueSendAll" type="button" title="Send every queued message, in order">Send all</button>
         </div>
         <div id="queueList"></div>
-        <div id="queueNote" hidden></div>
       </div>
+      <div id="queueNote" hidden></div>
       <div id="mentionHint" class="mention-hint" hidden></div>
       <div id="dropCue" class="mention-hint" hidden></div>
       <div id="attRow" hidden></div>
@@ -2881,13 +2881,20 @@ let running = false, canContinue = false;
 const QUEUE_KEY = "alloyQueued";
 const queued = new Map();          // chat id -> [{id, text, atts:[line]}]
 let queueSeq = 0;
-try {
-  const rawQueued = JSON.parse(localStorage.getItem(QUEUE_KEY) || "{}");
-  Object.keys(rawQueued || {}).forEach(k => {
-    if (Array.isArray(rawQueued[k]) && rawQueued[k].length)
-      queued.set(k, rawQueued[k]);
+function queueRestore(raw) {
+  Object.keys(raw || {}).forEach(k => {
+    if (Array.isArray(raw[k]) && raw[k].length) queued.set(k, raw[k]);
   });
-} catch (e) { /* a corrupt store must not take the whole page down */ }
+  // Seed the counter PAST every id already on disk. Without this a reload
+  // restarts it at 0 and the next queued row is minted "q1" — the id a
+  // restored row already carries — so send and drop find the wrong one.
+  queued.forEach(rows => rows.forEach(r => {
+    const n = parseInt(String(r.id || "").slice(1), 10);
+    if (Number.isFinite(n) && n > queueSeq) queueSeq = n;
+  }));
+}
+try { queueRestore(JSON.parse(localStorage.getItem(QUEUE_KEY) || "{}")); }
+catch (e) { /* a corrupt store must not take the whole page down */ }
 let transcriptPath = null, workspacePath = null, customFolder = null;
 let rounds = 6;
 // Live budget bar state (see budgetApply): REPORTED spend only, plus this
@@ -2975,8 +2982,13 @@ function renderJobsList() {
     // silence window and is not one.
     (job.thinking || []).forEach(t => {
       const line = document.createElement("div"); line.className = "job-line";
+      // t.lastact, NOT t.started. Passing the turn's start time makes
+      // `quiet` equal the whole age, so every healthy long turn past half
+      // its idle window renders red "quiet M:SS of Y" — the 0:00 of 15:00
+      // lie in the other direction, from inside the very function written
+      // to prevent it. The engine stamps lastact on every activity event.
       const {text, late} = turnClockText(now, t.started, t.limit, t.idle,
-                                         t.started);
+                                         t.lastact);
       const who = document.createElement("span");
       who.textContent = (t.name || "A seat") + " · ";
       const clock = document.createElement("span");
@@ -3051,6 +3063,11 @@ function runFor(id, seed) {
   const run = chatRuns.get(id);
   const seededPermission = seed?.permission || seed?.session?.permission;
   if (seededPermission) run.permission = seededPermission;
+  // re-seeded like permission and the goal, not only at construction: every
+  // run is created FIRST by renderChats from a rail row that carries no
+  // board, so a constructor-only seed could never reach a reopened chat
+  const seededBoard = seed?.board || seed?.session?.board;
+  if (seededBoard) run.board = seededBoard;
   if (seededGoal) run.supervisorGoal = seededGoal;
   if (Array.isArray(seed?.tasks || seed?.session?.tasks))
     run.supervisorTasks = [...(seed.tasks || seed.session.tasks)];
@@ -4924,7 +4941,7 @@ function renderBoard(board) {
   const note = document.createElement("span"); note.className = "plan-note";
   note.textContent = editable
     ? "Untick to drop a task, edit the wording, reassign or reorder."
-    : phase === "declined" ? "Sent back — the Supervisor plans again."
+    : phase === "declined" ? "Sent back."
     : "The board is dispatched; editing is locked while work is active.";
   actions.appendChild(note);
   if (editable) {
@@ -5300,6 +5317,11 @@ window.uiEvent = packet => {
     renderWorkstreams(payload.tasks || []);
   } else if (event === "plan") {
     renderPlan(payload);
+  } else if (event === "board") {
+    // Without this the card was only ever built by the `question` handler, so
+    // an engine-side outcome — a gate that expired, a refusal answered from
+    // another window — left a live "Approve & dispatch" on screen forever.
+    renderBoard(payload);
   } else if (event === "status") {
     const el = addMsg("system", "relay", payload.text, "");
     // remember this row so `done` can fold its own notice into it rather
@@ -8229,7 +8251,12 @@ function renderQueueDock() {
     btn.hidden = !running;
     btn.classList.toggle("has", !!rows.length);
   }
-  if (!rows.length) { list.replaceChildren(); queueNote(""); return; }
+  // NOT queueNote("") — every one of the dock's three refusals (no chat yet,
+  // a slash line, a bridge error) fires with an EMPTY queue, and clearing the
+  // note here erased each of them the moment it was written. The note lives
+  // outside #queueDock for the same reason: the dock is hidden when the queue
+  // is empty, which is exactly when those refusals happen.
+  if (!rows.length) { list.replaceChildren(); return; }
   const head = dock.querySelector(".q-count");
   if (head) head.textContent = rows.length + " queued";
   const note = dock.querySelector(".q-note");
@@ -8304,12 +8331,16 @@ function renderQueueDock() {
     grow();
   });
 }
-function dropQueued(qid) {
-  const rows = queueRows(activeId);
+// `chat` is explicit because sendQueued calls this AFTER an await, and Josh
+// can have switched chats in between — reading activeId there would drop a
+// row out of whichever conversation is now on screen.
+function dropQueued(qid, chat) {
+  chat = chat || activeId;
+  const rows = queueRows(chat);
   const i = rows.findIndex(r => r.id === qid);
   if (i < 0) return;
   rows.splice(i, 1);
-  if (!rows.length) queued.delete(activeId);
+  if (!rows.length) queued.delete(chat);
   queueSave(); renderQueueDock();
 }
 function splitAttachmentLines(text) {
@@ -8355,9 +8386,13 @@ async function sendQueued(qid) {
   const r = await pywebview.api.interject(full, null, chat);
   if (r?.error) { queueNote(r.error); return; }
   queueNote("");
-  dropQueued(qid);
-  const echo = addMsg("josh", "Josh", r?.text || full, "queued for next turn");
-  if (echo) echo.dataset.queued = (r?.text || full);
+  dropQueued(qid, chat);
+  // and the echo belongs in the transcript that is actually on screen — a
+  // row painted into another chat's feed is worse than none
+  if (chat === activeId) {
+    const echo = addMsg("josh", "Josh", r?.text || full, "queued for next turn");
+    if (echo) echo.dataset.queued = (r?.text || full);
+  }
 }
 async function sendAllQueued() {
   // in order, and stopping at the first refusal rather than silently
@@ -10057,6 +10092,7 @@ function resetStage() {
   imgCache.clear(); resetEditing();
   clearSeatContexts();
   renderQueueDock();  // the dock is per chat; a fresh stage holds nobody's
+  renderJobsBadge();  // ...and the bar still counts the chats left running
   refreshFiles();     // no active chat ⇒ the rail says so
 }
 

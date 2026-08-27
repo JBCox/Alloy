@@ -35,6 +35,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -124,6 +125,24 @@ class MergeTests(unittest.TestCase):
             slot_ids=[0])
         self.assertEqual([t["id"] for t in kept], ["t1"])
         self.assertEqual(dropped, ["t2"])
+
+    def test_dropping_a_task_strips_it_from_its_dependents(self):
+        """Dropping is not editing. A surviving task that still depends on an
+        id nobody will deliver stays `blocked` forever, so the board never
+        drains and the manager never gets the floor again."""
+        kept, dropped = relay.merge_board_edits(
+            [task("t1"), task("t2", deps=["t1", "t0"])],
+            [{"id": "t1", "include": False}, {"id": "t2"}], slot_ids=[0])
+        self.assertEqual(dropped, ["t1"])
+        self.assertEqual(kept[0]["deps"], ["t0"],
+                         "the dropped task is still a dependency")
+
+    def test_an_untouched_board_keeps_every_dependency(self):
+        kept, dropped = relay.merge_board_edits(
+            [task("t1"), task("t2", deps=["t1"])],
+            [{"id": "t1"}, {"id": "t2"}], slot_ids=[0])
+        self.assertEqual(dropped, [])
+        self.assertEqual(kept[1]["deps"], ["t1"])
 
     def test_the_order_is_joshs(self):
         kept, _ = relay.merge_board_edits(
@@ -249,6 +268,40 @@ class BoardGateTests(unittest.TestCase):
             {"approved": False}), [task("t1")]), [])
         self.assertEqual(state["board_feedback"], "")
 
+    def test_a_refusal_is_flagged_apart_from_its_note(self):
+        """The re-plan decision keys on the flag, not on the text: inferring
+        "was this a refusal?" from `board_feedback` made "send it back" with
+        nothing typed behave exactly like a dead planner."""
+        state = self._state(name="flagged")
+        relay.board_gate(state, AnsweringIO({"approved": False}), [task("t1")])
+        self.assertTrue(state["board_declined"])
+        self.assertEqual(state["board_feedback"], "")
+
+    def test_an_unanswered_board_latches_its_own_flag(self):
+        state = self._state(name="unanswered")
+        relay.board_gate(state, AnsweringIO(None), [task("t1")])
+        self.assertTrue(state["board_unanswered"])
+        self.assertNotIn("board_declined", state)
+
+    def test_an_approval_clears_both_latches(self):
+        state = self._state(name="both")
+        state["board_declined"] = True
+        state["board_unanswered"] = True
+        relay.board_gate(state, AnsweringIO({"approved": True}), [task("t1")])
+        self.assertNotIn("board_declined", state)
+        self.assertNotIn("board_unanswered", state)
+
+    def test_a_trace_entry_carries_the_WHOLE_board(self):
+        """appendSupervisorTrace replaces the task map from any entry carrying
+        tasks, so a wave-sized list erases every settled task from the panel —
+        the same reason supervise_next_wave traces the whole plan."""
+        state = self._state(name="trace-all")
+        state["workstreams"] = [task("old", status="done")]
+        io = AnsweringIO({"approved": True})
+        relay.board_gate(state, io, [task("new")])
+        entry = [p["entry"] for e, p in io.events if e == "supervisor"][-1]
+        self.assertEqual([t["id"] for t in entry["tasks"]], ["old", "new"])
+
     def test_the_payload_carries_what_the_cli_front_end_subscripts(self):
         """CLIIO.ask_human does payload['asker'] — a payload without it raises
         KeyError inside the front end instead of asking anybody."""
@@ -260,11 +313,13 @@ class BoardGateTests(unittest.TestCase):
         self.assertEqual(io.asked[0]["kind"], "board")
         self.assertTrue(io.asked[0]["options"])
 
-    def test_the_wait_has_a_deadline(self):
+    def test_the_wait_has_a_deadline_that_actually_expires(self):
         """A gate that blocks the parallel barrier forever is the documented
         2026-08-22 wedge: the clock, the spend cap and the watchdog are all
-        checked AT that barrier."""
-        state = self._state()
+        checked AT that barrier. Asserting only that the abort is CALLABLE is
+        satisfied by `lambda: False` — i.e. by no deadline at all — so this
+        drives the clock past it."""
+        state = self._state(name="deadline")
         seen = {}
 
         class Recording(AnsweringIO):
@@ -272,9 +327,27 @@ class BoardGateTests(unittest.TestCase):
                 seen["abort"] = abort
                 return {"approved": True}
 
+        old = relay.BOARD_WAIT_MAX
+        relay.BOARD_WAIT_MAX = 0.05
+        self.addCleanup(lambda: setattr(relay, "BOARD_WAIT_MAX", old))
         relay.board_gate(state, Recording(), [task("t1")])
         self.assertTrue(callable(seen["abort"]), "the gate can never expire")
-        self.assertFalse(seen["abort"](), "it expired immediately")
+        self.assertFalse(seen["abort"](), "it expired before it was asked")
+        time.sleep(0.1)
+        self.assertTrue(seen["abort"](), "the deadline never arrives")
+
+    def test_the_callers_own_abort_still_wins(self):
+        state = self._state(name="caller-abort")
+        seen = {}
+
+        class Recording(AnsweringIO):
+            def ask_human(self, payload, abort=None):
+                seen["abort"] = abort
+                return {"approved": True}
+
+        relay.board_gate(state, Recording(), [task("t1")],
+                         abort=lambda: True)
+        self.assertTrue(seen["abort"]())
 
     def test_it_publishes_a_card_and_a_trace_entry(self):
         state = self._state()
@@ -287,14 +360,18 @@ class BoardGateTests(unittest.TestCase):
         self.assertEqual(traces[-1]["type"], "board_reviewed")
 
     def test_the_card_names_which_seats_can_actually_write(self):
-        state = self._state()
+        """Hard-coded, not re-derived from workstream_writers: an expectation
+        computed by the code under test agrees with it however wrong both are.
+        gemini is not a FILE_WRITER_PROVIDER — agy ignores the process cwd for
+        file writes."""
+        state = self._state(name="writes")
         state["providers"] = ["claude", "gemini"]
+        self.assertNotIn("gemini", relay.FILE_WRITER_PROVIDERS)
         io = AnsweringIO({"approved": True})
         relay.board_gate(state, io, [task("t1")])
         seats = [p for e, p in io.events if e == "board"][0]["seats"]
-        self.assertEqual([s["writes"] for s in seats],
-                         [0 in relay.workstream_writers(state),
-                          1 in relay.workstream_writers(state)])
+        self.assertEqual([(s["id"], s["name"], s["writes"]) for s in seats],
+                         [(0, "Cee", True), (1, "Dee", False)])
 
     def test_an_approval_that_keeps_nothing_is_a_refusal(self):
         """Otherwise it dispatches an empty wave and the manager re-plans the
@@ -396,12 +473,18 @@ class DispatchTests(unittest.TestCase):
 
     def test_an_approval_clears_the_note(self):
         state = self._state(name="cleared")
-        self._side(StubSide(self.PLAN, self.PLAN))
-        relay.plan_workstreams(state, AnsweringIO({"approved": False}),
+        # enough script for the re-plan loop: a refusal now costs
+        # BOARD_REPLAN_MAX planning calls before it gives up
+        self._side(StubSide(*([self.PLAN] * 8)))
+        relay.plan_workstreams(state, AnsweringIO({"approved": False,
+                                                  "feedback": "no"}),
                                goal="g")
+        self.assertEqual(state["board_feedback"], "no")
+        state["supervisor_plan_attempted"] = False
         relay.plan_workstreams(state, AnsweringIO({"approved": True}),
                                goal="g")
         self.assertNotIn("board_feedback", state)
+        self.assertNotIn("board_declined", state)
 
     def test_sending_it_back_plans_again_in_the_SAME_run(self):
         """The auto-plan is a single pre-loop call and supervise_next_wave
@@ -423,6 +506,43 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(len(io.asked), 2, "it only asked once")
         self.assertEqual([t["id"] for t in out], ["t1", "t2"])
         self.assertIn("split t1", stub.prompts[1])
+
+    def test_sending_it_back_with_NO_reason_still_plans_again(self):
+        """The loop used to decide "was this a refusal?" by whether a note
+        existed, so an empty one behaved exactly like a dead planner — while
+        the card said the Supervisor would plan again."""
+        state = self._state(name="silent-refusal")
+        stub = self._side(StubSide(self.PLAN, self.PLAN))
+        answers = iter([{"approved": False}, {"approved": True}])
+
+        class Twice(AnsweringIO):
+            def ask_human(self, payload, abort=None):
+                self.asked.append(payload)
+                return next(answers)
+
+        out = relay.plan_workstreams(state, Twice(), goal="g")
+        self.assertEqual([t["id"] for t in out], ["t1", "t2"])
+        self.assertEqual(len(stub.prompts), 2)
+
+    def test_an_unanswered_wave_stops_the_rolling_manager(self):
+        """supervise_next_wave does not read the plan latch, so without a flag
+        of its own an absent Josh is asked once per wave, each time for the
+        full deadline."""
+        state = self._drained("wave-silent")
+        stub = self._side(StubSide(self.WAVE, self.WAVE))
+        self.assertEqual(relay.supervise_next_wave(state, AnsweringIO(None)),
+                         "idle")
+        self.assertTrue(state["board_unanswered"])
+        self.assertEqual(relay.supervise_next_wave(state, AnsweringIO(None)),
+                         "idle")
+        self.assertEqual(len(stub.prompts), 1, "it asked the manager again")
+
+    def test_a_fresh_objective_forgives_an_unanswered_board(self):
+        """Josh typing /objective is proof he is back."""
+        state = self._state(name="forgive")
+        state["board_unanswered"] = True
+        relay.retarget_supervisor(state, "something new")
+        self.assertNotIn("board_unanswered", state)
 
     def test_a_board_nobody_answers_does_not_re_plan(self):
         """Silence means Josh is not here — asking again spends a real side

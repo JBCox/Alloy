@@ -163,6 +163,16 @@ class InterjectTests(unittest.TestCase):
         self.assertIn("error", r)
         self.assertTrue(self.run.human_q.empty())
 
+    def test_it_refuses_a_slash_BEFORE_it_writes_anything(self):
+        """Refusing after saving leaves the files in the workspace with no
+        message that names them; prepare_message, its twin, checks first."""
+        att = os.path.join(self.tmp, "attachments")
+        r = self.api.interject("/compact",
+                               [{"name": "note.txt", "data": "aGk="}],
+                               "chat-a")
+        self.assertIn("error", r)
+        self.assertFalse(os.path.isdir(att), "it wrote an orphan attachment")
+
     def test_it_reports_how_many_are_waiting(self):
         self.assertEqual(self.api.interject("one", None, "chat-a")["waiting"], 1)
         self.assertEqual(self.api.interject("two", None, "chat-a")["waiting"], 2)
@@ -219,10 +229,34 @@ class DockMarkupTests(unittest.TestCase):
     def test_the_row_is_a_textarea_not_an_input(self):
         """An <input> collapses multi-line text — and a queued row with an
         attachment is ALWAYS multi-line, because with_attachments separates
-        the prose from the path block with a blank line."""
-        self.assertIn('ta.className = "q-text"', self.html)
-        self.assertIn('createElement("textarea")', self.html)
-        self.assertNotIn('q-text"; ta.type', self.html)
+        the prose from the path block with a blank line.
+
+        Anchored on the ROW's own construction. `createElement("textarea")`
+        occurs six times in this file, so asserting its presence proves
+        nothing about what the dock builds."""
+        i = self.html.index("function renderQueueDock(")
+        j = self.html.index("function dropQueued(")
+        body = self.html[i:j]
+        self.assertIn('const ta = document.createElement("textarea");\n'
+                      '    ta.className = "q-text";', body)
+        self.assertNotIn('createElement("input")', body.split("q-acts")[0])
+
+    def test_the_refusal_note_lives_outside_the_dock(self):
+        """All three of the dock's refusals fire with an EMPTY queue, and the
+        dock is hidden when the queue is empty — so a note inside it was
+        invisible exactly when it was written."""
+        # the note is the dock's SIBLING: its opening tag comes after
+        # the dock's closing </div>, at the composer's own indent
+        self.assertIn('        <div id="queueList"></div>\n'
+                      '      </div>\n'
+                      '      <div id="queueNote" hidden></div>', self.html)
+
+    def test_the_empty_dock_does_not_erase_its_own_note(self):
+        i = self.html.index("function renderQueueDock(")
+        j = self.html.index("function dropQueued(")
+        body = self.html[i:j]
+        self.assertIn("if (!rows.length) { list.replaceChildren(); return; }",
+                      body)
 
     def test_the_dock_is_registered_in_the_composers_hidden_idiom(self):
         """Its neighbours (#attRow, #battleBar, #askPill, .mention-hint) all

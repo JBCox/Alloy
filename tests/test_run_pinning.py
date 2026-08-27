@@ -223,14 +223,37 @@ class RunPinningTests(unittest.TestCase):
         gate.set()
         run.thread.join(10)
 
-    def test_start_refuses_only_when_this_stage_is_already_running(self):
+    def test_start_refuses_a_stage_that_is_already_running(self):
+        """The refusal half, driven BEFORE the chat earns an id — waiting for
+        one means `adopt` has already swapped in a fresh draft, so the second
+        start goes to an idle stage and the refusal never fires. That is what
+        the earlier version of this test did, under this name."""
+        gate = self._gate()
+        relay.AGENT_TYPES["claude"] = gated_agent_class("Claude", gate)
+        api = self._api()
+        # hold the worker BEFORE the session dir exists, which is the only
+        # window this guard is for: a second Send while the first is still
+        # setting up. Once adopt() runs it hands back a fresh draft and the
+        # next start is a NEW chat, not a refusal (the test below).
+        api._auth_blockers = lambda providers: gate.wait(10) or []
+        stage = api._runs.focused()
+        self.assertEqual(api.start(self._cfg()), {"ok": True})
+        self._wait(stage.is_running, "the first worker to start")
+        self.assertIsNone(stage.id, "it adopted before the guard was tested")
+        self.assertEqual(api.start(self._cfg()),
+                         {"error": "A conversation is already running."})
+        gate.set()
+        stage.thread.join(10)
+
+    def test_a_second_chat_starts_once_the_first_has_its_own_identity(self):
+        """The registry's whole point: adopting hands the stage back, so the
+        next Send is a NEW conversation rather than a refusal."""
         gate = self._gate()
         relay.AGENT_TYPES["claude"] = gated_agent_class("Claude", gate)
         api = self._api()
         api.start(self._cfg())
         first = api._runs.focused()
         self._wait(lambda: first.id is not None, "the first chat's id")
-        # a second start from a FRESH stage is the registry's whole point
         self.assertEqual(api.start(self._cfg()), {"ok": True})
         self.assertTrue(first.is_running(), "the first chat was torn down")
         gate.set()

@@ -317,9 +317,9 @@ def agy_path():
 class HumanQueue:
     """Josh's undelivered lines for ONE chat, plus a race-free peek.
 
-    A FIFO with the three methods `queue.Queue` was being used for, and one
-    more: `snapshot()`, so a front end can say honestly what is still waiting
-    to be picked up.
+    A FIFO with the three methods `queue.Queue` was being used for, plus
+    `qsize()` so a front end can say honestly how much is still waiting to be
+    picked up (`Api.jobs` publishes it).
 
     Deliberately NOT edit or drop. The loops drain at moments no front end can
     predict — the SEQUENTIAL loop reads this once per TURN, which is minutes —
@@ -355,7 +355,15 @@ class HumanQueue:
 
     def snapshot(self):
         """What is still waiting, oldest first. A COPY: handing out the deque
-        would let a reader mutate the queue by accident."""
+        would let a reader mutate the queue by accident.
+
+        Not published to the UI. The dock shows what Josh is HOLDING, which is
+        client-side; this is what he has already sent and cannot take back, so
+        the honest thing to show of it is a count, not a list he might try to
+        edit. Kept because the count comes from the same lock and a reader
+        that wants the contents (a future jobs preview) should not reach into
+        `_items`.
+        """
         with self._lock:
             return list(self._items)
 
@@ -493,8 +501,14 @@ class RunManager:
         THE way a conversation thread comes into being. `Api.start` and
         `continue_chat` used to assign `run.thread` themselves and the webhook
         path did not — so a webhook-started chat ran with `is_running()` False
-        forever, `live()` returned [], and every "refuse while a chat is live"
-        guard in the app was decoration (it refused nothing, ever).
+        forever and could be renamed, deleted, forked, re-continued or raced by
+        a second webhook start while its seats were mid-turn.
+
+        Precisely: the guards WORKED for chats this window started itself, and
+        were blind to exactly the ones nobody was watching. (An earlier version
+        of this docstring said they "refused nothing, ever" — an over-claim an
+        adversarial pass caught, 2026-08-27.) `RunManager.live()` had no caller
+        at all, which is what made the hole invisible.
 
         The thread is recorded BEFORE it starts: a guard that reads
         `is_running()` in between must see True, not a hole one instruction
@@ -630,7 +644,21 @@ class _AppIO(LoopIO):
                     "name": payload.get("name"),
                     "limit": payload.get("limit"),
                     "idle": payload.get("idle"),
-                    "started": time.time()}
+                    "started": time.time(),
+                    # nothing has been heard from it YET, and silence since
+                    # the turn began is exactly what the quiet clock measures
+                    "lastact": time.time()}
+        elif event == "activity":
+            # WHEN this seat was last heard from. The engine's watchdog counts
+            # SILENCE, not duration, so a jobs view with no last-activity
+            # stamp has nothing to measure quiet against — and passing the
+            # turn's start time instead makes "quiet" equal the whole age,
+            # which is the "0:00 of 15:00" lie the shared clock rule exists to
+            # prevent, in the other direction.
+            with self._run.clock_lock:
+                seat = self._run.thinking.get(str(payload.get("speaker")))
+                if seat is not None:
+                    seat["lastact"] = time.time()
         elif event == "thinking_done":
             with self._run.clock_lock:
                 self._run.thinking.pop(str(payload.get("speaker")), None)
@@ -1344,8 +1372,9 @@ class Api:
         emit queue mid-turn. Runs on the webhook handler thread (a normal
         thread), so spawning the conversation worker here is safe."""
         # `live()`, not a walk of the adopted map: a chat is live from the
-        # instant its worker starts, and before this refactor it was live with
-        # `is_running()` False, so this guard passed every single time.
+        # instant its worker starts, and before this refactor a WEBHOOK-started
+        # chat was live with `is_running()` False — so this guard, which is the
+        # one that can only ever see webhook runs, passed every single time.
         if self._runs.live():
             # raise, not return: the webhook module turns a raised
             # exception into an HTTP 500 {"error": …}, and a script must
@@ -2611,6 +2640,12 @@ class Api:
         if err:
             return {"error": err}
         text = (text or "").strip()
+        # BEFORE the attachments are written. Refusing after saving them
+        # leaves the files in the workspace with no message that names them —
+        # `prepare_message`, its twin, has always checked first.
+        if text.startswith("/"):
+            return {"error": "That starts with / — send it as a command, or "
+                             "put a space or a word in front of it."}
         if files:
             ws = (run.state or {}).get("workspace")
             if not ws:
@@ -2619,14 +2654,6 @@ class Api:
                 text = with_attachments(text, save_attachments(files, ws))
             except (OSError, ValueError) as e:
                 return {"error": f"Could not save attachment: {e}"}
-        if text.startswith("/"):
-            # A slash line is a COMMAND and takes a different path
-            # (Api.command -> dispatch_command). Once on this queue the two are
-            # indistinguishable, and four of the five loops tell them apart by
-            # this exact test — so a message that only looks like a command
-            # must be refused here rather than becoming "Unknown command".
-            return {"error": "That starts with / — send it as a command, or "
-                             "put a space or a word in front of it."}
         if text:
             run.human_q.put(text)
         # How many of Josh's lines are still waiting to be picked up, counted
@@ -2881,7 +2908,14 @@ class Api:
         """
         run, err = self._resolve_chat(chat_id)
         if err:
-            self._stop_flag.set()      # nothing live: still honour the press
+            # Only when Josh did not NAME a chat. `_resolve_chat` exists so
+            # that "an unknown chat_id is REFUSED, never silently applied to
+            # whichever run happens to be focused — stopping the wrong
+            # conversation is worse than not stopping at all", and this line
+            # was doing precisely that for every id it did not recognise.
+            if chat_id:
+                return {"ok": False, "stopped": 0, "error": err}
+            self._runs.focused().stop_flag.set()   # honour a bare press
             return {"ok": True, "stopped": 0, "note": err}
         run.stop_flag.set()            # THAT chat's flag, not the focused one
         # through _set_status, not a bare assignment: this was the one status
@@ -2890,9 +2924,13 @@ class Api:
         self._set_status(run, "stopping")
         killed = relay.cancel_all(run.state)
         if killed:
-            self.emit("status", {"text": f"Stopping — interrupted {killed} "
-                                         f"seat{'s' if killed != 1 else ''} "
-                                         f"mid-turn."})
+            # _emit_for, like every other run-scoped notice: a bare emit lands
+            # in whatever chat is on screen, which for a backgrounded run is
+            # somebody else's transcript.
+            self._emit_for(run, "status",
+                           {"text": f"Stopping — interrupted {killed} "
+                                    f"seat{'s' if killed != 1 else ''} "
+                                    f"mid-turn."})
         return {"ok": True, "stopped": killed}
 
     def approve_plan(self, chat_id=None, plan_id=None, payload=None):
@@ -3467,8 +3505,14 @@ class Api:
         # human queue or staged roles to the chat he happens to be viewing.
         run = state.get("_run")
         if run is not None:
-            run.thinking.clear()     # a new run starts with nobody mid-turn
-            run.working.clear()      # ...and no side call left over from the last
+            # UNDER the lock. `Run.clocks()` calls itself the one read path and
+            # holds `clock_lock` while it iterates, which closes nothing if a
+            # writer can `.clear()` from another thread — and a poll of
+            # Api.jobs racing this line is exactly the RuntimeError the lock
+            # was added for.
+            with run.clock_lock:
+                run.thinking.clear()  # a new run starts with nobody mid-turn
+                run.working.clear()   # ...and no side call left from the last
         self._set_status(run, "running")
         try:
             outcome_kind = run_rounds(state, _AppIO(self, run))

@@ -165,6 +165,78 @@ class JobsTests(unittest.TestCase):
             t.join(5)
         self.assertEqual(errors, [], "jobs() raised while seats were writing")
 
+    def test_a_seat_carries_when_it_was_last_heard_from(self):
+        """The watchdog counts SILENCE, not duration, so a jobs view with no
+        last-activity stamp has nothing to measure quiet against — and
+        substituting the turn's start time makes "quiet" equal the whole age,
+        which is the 0:00-of-15:00 lie in the other direction."""
+        run = self._run("chat-a")
+        io = app._AppIO(self.api, run)
+        io.emit("thinking", {"speaker": 0, "provider": "claude",
+                             "name": "Claude"})
+        first = self.api.jobs()["jobs"][0]["thinking"][0]
+        self.assertGreaterEqual(first["lastact"], first["started"])
+        time.sleep(0.02)
+        io.emit("activity", {"speaker": 0, "kind": "say", "text": "hi"})
+        after = self.api.jobs()["jobs"][0]["thinking"][0]
+        self.assertGreater(after["lastact"], first["lastact"])
+        self.assertEqual(after["started"], first["started"])
+
+    def test_activity_for_a_seat_that_is_not_thinking_is_harmless(self):
+        run = self._run("chat-a")
+        io = app._AppIO(self.api, run)
+        io.emit("activity", {"speaker": 7, "kind": "say", "text": "hi"})
+        self.assertEqual(self.api.jobs()["jobs"][0]["thinking"], [])
+
+    def test_clearing_the_clocks_takes_the_lock_too(self):
+        """`Run.clocks()` calls itself the one read path and holds the lock
+        while it iterates, which closes nothing if a writer can .clear() from
+        another thread."""
+        run = self._run("chat-a")
+        io = app._AppIO(self.api, run)
+        for i in range(50):
+            io.emit("thinking", {"speaker": i, "provider": "claude",
+                                 "name": "C"})
+        stop = threading.Event()
+        errors = []
+
+        def clear():
+            state = {"_run": run}
+            while not stop.is_set():
+                with run.clock_lock:
+                    run.thinking.clear()
+                for i in range(50):
+                    io.emit("thinking", {"speaker": i, "provider": "claude",
+                                         "name": "C"})
+
+        def read():
+            try:
+                while not stop.is_set():
+                    run.clocks()
+            except Exception as e:          # noqa: BLE001 — that is the point
+                errors.append(e)
+
+        ts = [threading.Thread(target=clear, daemon=True),
+              threading.Thread(target=read, daemon=True),
+              threading.Thread(target=read, daemon=True)]
+        for t in ts:
+            t.start()
+        time.sleep(0.5)
+        stop.set()
+        for t in ts:
+            t.join(5)
+        self.assertEqual(errors, [])
+
+    def test_the_rounds_clear_holds_it(self):
+        """A source guard: the reset in Api._rounds is the one writer outside
+        _AppIO.emit, and it is the one that removes ENTRIES rather than adding
+        them."""
+        import inspect
+        src = inspect.getsource(app.Api._rounds)
+        i = src.index("run.thinking.clear()")
+        self.assertIn("with run.clock_lock:", src[:i],
+                      "the clocks are cleared outside the lock")
+
     def test_jobs_takes_no_conversation_lock(self):
         """It is polled while runs are mid-turn. A jobs view that can block
         behind a seat is worse than no jobs view."""
@@ -183,6 +255,42 @@ class JobsTests(unittest.TestCase):
                             "jobs() blocked behind a conversation lock")
 
     # ---- the status path --------------------------------------------------
+    def test_stopping_a_chat_this_window_does_not_own_stops_nothing(self):
+        """`_resolve_chat` exists so an unknown id is REFUSED, never silently
+        applied to whichever run happens to be focused — stopping the wrong
+        conversation is worse than not stopping at all."""
+        visible = self._run("chat-a")
+        self.api._runs.focus("chat-a")
+        r = self.api.stop("no-such-chat")
+        self.assertFalse(r["ok"], r)
+        self.assertFalse(visible.stop_flag.is_set(),
+                         "it stopped the chat Josh was watching")
+
+    def test_a_bare_stop_still_honours_the_press(self):
+        visible = self._run("chat-b")
+        visible.state = None                 # nothing to resolve
+        self.api._runs.focus("chat-b")
+        r = self.api.stop()
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(visible.stop_flag.is_set())
+
+    def test_the_interrupted_notice_names_its_own_chat(self):
+        seen = []
+        self.api.emit = lambda ev, p=None: seen.append((ev, p or {}))
+        run = self._run("chat-a")
+        run.thread = threading.Thread(target=lambda: time.sleep(2),
+                                      daemon=True)
+        run.thread.start()
+        real = app.relay.cancel_all
+        app.relay.cancel_all = lambda st: 2
+        self.addCleanup(lambda: setattr(app.relay, "cancel_all", real))
+        self.api.stop("chat-a")
+        notes = [p for e, p in seen
+                 if e == "status" and "interrupted" in p.get("text", "")]
+        self.assertTrue(notes)
+        self.assertEqual(notes[0].get("chat_id"), "chat-a",
+                         "the notice landed in whatever chat was on screen")
+
     def test_stopping_is_announced_like_every_other_state(self):
         """The one status write that bypassed _set_status and emitted
         nothing, so no view could see a chat enter "stopping"."""

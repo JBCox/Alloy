@@ -4868,6 +4868,7 @@ class SessionStore:
             "board_review": bool(state.get("board_review")),
             "board": state.get("board"),
             "board_feedback": state.get("board_feedback") or "",
+            "board_unanswered": bool(state.get("board_unanswered")),
             # Panel is a resumable phase machine. Source row ids and per-seat
             # completion live here so a restart never replays a successful
             # draft, critique, or synthesis call.
@@ -6895,6 +6896,7 @@ def rehydrate(meta, workspace=None):
         "board_review": bool(meta.get("board_review")),
         "board": meta.get("board"),
         "board_feedback": meta.get("board_feedback") or "",
+        "board_unanswered": bool(meta.get("board_unanswered")),
         "panel": meta.get("panel"),
         "battle": meta.get("battle"),
         "hidden": dict(meta.get("hidden") or {}),
@@ -9357,7 +9359,31 @@ def merge_board_edits(tasks, edits, slot_ids=None):
         kept.append(task)
     dropped = [str(t["id"]) for t in tasks if str(t["id"]) not in
                {str(k["id"]) for k in kept}]
+    # Dropping is not editing. `deps` is not in BOARD_EDITABLE because Josh
+    # must not hand-write one, but a surviving task that still DEPENDS on an
+    # id nobody is going to deliver is `blocked` forever — `unblocked` reads
+    # the dep list literally, so the board never drains and the manager never
+    # gets the floor again. Removing the reference is the only reading of
+    # "drop that task" that leaves a runnable plan.
+    if dropped:
+        gone = set(dropped)
+        for t in kept:
+            t["deps"] = [d for d in (t.get("deps") or ()) if str(d) not in gone]
     return kept, dropped
+
+
+def board_trace_tasks(state, wave):
+    """The WHOLE board for a trace entry, not just the slice under review.
+
+    `appendSupervisorTrace` replaces the task map from any entry carrying
+    `tasks`, so a wave-sized list erases every settled task from the panel —
+    the same reason `supervise_next_wave` deliberately traces the whole plan
+    rather than its own new tasks.
+    """
+    seen = {str(t["id"]) for t in wave}
+    keep = [t for t in (state.get("workstreams") or ())
+            if str(t["id"]) not in seen]
+    return [dict(t) for t in keep] + [dict(t) for t in wave]
 
 
 def board_abort(state, abort=None):
@@ -9460,26 +9486,38 @@ def board_gate(state, io, tasks, abort=None):
         # it back, plan again" and "Josh is not here, stop asking".
         if answer is None:
             state["supervisor_plan_attempted"] = True
+            # A wave gate nobody answers must not be offered again at the next
+            # barrier either: supervise_next_wave does not read the plan latch,
+            # so without its own flag an absent Josh is asked once per wave,
+            # each time for the full deadline.
+            state["board_unanswered"] = True
             said = ("%s's board was never answered, so nothing was "
                     "dispatched." % manager)
         else:
             state["supervisor_plan_attempted"] = False
             state["board_feedback"] = note
+            # The RE-PLAN decision keys on this, not on the note: a refusal
+            # with an empty note is still a refusal, and inferring it from
+            # `board_feedback` made "send it back" with nothing typed behave
+            # exactly like a dead planner.
+            state["board_declined"] = True
             said = ("Josh sent %s's board back%s"
                     % (manager, (": " + note) if note else "."))
         supervisor_trace(state, io, "board", "Board declined", said,
-                         status="failed", tasks=[dict(t) for t in tasks])
+                         status="failed", tasks=board_trace_tasks(state, []))
         io.emit("board", dict(board))
         io.emit("message", state["log"]("relay", said))
         return []
     board["phase"] = "approved"
     board["tasks"] = [dict(t) for t in kept]
     state.pop("board_feedback", None)
+    state.pop("board_declined", None)
+    state.pop("board_unanswered", None)
     said = "Josh approved %d task%s" % (len(kept), "" if len(kept) == 1 else "s")
     if dropped:
         said += " and dropped " + ", ".join(dropped)
     supervisor_trace(state, io, "board", "Board approved", said + ".",
-                     status="ready", tasks=[dict(t) for t in kept])
+                     status="ready", tasks=board_trace_tasks(state, kept))
     io.emit("board", dict(board))
     io.emit("message", state["log"]("relay", said + "."))
     return kept
@@ -9767,9 +9805,10 @@ def plan_workstreams(state, io, goal=None):
     `supervisor_plan_attempted`, and each of those means stop asking.
     """
     for _ in range(BOARD_REPLAN_MAX):
+        state.pop("board_declined", None)
         tasks = _plan_once(state, io, goal=goal)
         if tasks or state.get("supervisor_plan_attempted") \
-                or not state.get("board_feedback"):
+                or not state.get("board_declined"):
             return tasks
     state["supervisor_plan_attempted"] = True
     note = ("The board came back %d times, so the seats carry on as an "
@@ -10152,6 +10191,11 @@ def supervise_next_wave(state, io):
     """
     if state.get("mode") != "supervisor" or not plan_drained(state):
         return "idle"
+    if state.get("board_unanswered"):
+        # Josh is not at the keyboard. Planning another wave would spend a
+        # real side call and then block for the full deadline, once per
+        # barrier, for nobody. A fresh /objective clears it.
+        return "idle"
     waves = int(state.get("supervisor_waves") or 0)
     if waves >= SUPERVISOR_MAX_WAVES:
         if not state.get("supervisor_capped"):
@@ -10486,8 +10530,11 @@ def retarget_supervisor(state, goal):
     state["supervisor_goal"] = goal
     state["supervisor_waves"] = 0
     state.pop("supervisor_capped", None)
-    # an explicit re-target is also an explicit retry of planning
+    # an explicit re-target is also an explicit retry of planning — including
+    # of a board gate that timed out while Josh was away, since him typing
+    # /objective is proof he is back
     state["supervisor_plan_attempted"] = False
+    state.pop("board_unanswered", None)
     return goal
 
 

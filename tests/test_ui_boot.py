@@ -451,6 +451,9 @@ let playbookReply = null;    // set to {error} to drive the refusal path
 let interjectReply = null;   // set to {error} to drive the refusal path
 const dockCalls = [];        // W2.1: what the queue dock asked the bridge to do
 let prepareReply = null;     // what prepare_message hands back; null = an echo
+// set to a chat id to have `interject` move the focus WHILE the dock awaits
+// it — the real race sendQueued's pinning exists for
+let interjectSwitchesChatTo = null;
 let openSessionExtra = {};   // merged into the reopened chat's session summary
 let jobsReply = {jobs: [], now: 1000};   // W2.3: what Api.jobs() hands back
 const boardCalls = [];       // W2.2: what approve_board was asked to do
@@ -497,6 +500,10 @@ function apiReply(name, args) {
     case 'save_tabs': savedTabs.push(args && args[0]); return args && args[0];
     case 'interject':
       dockCalls.push([name].concat(args));
+      if (interjectSwitchesChatTo) {
+        vm.runInContext('activeId = ' + JSON.stringify(interjectSwitchesChatTo),
+                        ctx);
+      }
       return interjectReply || {ok: true, text: args && args[0]};
     case 'prepare_message':
       dockCalls.push([name].concat(args));
@@ -2538,7 +2545,44 @@ if (topLevelError) {
     p.rowsAfterConfirm = rows().length;
     prepareReply = null;
 
-    // the dock is PER CHAT: queue for this one, look at another, come back
+    // reordering, and what SEND ALL then delivers
+    dockCalls.length = 0;
+    byId['say'].value = 'first';
+    await ctx.queueSay();
+    byId['say'].value = 'second';
+    await ctx.queueSay();
+    const twoRows = rows();
+    p.orderBefore = twoRows.map(r => r.querySelector('.q-text').value);
+    // the second row's "move up"
+    twoRows[1].querySelector('.q-acts').children[0].onclick();
+    p.orderAfter = rows().map(r => r.querySelector('.q-text').value);
+    dockCalls.length = 0;
+    await ctx.sendAllQueued();
+    p.sendAllOrder = dockCalls.filter(c => c[0] === 'interject').map(c => c[1]);
+    p.emptyAfterSendAll = rows().length;
+
+    // ...and that the rows survive a reload with ids nothing will collide with
+    byId['say'].value = 'kept across a reload';
+    await ctx.queueSay();
+    p.persisted = JSON.parse(sandbox.localStorage.getItem('alloyQueued') || '{}');
+    rows().forEach(r => ctx.dropQueued(r.dataset.qid, 'sess-dock'));
+
+    // Josh switches chats while the send is in flight: the row must leave the
+    // chat it was SENT to, and the echo must not be painted into the other
+    // one's transcript
+    byId['say'].value = 'sent while switching away';
+    await ctx.queueSay();
+    const switching = rows()[0].dataset.qid;
+    const feedWas = (byId['feed'].children || []).length;
+    interjectSwitchesChatTo = 'sess-elsewhere';
+    await ctx.sendQueued(switching);
+    interjectSwitchesChatTo = null;
+    p.switchedAwayLeftBehind =
+      (vm.runInContext("(queued.get('sess-dock') || []).length", ctx));
+    p.switchedAwayEchoed = (byId['feed'].children || []).length - feedWas;
+    vm.runInContext("activeId = 'sess-dock'", ctx);
+    ctx.renderQueueDock();
+
     byId['say'].value = 'for sess-dock';
     await ctx.queueSay();
     p.rowsBeforeSwitch = rows().length;
@@ -2594,6 +2638,87 @@ if (topLevelError) {
       (byId['feed'].children || []).length - feedBefore;
     await ctx.newChat();
   } catch (e) { more.bgError = (e && e.stack) || String(e); }
+
+  // ---- what the adversarial pass found ------------------------------------
+  try {
+    const p = more.advPass = {};   // NOT `adv` — the rung-advisory probe owns that key
+    await ctx.newChat();
+
+    // (a) the jobs clock measures SILENCE against a real last-activity
+    // stamp. Feeding it the turn's start makes quiet == the whole age, so a
+    // healthy long turn renders red "quiet M:SS of Y". Driven through the
+    // POPOVER, not through turnClockText: calling the shared function with
+    // hand-picked arguments passes whichever argument renderJobsList sends.
+    p.quietFromLastact = ctx.turnClockText(1000, 400, null, 300, 995).text;
+    p.quietFromStart = ctx.turnClockText(1000, 400, null, 300, 400).text;
+    vm.runInContext('chatRuns.clear()', ctx);   // only sess-clock may be live
+    ctx.uiEvent({event: 'started', payload: {
+      session: {id: 'sess-clock', title: 'Clock', participants: [],
+                mode: 'round_robin', can_continue: false},
+      transcript: 'x/transcript.md', workspace: '', mode: 'round_robin'}});
+    ctx.uiEvent({event: 'thinking', payload: {
+      chat_id: 'sess-clock', speaker: 0, provider: 'claude', name: 'Claude'}});
+    // 151 s into a turn with a 300 s idle window and NO deadline: past the
+    // half-window threshold, but streaming the whole time
+    jobsReply = {now: 2000, jobs: [{
+      chat_id: 'sess-clock', status: 'thinking', running: true,
+      background: false, pending_ask: null, queued: 0, working: [],
+      thinking: [{speaker: 0, provider: 'claude', name: 'Claude',
+                  limit: null, idle: 300, started: 1849, lastact: 1999}]}]};
+    await ctx.toggleJobs();
+    await new Promise(r => setImmediate(r));
+    p.busySeatLine = deepText([...byId['jobsList'].children]
+      .filter(c => String(c.className || '').includes('job-row'))[0]);
+    // ...and one that really HAS gone quiet still says so
+    jobsReply.jobs[0].thinking[0].lastact = 1849;
+    await ctx.refreshJobs();
+    p.quietSeatLine = deepText([...byId['jobsList'].children]
+      .filter(c => String(c.className || '').includes('job-row'))[0]);
+    ctx.closeJobs();
+    jobsReply = {jobs: [], now: 1000};
+
+    // (b) a queued row minted after a restore does not reuse an id
+    ctx.queueRestore({'some-chat': [{id: 'q7', text: 'restored', atts: []}]});
+    p.seqAfterRestore = vm.runInContext('queueSeq', ctx);
+
+    // (c) an engine `board` event repaints the card on its own — without it
+    // an expired gate leaves a live "Approve & dispatch" on screen
+    ctx.uiEvent({event: 'started', payload: {
+      session: {id: 'sess-adv', title: 'Adv', participants: [],
+                mode: 'supervisor', can_continue: false},
+      transcript: 'x/transcript.md', workspace: '', mode: 'supervisor'}});
+    ctx.uiEvent({event: 'board', payload: {
+      chat_id: 'sess-adv', id: 'b1', revision: 1, phase: 'proposed', wave: 1,
+      goal: 'g', seats: [{id: 0, name: 'Claude', writes: true}],
+      tasks: [{id: 't1', owner: 0, brief: 'do it', files: [], deps: [],
+               status: 'pending'}]}});
+    const card = () => document.querySelector('.plan-card[data-active-board]');
+    p.cardFromEventPhase = card() ? card().dataset.phase : null;
+    ctx.uiEvent({event: 'board', payload: {
+      chat_id: 'sess-adv', id: 'b1', revision: 1, phase: 'declined', wave: 1,
+      goal: 'g', seats: [], tasks: []}});
+    p.cardAfterEngineDecline = card().dataset.phase;
+    p.declinedNote = deepText(card().querySelector('.plan-note'));
+
+    // (d) a REOPENED chat's board reaches renderBoard. Every run is created
+    // first by renderChats from a rail row with no board, so a
+    // constructor-only seed could never arrive.
+    ctx.runFor('sess-adv2');                    // created bare, like the rail
+    const run = ctx.runFor('sess-adv2', {board: {
+      id: 'b9', revision: 1, phase: 'approved', wave: 2, goal: 'g', seats: [],
+      tasks: [{id: 't9', owner: 0, brief: 'later', files: [], deps: [],
+               status: 'done'}]}});
+    p.reopenedBoardSeeded = !!(run && run.board);
+
+    // (e) a fresh stage repaints the jobs badge. Asserting it stays SHOWN
+    // passes whether or not anything repaints, because nothing else hides it
+    // — so this finishes the chats first and asserts it goes AWAY.
+    p.barBeforeNewChat = !byId['jobsBar'].hidden;
+    vm.runInContext("chatRuns.forEach(r => { r.status = 'done'; "
+                    + "r.question = null; })", ctx);
+    await ctx.newChat();
+    p.barAfterNewChat = !byId['jobsBar'].hidden;
+  } catch (e) { more.advPassError = (e && e.stack) || String(e); }
 
   // Put the boot roster back: report() reads the LIVE DOM, so leaving the
   // stage solo would hand every other test in this file a one-seat page.
@@ -3262,6 +3387,54 @@ class UiBootTests(unittest.TestCase):
         self.assertEqual(self.report.get("valueAfterEscape"), "")
         self.assertTrue(self.report.get("railRestoredAfterEscape"))
 
+    # ---- what the adversarial pass found ------------------------------------
+    def _adv(self):
+        self.assertIsNone(self.report.get("advPassError"),
+                          "adv probe threw: %s"
+                          % self.report.get("advPassError"))
+        return self.report["advPass"]
+
+    def test_the_quiet_clock_needs_a_real_last_activity_stamp(self):
+        """Feeding it the turn's START makes quiet equal the whole age, so
+        every healthy long turn past half its idle window renders red — the
+        0:00-of-15:00 lie from inside the function written to prevent it."""
+        a = self._adv()
+        self.assertEqual(a["quietFromLastact"], "10:00")
+        self.assertIn("quiet", a["quietFromStart"])
+
+    def test_a_busy_background_seat_is_not_reported_as_going_quiet(self):
+        """Driven through the POPOVER: calling the shared function with
+        hand-picked arguments passes whichever argument renderJobsList
+        actually sends."""
+        a = self._adv()
+        self.assertIn("Claude · 2:31", a["busySeatLine"])
+        self.assertNotIn("quiet", a["busySeatLine"])
+        self.assertIn("quiet 2:31 of 5:00", a["quietSeatLine"])
+
+    def test_a_restored_queue_does_not_mint_ids_it_already_holds(self):
+        self.assertEqual(self._adv()["seqAfterRestore"], 7)
+
+    def test_an_engine_board_event_repaints_the_card(self):
+        """Without it the card was only ever built by the `question` handler,
+        so an expired gate left a live "Approve & dispatch" on screen."""
+        a = self._adv()
+        self.assertEqual(a["cardFromEventPhase"], "awaiting")
+        self.assertEqual(a["cardAfterEngineDecline"], "declined")
+
+    def test_the_declined_card_does_not_promise_a_re_plan_it_cannot_know(self):
+        self.assertEqual(self._adv()["declinedNote"], "Sent back.")
+
+    def test_a_reopened_chats_board_is_seeded_onto_an_existing_run(self):
+        """Every run is created FIRST by renderChats from a rail row carrying
+        no board, so a constructor-only seed could never arrive."""
+        self.assertTrue(self._adv()["reopenedBoardSeeded"])
+
+    def test_a_fresh_stage_repaints_the_jobs_badge(self):
+        a = self._adv()
+        self.assertTrue(a["barBeforeNewChat"])
+        self.assertFalse(a["barAfterNewChat"],
+                         "a fresh stage never repainted the bar")
+
     # ---- W2.2: the board-review switch --------------------------------------
     def _bswitch(self):
         self.assertIsNone(self.report.get("boardSwitchError"),
@@ -3457,6 +3630,29 @@ class UiBootTests(unittest.TestCase):
         self.assertEqual(d["rowsAfterArm"], 1)
         self.assertIn("keeps 1 file", d["armLabel"])
         self.assertEqual(d["rowsAfterConfirm"], 0)
+
+    def test_a_queued_row_can_be_moved_and_send_all_follows_the_order(self):
+        d = self._dock()
+        self.assertEqual(d["orderBefore"], ["first", "second"])
+        self.assertEqual(d["orderAfter"], ["second", "first"])
+        self.assertEqual(d["sendAllOrder"], ["second", "first"])
+        self.assertEqual(d["emptyAfterSendAll"], 0)
+
+    def test_the_dock_is_written_where_a_reload_will_find_it(self):
+        rows = self._dock()["persisted"].get("sess-dock") or []
+        self.assertEqual([r["text"] for r in rows], ["kept across a reload"])
+        self.assertTrue(rows[0]["id"])
+
+    def test_a_send_that_outlives_a_chat_switch_lands_where_it_was_sent(self):
+        """sendQueued pins the chat for the bridge call; the drop and the echo
+        after the await used the unpinned global, so a switch mid-flight
+        dropped a row out of the chat now on screen and painted its echo
+        there."""
+        d = self._dock()
+        self.assertEqual(d["switchedAwayLeftBehind"], 0,
+                         "the row stayed in the chat it was sent to")
+        self.assertEqual(d["switchedAwayEchoed"], 0,
+                         "the echo was painted into another chat's transcript")
 
     def test_the_dock_belongs_to_one_chat(self):
         d = self._dock()

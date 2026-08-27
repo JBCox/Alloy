@@ -476,10 +476,16 @@ class HeadlessAppTests(unittest.TestCase):
         killed = []
         for a in api._conv["agents"]:
             a.cancel = lambda: killed.append(1) or True
+        visible = api._runs.focused()
         r = api.stop("some-other-chat")
         self.assertEqual(killed, [])     # never stop the wrong conversation
         self.assertEqual(r["stopped"], 0)
-        self.assertIn("No such chat", r["note"])
+        self.assertFalse(r["ok"])
+        self.assertIn("No such chat", r["error"])
+        # ...and the flag, which this test never checked: a NAMED chat it
+        # does not own used to set the FOCUSED run's flag instead, which is
+        # exactly what _resolve_chat exists to prevent
+        self.assertFalse(visible.stop_flag.is_set())
 
     def test_two_chats_coexist_and_stop_independently(self):
         """The registry's whole point: a second chat starts without ending the
