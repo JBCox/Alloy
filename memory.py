@@ -1,11 +1,17 @@
 """Persistent memory for Alloy - notes that outlive one conversation.
 
 Standalone by the same rule as ``export.py``, ``fork.py`` and ``stats.py``:
-stdlib only, imports nothing from relay/app/webview, never raises out of a
-public function (errors come back as ``{"error": sentence}``). The caller owns
-the root directory and passes it in every call - there is no module-level
-default, because ``fork.py``'s gotcha is that a second default is how two
-halves of the app silently disagree about where the data lives.
+stdlib only, imports nothing from relay/app/webview. Every function that
+touches the filesystem - ``load``, ``remember``, ``forget``, ``search``,
+``resolve``, ``collect`` - answers with ``{"error": sentence}`` rather than
+raising, whatever it is handed. The pure helpers (``render``, ``parse``,
+``one_line``, ``render_lines``) are the round-trip's own internals and assume
+entries shaped like ``parse``'s; ``render`` will raise on a dict with no
+``id``, which is a programming error worth hearing about rather than a
+condition to paper over. The caller owns the root directory and passes it in
+every call - there is no module-level default, because ``fork.py``'s gotcha is
+that a second default is how two halves of the app silently disagree about
+where the data lives.
 
 WHERE IT LIVES. ``BASE_DIR/memory/``, a **sibling** of ``sessions/`` and never
 a child of it. ``relay.list_sessions`` treats every directory under
@@ -337,6 +343,29 @@ def new_id():
     return "m" + uuid.uuid4().hex[:8]
 
 
+def _defuse(text):
+    """Stop a note's own body from parsing as a second note.
+
+    Measured: remembering "Findings so far:\n\n## Results\nIt is fast."
+    stored ONE note and read back TWO -- the second attributed to nobody,
+    id "Results", and a /forget on the original id would have removed only
+    the first half. A markdown H2 inside a note is not exotic; seats write
+    structured notes.
+
+    One leading space is the whole fix, and it is chosen because it is not a
+    content change anyone can see: CommonMark allows up to three spaces of
+    indentation before a heading, so the file still renders identically to a
+    human, while `_HEAD_RE` (anchored at ^##) no longer matches. Returns
+    (text, how many lines were moved) so the write can SAY it happened.
+    """
+    out, moved = [], 0
+    for line in (text or "").split("\n"):
+        if _HEAD_RE.match(line) and _ID_RE.match(_HEAD_RE.match(line).group(1)):
+            line, moved = " " + line, moved + 1
+        out.append(line)
+    return "\n".join(out), moved
+
+
 def _stamp():
     return time.strftime("%Y-%m-%d")
 
@@ -380,8 +409,17 @@ def remember(root, scope, text, kind=KIND_JOSH, who=None, when=None):
     if len(text) > ENTRY_TEXT_MAX:
         notes.append("trimmed to %d characters" % ENTRY_TEXT_MAX)
         text = text[:ENTRY_TEXT_MAX].rstrip() + " ..."
-    entry = {"id": new_id(), "kind": kind, "who": (who or "").strip() or None,
-             "when": (when or _stamp()), "text": text}
+    text, moved = _defuse(text)
+    if moved:
+        notes.append("indented %d heading line%s so the note stays one note"
+                     % (moved, "" if moved == 1 else "s"))
+    # str() on both: they are rendered into the header line and joined, so a
+    # caller handing in a number raised AttributeError from `who` and
+    # TypeError from the join -- out of a function whose docstring promises
+    # an error dict instead
+    entry = {"id": new_id(), "kind": kind,
+             "who": str(who or "").strip() or None,
+             "when": str(when or "").strip() or _stamp(), "text": text}
     try:
         with _lock(path):
             cur = load(root, scope)
@@ -472,7 +510,10 @@ def search(root, scope, query, limit=HITS_MAX):
         scored = [(_score(e, terms), i, e) for i, e in enumerate(entries)]
         ranked = [e for s, _, e in sorted(
             (x for x in scored if x[0]), key=lambda x: (-x[0], -x[1]))]
-    limit = max(1, int(limit or HITS_MAX))
+    try:
+        limit = max(1, int(limit or HITS_MAX))
+    except (TypeError, ValueError):     # the docstring promises no raises
+        limit = HITS_MAX
     return {"hits": ranked[:limit], "total": len(ranked),
             "scanned": len(entries), "truncated": bool(data.get("truncated")),
             "error": None}
@@ -545,6 +586,13 @@ _WHO_FALLBACK = {KIND_JOSH: "Josh", KIND_STRUCTURAL: "Alloy",
                  KIND_SEAT: "a seat"}
 
 
+def who(entry):
+    """Who to credit a note to. Public because relay renders notes too, and
+    the two must not drift into crediting the same note differently."""
+    return (entry or {}).get("who") or _WHO_FALLBACK.get(
+        (entry or {}).get("kind"), "unknown")
+
+
 def one_line(entry, line_max=ENTRY_LINE_MAX):
     """One note as a single bullet: attribution, date, collapsed text.
 
@@ -556,8 +604,8 @@ def one_line(entry, line_max=ENTRY_LINE_MAX):
     text = " ".join((entry.get("text") or "").split())
     if len(text) > line_max:
         text = text[:max(1, line_max - 4)].rstrip() + " ..."
-    who = entry.get("who") or _WHO_FALLBACK.get(entry.get("kind"), "unknown")
-    return "- [%s, %s] %s" % (who, entry.get("when") or "undated", text)
+    return "- [%s, %s] %s" % (who(entry), entry.get("when") or "undated",
+                              text)
 
 
 def render_lines(entries, budget, line_max=ENTRY_LINE_MAX):

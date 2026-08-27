@@ -5811,8 +5811,7 @@ def format_memories(state, limit=None):
     lines = ["Remembered for %s (%d note%s):"
              % (where, total, "" if total == 1 else "s")]
     for e in rows:
-        who = e.get("who") or memory_store._WHO_FALLBACK.get(e.get("kind"),
-                                                             "unknown")
+        who = memory_store.who(e)
         # only worth marking inside a PROJECT chat, where the list mixes two
         # files; in a global chat every row is global and the tag is noise
         tag = (", everywhere"

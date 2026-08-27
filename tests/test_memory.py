@@ -355,9 +355,19 @@ class CollectTests(Tmp):
     def test_newest_first_inside_a_kind_and_undated_last(self):
         old = self.add("global", "old", when="2026-01-01")
         new = self.add("global", "new", when="2026-08-27")
-        none = self.add("global", "undated", when=" ")
+        # an undated note is written BY HAND -- that is the only way one
+        # arises, since remember() stamps today when it is given nothing
+        path = memory.scope_path(self.root, "global")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\n## hand-note | josh\nundated\n")
         got = memory.collect(self.root, "global")["entries"]
-        self.assertEqual([e["id"] for e in got], [new, old, none])
+        self.assertEqual([e["id"] for e in got], [new, old, "hand-note"])
+
+    def test_a_blank_when_is_stamped_today_rather_than_left_undated(self):
+        mid = self.add("global", "x", when="   ")
+        row = [e for e in memory.load(self.root, "global")["entries"]
+               if e["id"] == mid][0]
+        self.assertTrue(row["when"])
 
     def test_a_global_note_JOSH_wrote_reaches_a_project_chat(self):
         j = self.add("global", "Josh writes CRLF everywhere")
@@ -1266,6 +1276,64 @@ class DirectiveTests(unittest.TestCase):
         st, _io = self.run_mode("round_robin", "ok", turns=1)
         self.assertIn("[[REMEMBER:", st["agents"][0].prompts[0])
         self.assertIn("[[RECALL:", st["agents"][0].prompts[0])
+
+
+class RobustnessTests(Tmp):
+    """What an adversarial pass over the finished wave turned up."""
+
+    def test_a_note_containing_a_markdown_H2_stays_ONE_note(self):
+        # measured: this stored one note and read back TWO, the second
+        # attributed to nobody with id "Results", and /forget on the original
+        # id would have removed only the first half
+        got = memory.remember(self.root, "global",
+                              "Findings so far:\n\n## Results\nIt is fast.",
+                              who="Josh")
+        self.assertIn("indented", got["note"])
+        rows = memory.load(self.root, "global")["entries"]
+        self.assertEqual(len(rows), 1)
+        self.assertIn("Results", rows[0]["text"])
+        self.assertIn("It is fast.", rows[0]["text"])
+        self.assertEqual(memory.forget(self.root, "global",
+                                       rows[0]["id"])["remaining"], 0)
+
+    def test_the_indent_is_invisible_to_a_human_reading_the_file(self):
+        # CommonMark allows up to three spaces before a heading, so the file
+        # still renders identically -- that is why one space is the fix and a
+        # rewrite of the text is not
+        memory.remember(self.root, "global", "a\n## B\nc")
+        with open(memory.scope_path(self.root, "global"),
+                  encoding="utf-8") as f:
+            body = f.read()
+        self.assertIn(" ## B", body)
+        self.assertNotIn(chr(10) + "## B", body)
+
+    def test_an_ordinary_note_is_not_indented_and_says_nothing(self):
+        got = memory.remember(self.root, "global", "plain note")
+        self.assertEqual(got["note"], "")
+        self.assertEqual(memory.load(self.root, "global")["entries"][0]["text"],
+                         "plain note")
+
+    def test_no_filesystem_function_raises_on_junk_it_is_handed(self):
+        # the module docstring promises an error dict, and three of these
+        # raised: search on a non-numeric limit, and remember on a non-string
+        # who (AttributeError) or when (TypeError from the header join)
+        self.assertEqual(memory.search(self.root, "global", "q",
+                                       limit="x")["total"], 0)
+        self.assertTrue(memory.remember(self.root, "global", "x", who=123,
+                                        when=2026)["ok"])
+        row = memory.load(self.root, "global")["entries"][0]
+        self.assertEqual((row["who"], row["when"]), ("123", "2026"))
+
+    def test_relay_and_the_store_credit_a_note_the_same_way(self):
+        # relay used to reach into memory._WHO_FALLBACK; one public helper
+        # means the two renderers cannot drift into crediting one note
+        # differently in a preamble and in /memory
+        for kind, expect in (("josh", "Josh"), ("structural", "Alloy"),
+                             ("seat", "a seat"), (None, "unknown")):
+            e = {"kind": kind, "text": "x"}
+            self.assertEqual(memory.who(e), expect)
+            self.assertIn(expect, memory.one_line(e))
+        self.assertEqual(memory.who({"who": "Ox", "kind": "seat"}), "Ox")
 
 
 class SiblingTests(unittest.TestCase):
