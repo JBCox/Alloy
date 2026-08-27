@@ -306,7 +306,15 @@ function everyEl() {
 const documentEl = mkEl('html');
 const body = byId['__body'] || mkEl('body');
 const document = {
-  getElementById: id => byId[id] || null,
+  // byId holds the STATIC markup. Everything the script builds gets its id
+  // by plain assignment (`d.id = "seat-" + seat.id`), which registers
+  // nowhere — so a lookup-only stub could never find a seat card, and code
+  // doing $('seat-' + n) looked broken to the harness while working
+  // perfectly in a browser. That is the direction that makes a stub worse
+  // than useless, so this searches the document the way the real one does
+  // (2026-08-27; W1.4's seat readout is the first test to need it).
+  getElementById: id => byId[id]
+    || everyEl().find(e => e.id === id) || null,
   createElement: tag => mkEl(tag),
   createTextNode: t => { const e = mkEl('#text'); e.textContent = t; return e; },
   createDocumentFragment: () => mkEl('#fragment'),
@@ -1667,6 +1675,84 @@ if (topLevelError) {
       {text: 'a', state: 'blocked'}])))[0];
     ctx.hideAllTyping();
   } catch (e) { more.todoError = (e && e.stack) || String(e); }
+
+  // ---- W1.4: the honest context readout -----------------------------------
+  // Driven through the REAL message event and the real seat cards. The DOM
+  // stub parses innerHTML FLAT and never derives a parent's textContent, so
+  // content is read out of the element's own _html.
+  try {
+    const p = more.ctx = {};
+    const strip = h => {
+      const html = String(h || '');
+      const open = html.indexOf('>'), close = html.lastIndexOf('<');
+      return open < 0 || close <= open ? html : html.slice(open + 1, close);
+    };
+    p.pillWithWindow = strip(ctx.contextPill(
+      {context_used: 41616, context_window: 200000}));
+    p.pillNoWindow = strip(ctx.contextPill({context_used: 14701}));
+    p.pillNone = ctx.contextPill(null);
+    p.pillZero = ctx.contextPill({context_used: 0, context_window: 200000});
+    p.short = [842, 1234, 41616, 200000, 1500000, 12000000]
+      .map(n => ctx.shortTokens(n));
+    p.shortJunk = [ctx.shortTokens('lots'), ctx.shortTokens(-4),
+                   ctx.shortTokens(null)];
+    await ctx.newChat();
+    const card = () => document.getElementById('seat-0');
+    const box = () => card().querySelector('.seat-ctx');
+    const cardText = () => {
+      const b = box();
+      if (!b || !(b.className || '').includes('show')) return '';
+      const m = String(b._html || '').match(/ctx-text">([^<]*)</);
+      return m ? m[1] : '';
+    };
+    const row = (n, extra) => ctx.uiEvent({event: 'message', payload:
+      Object.assign({speaker: 0, provider: 'claude', name: 'Claude',
+                     text: 'r' + n, round: n, message_id: 'c' + n}, extra)});
+    row(1, {context: {context_used: 41616, context_window: 200000}});
+    p.barWithWindow = String(box()._html || '').indexOf('ctx-fill') >= 0;
+    p.textWithWindow = cardText();
+    p.tightAtHalf = (box().className || '').includes('tight');
+    row(2, {context: {context_used: 50000, context_window: 200000}});
+    p.afterTwoRows = cardText();
+    row(3, {context: {context_used: 180000, context_window: 200000}});
+    p.tightAtNinety = (box().className || '').includes('tight');
+    row(4, {context: {context_used: 900000, context_window: 200000}});
+    p.overFullWidth = (String(box()._html || '')
+      .match(/width:(\d+%)/) || [])[1] || null;
+    row(5, {context: {context_used: 14701}});
+    p.barNoWindow = String(box()._html || '').indexOf('ctx-fill') >= 0;
+    p.textNoWindow = cardText();
+    ctx.addMsg('claude', 'Claude', 'replayed', 'round 6', null,
+               '2026-08-27T10:00:00', null, null,
+               {message_id: 'c6', delivered_to: [], speaker: 0,
+                context: {context_used: 33000, context_window: 200000}});
+    p.afterReplay = cardText();
+    // A masked blind-duel row must not repaint the card it just anonymised.
+    // Driven through the REAL masking path (syncBattleUI + intent:"battle"),
+    // because a hand-set row field sets no dataset.realName at all and the
+    // probe would pass whether the guard existed or not.
+    ctx.syncBattleUI({battle: {state: 'awaiting', slots: [0, 1]}});
+    p.maskWorks = false;
+    ctx.addMsg('claude', 'Claude', 'masked', 'round 7', null,
+               '2026-08-27T10:01:00', null, null,
+               {message_id: 'c7', delivered_to: [], speaker: 0,
+                intent: 'battle',
+                context: {context_used: 99000, context_window: 200000}});
+    const masked = [...byId['feed'].children].filter(
+      c => (c.className || '').includes('msg')).pop();
+    p.maskWorks = (masked.className || '').includes('msg-masked');
+    p.afterMasked = cardText();
+    ctx.syncBattleUI({});
+    // reopening a DIFFERENT chat must not leave this one's numbers behind:
+    // the stub's open_session replies with rows that carry no context at
+    // all, so nothing in the replay would overwrite them
+    row(8, {context: {context_used: 60000, context_window: 200000}});
+    p.beforeReopen = cardText();
+    await ctx.openChat('some-other-chat');
+    p.afterReopen = cardText();
+    await ctx.newChat();
+    p.afterNewChat = cardText();
+  } catch (e) { more.ctxError = (e && e.stack) || String(e); }
 
   // ---- W1.3: the usage pill's clock ---------------------------------------
   // claude reports duration_ms, codex reports neither duration_ms nor cost —

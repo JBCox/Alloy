@@ -469,6 +469,23 @@
   .seat-workstream[data-status=active] { color: var(--seat); }
   .seat-workstream[data-status=failed] { color: var(--danger); }
   .seat-workstream[data-status=done] { color: var(--text); opacity: .72; }
+  /* How full this seat's context was at the end of its last turn. The BAR
+     appears only when a CLI reported a real window: no measured
+     denominator, no proportion. Without one the row is words alone. */
+  .seat-ctx {
+    display: none; margin-top: 6px;
+    font: 10.5px "Cascadia Mono", Consolas, monospace; color: var(--muted);
+  }
+  .seat-ctx.show { display: block; }
+  .seat-ctx .ctx-bar {
+    height: 3px; border-radius: 2px; background: var(--surface2);
+    margin-bottom: 3px; overflow: hidden;
+  }
+  .seat-ctx .ctx-fill {
+    height: 100%; background: var(--seat, var(--muted)); border-radius: 2px;
+  }
+  .seat-ctx.tight .ctx-fill { background: var(--danger, #e06c5c); }
+  .seat-ctx.tight .ctx-text { color: var(--danger, #e06c5c); }
   .seat select {
     width: 100%; margin-top: 7px; background: var(--surface2); color: var(--text);
     border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px;
@@ -1317,7 +1334,13 @@
   .msg[data-provider=ox] { --who: var(--ox); }
   .msg.josh { --who: var(--josh); background: #241F17; margin-left: 60px; }
   .msg.system { --who: var(--muted); color: var(--muted); font-size: 13px; }
-  .msg-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+  /* flex-wrap is load-bearing, not tidiness: the head is a flex row of
+     pills and it was `nowrap`, so a row carrying cost + context + delivery
+     pushed its own scrollWidth past its box and the transcript grew a
+     horizontal scrollbar. Only a real browser can see that — measured
+     2026-08-27 at 559px in a 490px box, and 490 in 490 with this line. */
+  .msg-head { display: flex; align-items: baseline; gap: 10px; row-gap: 4px;
+    flex-wrap: wrap; margin-bottom: 6px; }
   /* day dividers — a new calendar day in the transcript gets a labelled rule */
   .day-divider {
     display: flex; align-items: center; gap: 12px;
@@ -1343,6 +1366,12 @@
     color: var(--muted); background: var(--surface2);
     border-radius: 4px; padding: 1px 6px; margin-left: 2px;
   }
+  /* Must live HERE, after the rule it overrides, and carry the same
+     descendant part: `.msg-usage.ctx-tight` up with the seat CSS has equal
+     specificity and loses on source order, so the pill silently never
+     turned red. Only a real browser could see that — the node harness
+     reads no cascade at all. */
+  .msg-head .msg-usage.ctx-tight { color: var(--danger, #e06c5c); }
   .msg-head .delivery-pill {
     font: 10.5px "Cascadia Mono", Consolas, monospace;
     color: #AFC5DA; background: rgba(89,128,166,.14);
@@ -3251,6 +3280,91 @@ $("findInput").onkeydown = e => {
   // document listener, whose Escape branch closes the bar (and that branch
   // must stay the FIRST Escape check in this file for the bindings test).
 };
+// ---- W1.4: how full a seat's context is ----------------------------------
+// Compact token counts. Only ever shortens a number it was GIVEN; it never
+// supplies one.
+function shortTokens(n) {
+  // Number(null) and Number("") are both 0, so without this an absent
+  // value would format as a confident "0" — inventing the one number the
+  // caller most needs to be able to tell apart from a blank.
+  if (n === null || n === undefined || n === "") return null;
+  n = Number(n);
+  if (!isFinite(n) || n < 0) return null;
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1).replace(/\.0$/, "") + "M";
+  if (n >= 1000) return (n / 1000).toFixed(n >= 1e5 ? 0 : 1).replace(/\.0$/, "") + "k";
+  return String(Math.round(n));
+}
+// The share of a seat's window in use, or null when nothing measured a
+// window. NO MEASURED DENOMINATOR, NO RING: a proportion is only ever drawn
+// against a number a CLI actually reported, never against a guess at what
+// the model's window "probably" is.
+function contextShare(ctx) {
+  if (!ctx || typeof ctx !== "object") return null;
+  const used = Number(ctx.context_used), win = Number(ctx.context_window);
+  if (!isFinite(used) || used <= 0 || !isFinite(win) || win <= 0) return null;
+  return Math.min(1, used / win);
+}
+// A seat is "tight" once it is past four fifths of a window somebody
+// measured. Deliberately has no meaning at all without one.
+const CONTEXT_TIGHT = 0.8;
+function contextPill(ctx) {
+  if (!ctx || typeof ctx !== "object") return "";
+  // the NUMBER, not its label: shortTokens(0) is the string "0", which is
+  // truthy, so a zero context would have rendered a pill reading "ctx 0"
+  if (!(Number(ctx.context_used) > 0)) return "";
+  const used = shortTokens(ctx.context_used);
+  const share = contextShare(ctx);
+  const win = share === null ? null : shortTokens(ctx.context_window);
+  const label = win ? `ctx ${used}/${win}` : `ctx ${used}`;
+  const tip = win
+    ? `${Number(ctx.context_used).toLocaleString()} of `
+      + `${Number(ctx.context_window).toLocaleString()} tokens in this seat's `
+      + `context after this turn (${Math.round(share * 100)}%)`
+    : `${Number(ctx.context_used).toLocaleString()} tokens in this seat's `
+      + `context after this turn. Its CLI reports no context window, so `
+      + `there is no share to show.`;
+  return `<span class="msg-usage${share !== null && share >= CONTEXT_TIGHT
+    ? " ctx-tight" : ""}" title="${esc(tip)}">${esc(label)}</span>`;
+}
+// The seat card's own readout, repainted from whichever row landed last —
+// live and on replay alike, because addMsg is the one door both use.
+function paintSeatContext(speakerId, ctx) {
+  const card = $("seat-" + speakerId);
+  if (!card) return;
+  const box = card.querySelector(".seat-ctx");
+  if (!box) return;
+  const used = ctx && Number(ctx.context_used) > 0
+    ? shortTokens(ctx.context_used) : null;
+  if (!used) {
+    box.classList.remove("show", "tight");
+    box.innerHTML = "";
+    box.removeAttribute("title");
+    return;
+  }
+  const share = contextShare(ctx);
+  const bar = share === null ? ""
+    : `<div class="ctx-bar"><div class="ctx-fill" style="width:${
+        Math.round(share * 100)}%"></div></div>`;
+  const text = share === null
+    ? `${used} in context`
+    : `${used} / ${shortTokens(ctx.context_window)} · ${
+        Math.round(share * 100)}%`;
+  box.innerHTML = bar + `<div class="ctx-text">${esc(text)}</div>`;
+  box.classList.toggle("tight", share !== null && share >= CONTEXT_TIGHT);
+  box.classList.add("show");
+  box.title = share === null
+    ? "Context after this seat's last turn. Its CLI reports no window, so "
+      + "there is no share to show."
+    : "Context after this seat's last turn, against the window its CLI "
+      + "reported.";
+}
+function clearSeatContexts() {
+  document.querySelectorAll(".seat-ctx").forEach(b => {
+    b.classList.remove("show", "tight");
+    b.innerHTML = "";
+    b.removeAttribute("title");
+  });
+}
 function formatUsage(usage) {
   if (!usage || typeof usage !== "object") return "";
   const parts = [];
@@ -3412,6 +3526,18 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
     ? `<span class="mtime" title="${esc(ts.replace("T", " "))}">${esc(ts.slice(11, 16))}</span>`
     : "";
   const costPill = formatUsage(usage);
+  // How full this seat's context was when it finished this turn. Its own
+  // pill, not a field of the cost one: a level, not a spend — and present
+  // for seats whose CLI reports no tokens at all.
+  const ctx = row && typeof row.context === "object" ? row.context : null;
+  const ctxPill = contextPill(ctx);
+  // and the seat card follows the newest row, live and on replay alike
+  // A blind-duel row has had its identity deliberately masked, so painting
+  // its seat card would restore exactly what the mask just removed.
+  if (ctx && row && row.speaker !== undefined && kind !== "josh"
+      && kind !== "system" && d.dataset.realName === undefined) {
+    paintSeatContext(row.speaker, ctx);
+  }
   const delivery = deliveryPill(row);
   const refusal = refusalPill(row);
   // what the seat DID before this reply — the stored row's capped activity
@@ -3441,7 +3567,7 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
       acts.map(a => actLineHtml(a)).join("") + `</details>`
     : "";
   d.innerHTML = `<div class="msg-head"><span class="who">${esc(name)}</span>` +
-    (meta ? `<span class="meta">${esc(meta)}</span>` : "") + costPill + delivery + refusal + clock +
+    (meta ? `<span class="meta">${esc(meta)}</span>` : "") + costPill + ctxPill + delivery + refusal + clock +
     `</div>` + think + `<div class="msg-body">${md(text)}</div>`;
   const cp = document.createElement("button");
   cp.className = "copy-btn"; cp.title = "Copy message text"; cp.textContent = "⧉";
@@ -5427,6 +5553,7 @@ function addSeat(provider, forceId) {
       <button class="rm" title="Remove — take this seat out of the room entirely" aria-label="Remove seat">✕</button>
     </div>
     <div class="seat-workstream"></div>
+    <div class="seat-ctx"></div>
     <select class="model" title="Model — what this seat runs on; options come from its provider"></select>
     <select class="effort" title="Thinking effort — options come from each model"></select>
     <button class="role-btn" title="Role — give this seat a public name plus private instructions only it sees"></button>`;
@@ -8355,6 +8482,7 @@ async function openChat(id, findQuery, findExcerpt) {
   showFolder(s.project ? s.workspace : null);   // this chat's folder, not the preference
   convProviders = (s.participants || []).map(p => p.provider);
   imgCache.clear(); resetEditing();                     // this chat's workspace, not the last one's
+  clearSeatContexts();                                  // replay repaints them from its own rows
   refreshFiles();
   restoreModerator(s.mode === "supervisor" ? s.supervisor : s.moderator);
   renderSupervisorOverview(s.goal || "", s.tasks || [], s.mode || "");
@@ -8527,6 +8655,7 @@ function resetStage() {
   $("seatList").classList.remove("locked");
   setSeated(false);   // no live seats to re-role — roles are typed again
   imgCache.clear(); resetEditing();
+  clearSeatContexts();
   refreshFiles();     // no active chat ⇒ the rail says so
 }
 

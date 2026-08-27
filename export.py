@@ -215,10 +215,30 @@ def _card(row):
                 "</details>" % (len(items), "" if len(items) == 1 else "s",
                                 "".join(items)))
     usage = row.get("usage")
-    if isinstance(usage, dict) and usage:
+    # How full this seat's context was when it finished this turn — its own
+    # pill beside the spend ones, because it is a level and not a spend, and
+    # because a seat whose CLI reports no tokens can still report this. The
+    # share is shown ONLY against a window a CLI actually reported: no
+    # measured denominator, no proportion.
+    ctx = row.get("context")
+    ctx_pill = ""
+    if isinstance(ctx, dict):
+        used = ctx.get("context_used")
+        window = ctx.get("context_window")
+        if isinstance(used, int) and used > 0:
+            if isinstance(window, int) and window > 0:
+                ctx_pill = ("<span class='pill'>context: %s / %s (%d%%)</span>"
+                            % (_esc("{:,}".format(used)),
+                               _esc("{:,}".format(window)),
+                               min(100, round(used * 100.0 / window))))
+            else:
+                ctx_pill = ("<span class='pill'>context: %s (no window "
+                            "reported)</span>" % _esc("{:,}".format(used)))
+    if (isinstance(usage, dict) and usage) or ctx_pill:
         pills = "".join("<span class='pill'>%s: %s</span>" % (_esc(k), _esc(v))
-                        for k, v in sorted(usage.items()))
-        parts.append("<div>%s</div>" % pills)
+                        for k, v in sorted((usage or {}).items())
+                        if isinstance(usage, dict))
+        parts.append("<div>%s</div>" % (pills + ctx_pill))
     parts.append("</article>")
     return "".join(parts)
 

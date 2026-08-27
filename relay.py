@@ -1320,6 +1320,12 @@ class Agent:
         # Josh approves, so a yolo conversation is not exempt.
         self.plan_mode = False
         self.last_usage = None
+        # How full this seat's context was at the END of the last turn —
+        # {"context_used": n[, "context_window": w]}, or None when the CLI
+        # gives no honest way to know (codex publishes one usage event for a
+        # whole run, agy publishes no stream at all). A LEVEL, never a sum:
+        # it is stamped on the row and never accumulated.
+        self.last_context = None
         # Cumulative-counter bookkeeping for adapters whose CLI reports the
         # whole THREAD's totals rather than this turn's (codex; see
         # usage_delta). Stays None for every adapter that already reports
@@ -1742,6 +1748,7 @@ class Agent:
         self._turn_denial_reason = ""
         self._turn_verdict = None
         self.last_usage = None
+        self.last_context = None
         if (self.permission == "ask" and not self.plan_mode
                 and not self.tool_approval_hook and self.on_approval):
             try:
@@ -2172,6 +2179,49 @@ def _todo_act(items):
              "todo": {"items": rows, "done": done, "total": len(rows)}}]
 
 
+def _context_used(usage):
+    """How many tokens were IN the prompt — not just the ones billed fresh.
+
+    MEASURED 2026-08-27 against claude 2.1.233: an assistant event whose
+    real context was 41,616 tokens reported `input_tokens: 8`. Everything
+    else arrives as `cache_creation_input_tokens` + `cache_read_input_tokens`
+    — cached, but still in the prompt. W1.4's plan said to publish "the last
+    top-level assistant event's input-token count"; that number is 8, and a
+    readout saying a seat had used 8 tokens of a 200,000-token window would
+    have been a measurement of the wrong thing, which is exactly the class
+    of bug W1.3 had just finished fixing.
+
+    Returns None (not 0) when there is nothing to read: absence is a blank,
+    never a zero."""
+    if not isinstance(usage, dict):
+        return None
+    total = 0
+    seen = False
+    for key in ("input_tokens", "cache_creation_input_tokens",
+                "cache_read_input_tokens"):
+        v = usage.get(key)
+        if isinstance(v, int) and v >= 0:
+            total += v
+            seen = True
+    return total if seen else None
+
+
+def context_report(used, window):
+    """The one shape a per-seat context readout takes.
+
+    `window` may be None, and that is a first-class answer: NO MEASURED
+    DENOMINATOR, NO RING. A front end draws a proportion only when `window`
+    is a real number a CLI reported, and words otherwise — inventing a
+    percentage out of a guessed window is the same lie as inventing a token
+    count."""
+    if not isinstance(used, int) or used <= 0:
+        return None
+    out = {"context_used": used}
+    if isinstance(window, int) and window > 0:
+        out["context_window"] = window
+    return out
+
+
 def _tool_result_text(block):
     """A tool_result's content is a string OR a list of typed blocks."""
     content = block.get("content")
@@ -2543,6 +2593,12 @@ class ClaudeAgent(Agent):
                 # is an answer.
                 "basis_version": USAGE_BASIS,
             }
+        # deliberately NOT folded into last_usage: context is a LEVEL, not
+        # a spend, and a seat whose CLI reports no tokens (OpenCode) must be
+        # able to report a context without manufacturing a usage dict that
+        # would read "0 tokens" exactly where the budget bar draws an honest
+        # blank — the same rule wall_ms follows one field over.
+        self.last_context = self._context_report(stdout, data)
         if data.get("is_error") or (data.get("subtype") or "success") != "success":
             # A FAILED result still carries `result` — but it holds the CLI's
             # error sentence ("API Error: …"), not the model's turn. Returning
@@ -2550,6 +2606,64 @@ class ClaudeAgent(Agent):
             # said it. Empty ⇒ turn() raises ⇒ retry-then-skip. Never forge.
             return ""
         return (data.get("result") or "").strip()
+
+    def _context_report(self, stdout, result):
+        """This seat's context at the END of the turn, measured twice over.
+
+        Two rules, both from real captured stdout on 2026-08-27:
+
+        * ONLY TOP-LEVEL assistant events count. A native subagent's events
+          ride the same stream and carry a non-None `parent_tool_use_id` —
+          the plan listed that as unconfirmed; it is confirmed, and it is
+          load-bearing. In the measured run the subagent sat at 21,184
+          tokens while the seat itself was at 39,613, so an unfiltered read
+          understates by 45% at exactly the moments a seat is delegating
+          hardest.
+        * The last such event wins, because the context only grows within a
+          turn (22,125 -> 41,376 across one measured run).
+
+        The denominator is the CLI's OWN `modelUsage[…].contextWindow`
+        (200,000 there). It is read per turn rather than cached because the
+        result object carries it every time; a turn that errors before one
+        exists simply has no window, and the readout becomes words.
+        """
+        used = None
+        for line in (stdout or "").splitlines():
+            line = line.strip()
+            if not line.startswith("{") or '"assistant"' not in line:
+                continue
+            try:
+                evt = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(evt, dict) or evt.get("type") != "assistant":
+                continue
+            if evt.get("parent_tool_use_id") is not None:
+                continue                      # a subagent's context, not ours
+            msg = evt.get("message")
+            n = _context_used((msg or {}).get("usage")
+                              if isinstance(msg, dict) else None)
+            if n:
+                used = n
+                model = (msg or {}).get("model")
+        if used is None:
+            return None
+        window = None
+        usages = (result or {}).get("modelUsage")
+        if isinstance(usages, dict):
+            # prefer the entry for the model that actually answered; fall
+            # back to a lone entry, and to nothing at all when several
+            # models ran and none of them matches (a guess between two real
+            # windows is still a guess)
+            rows = [v for v in usages.values() if isinstance(v, dict)]
+            match = [v for k, v in usages.items()
+                     if isinstance(v, dict)
+                     and model in (k, v.get("canonicalModel"))]
+            pick = match[0] if match else (rows[0] if len(rows) == 1 else None)
+            if isinstance(pick, dict):
+                w = pick.get("contextWindow")
+                window = w if isinstance(w, int) and w > 0 else None
+        return context_report(used, window)
 
     def describe_failure(self, stdout, stderr):
         data = self._result_object(stdout)
@@ -3474,9 +3588,54 @@ class OpenCodeAgent(Agent):
             chunk = part.get("text")
             if isinstance(chunk, str):
                 texts[pid] = chunk
+        self.last_context = self._context_report(stdout)
         return "\n\n".join(
             t.strip() for t in (texts.get(k, "") for k in order) if t.strip()
         ).strip()
+
+    def _context_report(self, stdout):
+        """OpenCode's context, from the LAST `step_finish` of the turn.
+
+        MEASURED 2026-08-27 across a real six-step run: `tokens.input` counts
+        only what was NOT served from cache, so the prompt is
+        `input + cache.read + cache.write` — the same shape claude's
+        input/cache_creation/cache_read has, and the same trap. The series
+        read 13,717 / 13,943 / 5,445(+8,640 cached) / … : reading `input`
+        alone would have shown the context SHRINKING by 60% at the moment
+        caching started working.
+
+        The denominator is models.dev's own `context` for this model, which
+        `ox_model_details` already caches for the thinking-level picker. It
+        is keyed by the bare model id, so a seat whose model is missing from
+        the catalog gets no window and the readout becomes words."""
+        used = None
+        for evt in self._events(stdout):
+            if evt.get("type") != "step_finish":
+                continue
+            part = evt.get("part")
+            tok = (part or {}).get("tokens") if isinstance(part, dict) else None
+            if not isinstance(tok, dict):
+                continue
+            cache = tok.get("cache") if isinstance(tok.get("cache"), dict) else {}
+            n = 0
+            seen = False
+            for v in (tok.get("input"), cache.get("read"), cache.get("write")):
+                if isinstance(v, int) and v >= 0:
+                    n += v
+                    seen = True
+            if seen and n:
+                used = n
+        if used is None:
+            return None
+        window = None
+        model = (self.model or OX_DEFAULT_MODEL or "").split("/")[-1]
+        try:
+            details = ox_model_details().get(model) or {}
+            w = details.get("context")
+            window = w if isinstance(w, int) and w > 0 else None
+        except Exception:               # catalog missing: words, not a guess
+            window = None
+        return context_report(used, window)
 
     def describe_failure(self, stdout, stderr):
         # {"type":"error","error":{"name":"UnknownError","data":{"message":..,
@@ -4585,7 +4744,7 @@ class SessionStore:
                "provider": provider, "name": name, "text": text,
                "round": round, "meta": meta, "role": role or None,
                "ts": ts}
-        for key in ("thread_id", "intent", "artifacts", "digest_of",
+        for key in ("thread_id", "intent", "artifacts", "context", "digest_of",
                     # delivery-refusal receipts (comms-design.md section 3.3):
                     # rejected_to [{seat, reason}] + narrowing_failed — the
                     # payload ui/index.html's refusalPill renders
@@ -8616,6 +8775,11 @@ def commit_reply(state, i, reply, consumed, io, activity=None,
         "artifacts": artifact_descriptors(
             state.get("workspace"), activity, state["slot_ids"][i], message_id,
             extra_paths=getattr(agent, "last_images", None)),
+        # How full this seat's context was when it finished this turn. A
+        # sibling of `usage`, not a field of it: a level rather than a spend,
+        # and present for seats whose CLI reports no tokens at all. Absent
+        # when the CLI gives no honest way to know.
+        "context": getattr(agent, "last_context", None),
     }
     # Refused deliveries are stamped on the SENDER's row (comms-design.md
     # section 3.3: rejected_to [{seat, reason}], plus narrowing_failed when a
