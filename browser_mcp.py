@@ -613,24 +613,61 @@ def decide(tool, level=None):
     return ASK, ""
 
 
-def _confine(path, workspace):
-    """`path` if it is inside `workspace`, else None.
+def _confine(root, path):
+    """`path` resolved beneath `root`, else None. Never raises.
 
     realpath BEFORE the containment check, so a junction or symlink out of the
-    folder fails rather than resolving out of it after the fact -- the same
-    rule `confine_to_workspace` follows in the app.
+    folder fails rather than resolving out of it after the fact.
+
+    THIS IS THE SECOND COPY OF `relay.confine_to_workspace`, kept in step by
+    hand ON PURPOSE. This module is spawned as its own process by a seat's
+    CLI and imports nothing from relay/app/webview (see the header), so it
+    cannot call the canonical one; the price of that independence is that the
+    rule below must mirror relay's line for line. Both are pinned by
+    tests/test_confinement_parity.py, which feeds one table of escape cases to
+    each and asserts identical verdicts -- edit one and that suite fails.
+
+    Three rules are load-bearing, and all three are real 2026-08-27
+    divergences rather than hypotheticals:
+
+    * `commonpath`, NOT `real.startswith(real_root + os.sep)`. Two measured
+      false refusals came from that one line. realpath of a drive root
+      ALREADY ends in a separator, so `"C:\\" + os.sep` is `"C:\\\\"` and
+      nothing on the machine starts with it -- a workspace of `C:\\` refused
+      every path in the world. And realpath fixes the case only of components
+      that EXIST, so a workspace folder that does not exist yet keeps
+      whatever case the caller typed and two spellings of one root stopped
+      matching.
+    * a truthiness guard on `path`. An empty `filePath` joins to the root and
+      came back as the WORKSPACE DIRECTORY, so the refusal below never fired
+      and the approval card would have named a folder.
+    * type guards on BOTH arguments. `os.path.join` raises TypeError on
+      None/int/bytes and TypeError is not in the except clause -- a raise out
+      of an MCP handler reaches the seat as a transport error instead of
+      Alloy's own sentence about the working folder.
+
+    `normcase` and the plain `os.path.join` (no `isabs` branch -- join already
+    discards the left side for an absolute right one) are here because relay
+    spells it that way, and a reader diffing the two functions should find
+    nothing to reconcile. Measured on Python 3.14: neither changes an answer
+    by itself, because `ntpath.commonpath` lowercases internally and
+    `ntpath.isabs("\\foo")` has been False since 3.13. normcase must still be
+    applied to BOTH sides or neither: lowercasing only `common` refuses every
+    root with a capital letter in it.
     """
-    if not workspace:
+    if (not root or not path
+            or not isinstance(root, str) or not isinstance(path, str)):
         return None
     try:
-        root = os.path.realpath(workspace)
-        real = os.path.realpath(os.path.join(root, path) if not
-                                os.path.isabs(path) else path)
-    except (OSError, ValueError):
+        real_root = os.path.realpath(root)
+        real = os.path.realpath(os.path.join(real_root, path))
+        common = os.path.commonpath([os.path.normcase(real_root),
+                                     os.path.normcase(real)])
+    except (OSError, ValueError):    # different drives, embedded NULs, ...
         return None
-    if real == root or real.startswith(root + os.sep):
-        return real
-    return None
+    if common != os.path.normcase(real_root):
+        return None
+    return real
 
 
 def _detail(tool, args, url):
@@ -949,7 +986,7 @@ class Proxy:
 
         path_arg = CONFINED_PATH_ARGS.get(tool)
         if path_arg and path_arg in args:
-            safe = _confine(str(args[path_arg]), self._workspace)
+            safe = _confine(self._workspace, str(args[path_arg]))
             if safe is None:
                 return _refusal(
                     "Refused: that path is outside this conversation's working "

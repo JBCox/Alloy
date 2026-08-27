@@ -576,8 +576,23 @@ def confine_to_workspace(root, path):
     Lives in relay (not app) because the activity sink confines file paths
     quoted by CLI streams — untrusted input — before they ever reach a UI
     event; app.py re-exports it for its bridge methods and tests.
+
+    THERE IS A SECOND COPY OF THIS RULE, ON PURPOSE: `browser_mcp._confine`.
+    browser_mcp.py is a standalone stdio MCP server spawned as its own
+    process by a seat's CLI, with stdlib-only top-level imports, so it cannot
+    call this one — pulling relay into that child would put an ImportError
+    (a failure that says nothing to anybody) in front of a fail-closed
+    security component. tests/test_confinement_parity.py feeds one table of
+    escape cases to both and asserts identical verdicts, so changing the rule
+    here fails that suite until the twin learns it too.
     """
-    if not root or not path or not isinstance(path, str):
+    # `root` is checked for type as well as truthiness: a bytes root sails
+    # past `not root`, and `os.path.join(bytes, str)` then raises TypeError,
+    # which is NOT in the except clause below — so the "Never raises on
+    # malformed input" promise above had a hole in it. No caller passes one;
+    # the docstring is what has to stay true.
+    if (not root or not path
+            or not isinstance(root, str) or not isinstance(path, str)):
         return None
     try:
         root_real = os.path.realpath(root)
