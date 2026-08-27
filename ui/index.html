@@ -598,6 +598,29 @@
   }
   #seatList.battle-blind { position: relative; }
   .react-btn.on { color: var(--alloy); border-color: var(--alloy); }
+  .note-btn.on { color: var(--josh); }
+  /* A button carrying STATE has to stay visible: .copy-btn is opacity 0
+     until the row is hovered, so a reply Josh had marked showed nothing at
+     all until he happened to hover it. */
+  .msg .copy-btn.on { opacity: 1; }
+  /* His own words about a reply — warm bone, like everything in this app
+     that is HIS rather than a participant's. */
+  .msg-note {
+    margin: 8px 0 0; padding: 6px 10px; border-radius: 0 6px 6px 0;
+    border-left: 2px solid var(--josh); background: rgba(201,184,150,.07);
+    color: var(--text); font-size: 12.5px; line-height: 1.5;
+    white-space: pre-wrap; opacity: .9;
+  }
+  .msg-note-edit { margin: 8px 0 0; }
+  .msg-note-edit textarea {
+    width: 100%; box-sizing: border-box; resize: vertical;
+    background: var(--surface2); color: var(--text);
+    border: 1px solid var(--josh); border-radius: 6px; padding: 6px 8px;
+    font-family: inherit; font-size: 12.5px; line-height: 1.5; outline: none;
+  }
+  .msg-note-edit .note-acts {
+    display: flex; gap: 6px; justify-content: flex-end; margin-top: 5px;
+  }
   .seat .switch { float: right; }
   .seat-head .rm {
     border: 0; background: none; color: var(--muted); cursor: pointer;
@@ -1472,6 +1495,17 @@
 
   /* messages are copyable: selectable text + a per-row copy button */
   .msg { user-select: text; }
+  /* ---------- W1.6: a folded turn ---------- */
+  .msg-folded .msg-body, .msg-folded .think-block, .msg-folded .msg-imgs,
+  .msg-folded .msg-arts, .msg-folded .msg-note, .msg-folded .msg-note-edit,
+  .msg-folded .act-todo { display: none; }
+  .msg-peek { display: none; }
+  .msg-folded .msg-peek {
+    display: block; color: var(--muted); font-size: 12.5px; line-height: 1.5;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font-style: italic; opacity: .8;
+  }
+  .msg-folded { padding-bottom: 8px; }
   .msg .copy-btn {
     margin-left: auto; border: 0; background: none; color: var(--muted);
     cursor: pointer; font-size: 13px; line-height: 1; padding: 0 3px;
@@ -3323,6 +3357,11 @@ function paintFind() {
 }
 function scrollFindCurrent() {
   const f = $("feed");
+  // A folded row's body is display:none, so its range has no box and both
+  // paths below would scroll to nothing. Open it first, always — a hit you
+  // cannot see is the same as no hit.
+  const folded = findHits[findIdx] && findMsgEl(findHits[findIdx].node);
+  if (folded) setFolded(folded, false);
   const r = findRanges[findIdx];
   if (r && r.getBoundingClientRect) {
     const rect = r.getBoundingClientRect();
@@ -3563,6 +3602,107 @@ function revealBattle(reveal) {
   }
   refreshChats();
 }
+// W1.7: Josh's own words about one reply. An inline editor rather than
+// window.prompt(), which this app uses nowhere — pywebview's WebView2
+// backend is not a reliable place to ask for one. Resolves to the new text,
+// "" to clear, or null for "changed nothing".
+function openNoteEditor(rowEl, current) {
+  return new Promise(resolve => {
+    const existing = rowEl.querySelector(".msg-note-edit");
+    if (existing) { existing.querySelector("textarea").focus(); resolve(null); return; }
+    const box = document.createElement("div");
+    box.className = "msg-note-edit";
+    const ta = document.createElement("textarea");
+    ta.rows = 2;
+    ta.maxLength = 500;
+    ta.value = current || "";
+    ta.placeholder = "Why did this reply land the way it did? (Ctrl+Enter saves)";
+    const acts = document.createElement("div");
+    acts.className = "note-acts";
+    const save = document.createElement("button");
+    save.className = "btn-sm";
+    save.textContent = "Save note";
+    const cancel = document.createElement("button");
+    cancel.className = "btn-sm";
+    cancel.textContent = "Cancel";
+    const done = value => { box.remove(); resolve(value); };
+    save.onclick = e => { e.stopPropagation(); done(ta.value.trim()); };
+    cancel.onclick = e => { e.stopPropagation(); done(null); };
+    ta.onkeydown = e => {
+      // stopPropagation on BOTH: the document's own Escape handler closes
+      // modals and kills a live mic, and neither is what this key meant here
+      if (e.key === "Escape") { e.stopPropagation(); done(null); }
+      else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.stopPropagation(); e.preventDefault(); done(ta.value.trim());
+      }
+    };
+    acts.appendChild(save);
+    acts.appendChild(cancel);
+    box.appendChild(ta);
+    box.appendChild(acts);
+    rowEl.appendChild(box);
+    ta.focus();
+  });
+}
+/* ---------- W1.6: folding a turn out of the way ----------
+   Live-only and per row: reopening a chat brings everything back, which is
+   the honest default for a view preference nothing persisted.
+
+   The class is `.msg-folded`, NOT `.folded` — that one already means
+   something else on `.sup-wave` in the Supervisor control log, and two
+   meanings for one class name is how a fold in one panel silently collapses
+   a box in another. */
+function foldRefusal(rowEl) {
+  // A TRAILING DIRECTIVE is the line the conversation acted on — the wrap
+  // that ended it, the nomination that chose the next speaker, the question
+  // still waiting on Josh. Folding that out of sight hides the mechanism
+  // from the only person who can see it.
+  //
+  // The plan named two cases, "an unanswered question or a .dir-chip", and
+  // one check covers both: md() peels a trailing [[ASK]] into a
+  // `.dir-chip.dir-ask` on the row that asked, so an open question IS a
+  // chip. The refusal is SAID rather than left as a dead button.
+  return rowEl.querySelector(".dir-chip")
+    ? "Can't fold this one — it ends with a directive the conversation acted on"
+    : "";
+}
+function foldPeek(rowEl) {
+  let peek = rowEl.querySelector(".msg-peek");
+  if (peek) return peek;
+  peek = document.createElement("div");
+  peek.className = "msg-peek";
+  // the row's own raw text, stashed by addMsg — never scraped back out of
+  // rendered HTML, which would pick up markdown scaffolding
+  peek.textContent = rowEl.dataset.peek || "(no text)";
+  rowEl.appendChild(peek);
+  return peek;
+}
+function setFolded(rowEl, folded) {
+  if (!rowEl) return false;
+  const btn = rowEl.querySelector(".fold-btn");
+  if (folded) {
+    const why = foldRefusal(rowEl);
+    if (why) {
+      if (btn) btn.title = why;
+      return false;
+    }
+    foldPeek(rowEl);
+  }
+  rowEl.classList.toggle("msg-folded", !!folded);
+  if (btn) {
+    btn.classList.toggle("on", !!folded);
+    btn.textContent = folded ? "▸" : "▾";
+    btn.title = folded ? "Unfold this turn"
+                       : "Fold this turn (Alt-click folds every turn from this speaker)";
+  }
+  return true;
+}
+function foldSpeaker(key, folded) {
+  if (key === undefined || key === null || key === "") return;
+  document.querySelectorAll(".msg").forEach(el => {
+    if (String(el.dataset.foldKey || "") === String(key)) setFolded(el, folded);
+  });
+}
 function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
   // kind: "josh" | "system" | a provider id ("claude"/"gpt"/"gemini")
   // `role` is the role the seat held WHEN IT SPOKE (stamped into the stored
@@ -3648,6 +3788,25 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
   cp.className = "copy-btn"; cp.title = "Copy message text"; cp.textContent = "⧉";
   cp.onclick = e => { e.stopPropagation(); copyText(text, cp); };
   d.querySelector(".msg-head").appendChild(cp);
+  // W1.6: fold this turn away. Not on system rows — those are one-liners
+  // already, and a control that saves nothing is noise.
+  if (kind !== "system") {
+    d.dataset.peek = String(text || "").trim().split("\n")
+      .map(l => l.trim()).filter(Boolean)[0] || "(no text)";
+    d.dataset.foldKey = row && row.speaker !== undefined
+      ? String(row.speaker) : kind;
+    const fold = document.createElement("button");
+    fold.className = "copy-btn fold-btn";
+    fold.textContent = "▾";
+    fold.title = "Fold this turn (Alt-click folds every turn from this speaker)";
+    fold.onclick = e => {
+      e.stopPropagation();
+      const want = !d.classList.contains("msg-folded");
+      if (e.altKey) foldSpeaker(d.dataset.foldKey, want);
+      else setFolded(d, want);
+    };
+    d.querySelector(".msg-head").appendChild(fold);
+  }
   // Read-aloud: every row can be spoken (SAPI is local and free). The button
   // toggles — click again to interrupt. Availability comes from the startup
   // probe (speakerCfg); on a machine without SAPI the button simply hides,
@@ -3683,6 +3842,27 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
     // so retro can eventually weigh WHICH replies Josh liked, not just which
     // chats. Seat rows only — rating your own echo teaches nothing.
     if (!d.dataset.uiOnly && kind !== "josh" && kind !== "system") {
+      // W1.7: a note hangs off the thumb. Three-state all the way down —
+      // the thumb buttons pass NO note, so re-clicking one can never delete
+      // what he typed (outcome.set_reaction reads None as "leave it").
+      const noteBtn = document.createElement("button");
+      noteBtn.className = "copy-btn note-btn";
+      noteBtn.textContent = "✎";
+      const paintNote = text => {
+        d.dataset.reactionNote = text || "";
+        noteBtn.classList.toggle("on", !!text);
+        noteBtn.title = text
+          ? "Edit your note on this reply"
+          : "Add a note — why this reply landed the way it did";
+        let box = d.querySelector(".msg-note");
+        if (!text) { if (box) box.remove(); return; }
+        if (!box) {
+          box = document.createElement("div");
+          box.className = "msg-note";
+          d.appendChild(box);
+        }
+        box.textContent = text;      // his words, not markup
+      };
       const mk = (verdict, icon, label) => {
         const rb = document.createElement("button");
         rb.className = "copy-btn react-btn";
@@ -3696,6 +3876,10 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
           // one thumb per row: turning one on turns the other off
           d.querySelectorAll(".react-btn").forEach(b => b.classList.remove("on"));
           if (!on) rb.classList.add("on");
+          // The note belongs to the reaction, so removing one removes the
+          // other — and the row says so at the same moment, instead of
+          // leaving words on screen that are no longer stored anywhere.
+          if (!next) paintNote("");
           let r;
           try { r = await pywebview.api.react_message(d.dataset.messageId,
                                                       next, activeId); }
@@ -3706,11 +3890,32 @@ function addMsg(kind, name, text, meta, role, ts, activity, usage, row) {
       };
       const up = mk("helpful", "👍", "This reply was helpful");
       const down = mk("not_helpful", "👎", "This reply was not helpful");
-      if (row && row._reaction === "helpful") up.classList.add("on");
-      if (row && row._reaction === "not_helpful") down.classList.add("on");
+      const verdict = row && row._reaction;
+      if (verdict === "helpful") up.classList.add("on");
+      if (verdict === "not_helpful") down.classList.add("on");
+      noteBtn.onclick = async e => {
+        e.stopPropagation();
+        const next = await openNoteEditor(d, d.dataset.reactionNote || "");
+        if (next === null) return;               // cancelled: change nothing
+        const active = d.querySelector(".react-btn.on");
+        // A note needs a thumb to hang on. Rather than refuse the gesture,
+        // read it the gentle way: bothering to write about a reply is
+        // saying it mattered.
+        const withVerdict = active ? active.dataset.verdict : "helpful";
+        if (!active) up.classList.add("on");
+        paintNote(next);
+        let r;
+        try {
+          r = await pywebview.api.react_message(d.dataset.messageId,
+                                                withVerdict, activeId, next);
+        } catch (err) {}
+        if (r?.error) addMsg("system", "relay", r.error, "");
+      };
       const head = d.querySelector(".msg-head");
       head.appendChild(up);
       head.appendChild(down);
+      head.appendChild(noteBtn);
+      paintNote((row && row._reactionNote) || "");
     }
   }
   // Spawned-team lineage in the feed: a team report row IS the parent→child
@@ -8805,6 +9010,7 @@ async function openChat(id, findQuery, findExcerpt) {
   msgs.forEach((m, i) => {
     if (missed && i === msgs.length - missed) addNewBoundary();
     m._reaction = reactions[m.message_id]?.verdict || null;
+    m._reactionNote = reactions[m.message_id]?.note || "";
     addMsg(m.provider || m.speaker, m.name, m.text,
            m.meta || "", m.role, m.ts, m.activity, m.usage, m);
   });

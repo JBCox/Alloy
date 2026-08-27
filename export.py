@@ -56,6 +56,10 @@ details li{margin:.15rem 0;}
 .pill{display:inline-block;border:1px solid #33333e;border-radius:999px;
  padding:0 .5rem;margin:.5rem .3rem 0 0;font-family:Verdana,sans-serif;
  font-size:.72rem;color:#b5b2ab;background:#18181f;}
+.reaction{margin-top:.5rem;}
+.reaction .note{margin-top:.35rem;padding:.4rem .6rem;border-radius:6px;
+ background:#22222b;border-left:2px solid #C9B896;color:#d8d5cf;
+ font-size:.85rem;line-height:1.45;white-space:pre-wrap;}
 .legacy{white-space:pre-wrap;font-family:Consolas,monospace;font-size:.85rem;
  background:#1e1e26;border:1px solid #2a2a35;border-radius:8px;padding:1rem;}
 """ % {"maxw": MAX_WIDTH}
@@ -72,6 +76,59 @@ def _hhmm(ts):
         return datetime.datetime.fromisoformat(str(ts)).strftime("%H:%M")
     except (TypeError, ValueError):
         return None
+
+
+def _read_reactions(session_dir):
+    """Josh's per-message thumbs and notes, from outcome.json.
+
+    A sibling of _read_meta, and deliberately NOT an import of outcome.py:
+    this module is standalone by contract (stdlib only, imports nothing from
+    relay/app/outcome), and the shape it needs is two keys deep.
+
+    Returns {message_id: {"verdict": …, "note": …}} — the stored `ts` is
+    dropped ON PURPOSE. An export is byte-identical for identical input by
+    design, and a test pins that; printing a timestamp that moves whenever
+    Josh re-clicks a thumb would break it for a fact nobody reads.
+    """
+    try:
+        with open(os.path.join(session_dir, "outcome.json"),
+                  encoding="utf-8") as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(rec, dict):
+        return {}
+    fb = rec.get("human_feedback")
+    rx = fb.get("reactions") if isinstance(fb, dict) else None
+    if not isinstance(rx, dict):
+        return {}
+    out = {}
+    for mid, entry in rx.items():
+        if not isinstance(entry, dict):
+            continue
+        verdict = entry.get("verdict")
+        note = entry.get("note")
+        if verdict or note:
+            out[str(mid)] = {
+                "verdict": str(verdict) if verdict else "",
+                "note": str(note) if note else ""}
+    return out
+
+
+def _reaction_html(reaction):
+    """One pill for a thumb, plus Josh's own words when he left any."""
+    if not reaction:
+        return ""
+    marks = {"helpful": "&#128077; helpful",
+             "not_helpful": "&#128078; not helpful"}
+    bits = []
+    mark = marks.get(reaction.get("verdict"))
+    if mark:
+        bits.append("<span class='pill'>%s</span>" % mark)
+    note = reaction.get("note")
+    if note:
+        bits.append("<div class='note'>%s</div>" % _esc(note))
+    return "".join(bits)
 
 
 def _read_meta(session_dir):
@@ -136,7 +193,7 @@ def _header(meta, title):
     return "".join(parts)
 
 
-def _card(row):
+def _card(row, reaction=None):
     name = row.get("name") or row.get("speaker") or ""
     head = ["<span class='speaker' style='color:%s'>%s</span>"
             % (_seat_color(row), _esc(name))]
@@ -239,6 +296,9 @@ def _card(row):
                         for k, v in sorted((usage or {}).items())
                         if isinstance(usage, dict))
         parts.append("<div>%s</div>" % (pills + ctx_pill))
+    rx = _reaction_html(reaction)
+    if rx:
+        parts.append("<div class='reaction'>%s</div>" % rx)
     parts.append("</article>")
     return "".join(parts)
 
@@ -288,7 +348,10 @@ def export_session(session_dir, out_path=None):
         content = "<pre class='legacy'>%s</pre>" % _esc(raw)
         count = 0
     else:
-        content = "\n".join(_card(r) for r in rows)
+        reactions = _read_reactions(session_dir)
+        content = "\n".join(
+            _card(r, reactions.get(str(r.get("message_id"))))
+            for r in rows)
         count = len(rows)
     page = _page(title, header_html, content)
     out_path = os.path.abspath(out_path)

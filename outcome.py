@@ -679,20 +679,37 @@ def set_feedback(session_dir, rating, reasons=None, note="", workspace=None):
 
 
 REACTION_VERDICTS = ("helpful", "not_helpful")
+REACTION_NOTE_MAX = 500
 
 
-def set_reaction(session_dir, message_id, verdict, workspace=None):
+def set_reaction(session_dir, message_id, verdict, workspace=None, note=None):
     """One per-message thumb, MERGED into human_feedback.reactions keyed by
     message_id. verdict None removes the reaction (a toggle-off is a real
     action, not a no-op). Never touches rating/reasons/note — the end card
     and per-message thumbs are different questions about different scopes.
     The write_outcome preserve rule keeps any non-empty dict-valued key, so
-    reactions survive every rebuild without special-casing."""
+    reactions survive every rebuild without special-casing.
+
+    `note` is Josh's own words about THIS message (W1.7), and it has three
+    states rather than two, because the caller is not always editing it:
+
+    * ``None`` — leave whatever note is there. A plain thumb re-click must
+      not silently delete words somebody typed.
+    * ``""`` — clear the note, keep the thumb.
+    * text — set it, capped at REACTION_NOTE_MAX.
+
+    A note belongs to its reaction: removing the reaction removes the note
+    with it, which is what the toggle-off already meant and what keeps the
+    stored shape a plain {verdict, ts[, note]} rather than a thumbless
+    annotation nothing else knows how to read.
+    """
     if not message_id or not isinstance(message_id, str):
         raise ValueError("message_id must be a non-empty string")
     verdict = (verdict or "").strip().lower() or None
     if verdict is not None and verdict not in REACTION_VERDICTS:
         raise ValueError("verdict must be one of %s" % (REACTION_VERDICTS,))
+    if note is not None and not isinstance(note, str):
+        raise ValueError("note must be a string")
     rec = read_outcome(session_dir)
     if rec is None:
         rec = build_outcome(session_dir, workspace=workspace)
@@ -705,9 +722,15 @@ def set_reaction(session_dir, message_id, verdict, workspace=None):
     if verdict is None:
         reactions.pop(message_id, None)
     else:
-        reactions[message_id] = {
+        previous = reactions.get(message_id)
+        kept = (previous.get("note") if isinstance(previous, dict) else None)
+        text = kept if note is None else note.strip()[:REACTION_NOTE_MAX]
+        entry = {
             "verdict": verdict,
             "ts": datetime.datetime.now().isoformat(timespec="seconds")}
+        if text:
+            entry["note"] = text
+        reactions[message_id] = entry
     fb["reactions"] = reactions
     rec["human_feedback"] = fb
     try:

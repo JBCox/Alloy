@@ -215,8 +215,15 @@ class RoomsUIMarkupTests(unittest.TestCase):
             r"#contModal\.show,\s*#kbdModal\.show,[^{]*#roomsModal\.show[^{]*\{")
 
     def test_escape_listener_closes_the_rooms_modal(self):
-        m = self.html.index('e.key === "Escape"')
-        branch = self.html[m:m + 400]
+        # Anchored on the SHARED document listener, not on the first
+        # `e.key === "Escape"` in the file: a textarea that handles its own
+        # Escape (the W1.7 note editor) is an earlier match, and this test
+        # then read a slice of unrelated code and failed for it. Same family
+        # as the wrap-token bug — a substring match that cannot tell one
+        # occurrence from another.
+        m = self.html.index('closeAccounts(); closeRole();')
+        branch = self.html[m - 200:m + 400]
+        self.assertIn('e.key === "Escape"', branch)
         self.assertIn("closeRooms()", branch)
 
     def test_button_and_modal_markup_exist_with_wired_ids(self):

@@ -1988,17 +1988,22 @@ class Api:
         """Cross-battle Elo tally. Bridge-thread safe (one small JSON read)."""
         return relay.read_leaderboard()
 
-    def react_message(self, message_id, verdict, chat_id=None):
+    def react_message(self, message_id, verdict, chat_id=None, note=None):
         """One per-message thumb feeding outcome.json. Bridge-thread safe
         (submit_feedback's class: bounded atomic JSON via outcome.py, whose
         set_reaction is the single validator of the vocabulary). verdict None
-        toggles the reaction off."""
+        toggles the reaction off.
+
+        `note` is Josh's own words about this message. It is three-state on
+        purpose — None leaves an existing note alone, "" clears it — so the
+        thumb buttons, which never pass one, cannot delete what he typed."""
         run = self._runs.get(chat_id) if chat_id else self._runs.focused()
         session_dir = run.session_dir if run else None
         if not session_dir or not os.path.isdir(session_dir):
             return {"error": "There is no conversation to react to."}
         try:
-            rec = outcome.set_reaction(session_dir, message_id, verdict)
+            rec = outcome.set_reaction(session_dir, message_id, verdict,
+                                       note=note)
         except ValueError as e:
             return {"error": str(e)}
         if rec is None:

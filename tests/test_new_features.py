@@ -132,8 +132,14 @@ class CheatSheetUiTests(unittest.TestCase):
         self.assertIn('[id$="Modal"].show', self.ui)
 
     def test_escape_closes_it_via_the_shared_listener(self):
-        esc = self.ui[self.ui.index('e.key === "Escape"'):]
-        self.assertIn("closeKbd()", esc[:esc.index("}", 0) + 40],
+        # Anchored on the SHARED listener's own first line, not on the first
+        # `e.key === "Escape"` in the file: an inline editor that handles
+        # its own Escape (the W1.7 note box) is an earlier match, and this
+        # test then read a slice of unrelated code and failed for it.
+        esc = self.ui[self.ui.index("closeAccounts(); closeRole();") - 200:]
+        head = esc[:esc.index("}", esc.index("closeAccounts()")) + 40]
+        self.assertIn('e.key === "Escape"', head)
+        self.assertIn("closeKbd()", head,
                       "Escape branch must call closeKbd alongside the other modals")
 
     def test_question_mark_branch_ignores_text_boxes(self):

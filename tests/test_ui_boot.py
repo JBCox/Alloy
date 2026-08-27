@@ -109,7 +109,16 @@ function matches(el, sel) {
   for (const part of sel.split(',')) {
     const p = part.trim();
     if (!p) continue;
-    if (p.startsWith('.') && (' ' + el.className + ' ').includes(' ' + p.slice(1) + ' ')) return true;
+    // COMPOUND class selectors (".react-btn.on") matched for real. Treating
+    // the whole tail as one class name means such a selector NEVER matches,
+    // and the UI then takes its own no-match branch -- which is how a probe
+    // watched addMsg fall back to a default verdict and reported it as the
+    // product's behaviour (2026-08-27).
+    if (p.startsWith('.')
+        && p.slice(1).split('.').every(
+          c => c && (' ' + el.className + ' ').includes(' ' + c + ' '))) {
+      return true;
+    }
     if (p.startsWith('#') && el.id === p.slice(1)) return true;
     if (/^[a-zA-Z]/.test(p) && el.tag === p.toLowerCase().split(/[.#\s\[]/)[0]) {
       // [attr], [attr=value] and :checked are matched for REAL. Ignoring the
@@ -359,6 +368,11 @@ const api = new Proxy({}, {
 
 const savedTabs = [], autoResumeNoted = [], continued = [], apiCalls = [];
 const playbookCalls = [];    // W1.5: what set_playbook_rule was asked to do
+const reactCalls = [];       // W1.7: what react_message was asked to do
+let reactionsReply = {};     // what get_reactions hands a reopened chat
+// undefined = leave the real inline editor alone; anything else is what
+// openNoteEditor resolves to (null = cancelled)
+let noteEditorAnswer = undefined;
 let playbookReply = null;    // set to {error} to drive the refusal path
 let interjectReply = null;   // set to {error} to drive the refusal path
 function apiReply(name, args) {
@@ -366,6 +380,10 @@ function apiReply(name, args) {
   switch (name) {
     case 'get_config': return JSON.parse(process.env.STUB_CONFIG);
     case 'get_stats': return {ok: true};
+    case 'react_message':
+      reactCalls.push([args[0], args[1], args[3] === undefined ? null : args[3]]);
+      return {ok: true};
+    case 'get_reactions': return reactionsReply;
     case 'get_playbook': return {ok: true};
     case 'set_playbook_rule':
       playbookCalls.push(args);
@@ -408,7 +426,16 @@ function apiReply(name, args) {
     case 'open_session': return {
       ok: true, live: false, thinking: [],
       messages: [{speaker: 'josh', name: 'Josh', text: 'earlier message',
-                  meta: '', ts: '2026-08-23T08:00:00'}],
+                  meta: '', ts: '2026-08-23T08:00:00',
+                  message_id: 'stub0'},
+                 // a SEAT row too: replay paths that only exist on seat rows
+                 // (reactions, notes, thumbs) have nothing to land on
+                 // otherwise, and a probe would pass by not running at all
+                 // delivered_to is what gives a row its dataset.messageId,
+                 // and every per-row control hangs off that
+                 {speaker: 0, provider: 'claude', name: 'Claude',
+                  text: 'an earlier reply', meta: 'round 1', delivered_to: [],
+                  ts: '2026-08-23T08:01:00', message_id: 'stub1'}],
       session: {id: args && args[0], title: 'Death Factory', participants: [],
                 can_continue: true, interrupted: true, mode: 'round_robin',
                 workspace: '', project: '', transcript: '', completion:
@@ -540,7 +567,10 @@ if (topLevelError) {
                                     opener: c && c.opener})),
     // the stub does NOT aggregate a parent's textContent from its children,
     // so gather it by hand rather than reading an empty string
-    reopenedText: [...byId['feed'].children].map(deepText).join(' | ').slice(0, 600),
+    // NOT a short slice: this is a haystack for several assertions, and a
+    // stub row added for an unrelated probe pushed the interesting text off
+    // the end of a 600-char cut (2026-08-27).
+    reopenedText: [...byId['feed'].children].map(deepText).join(' | ').slice(0, 2500),
   };
   try { await ctx.newChat(); } catch (e) { more.newChatError = String(e); }
   const mic = byId['micBtn'];
@@ -1587,6 +1617,136 @@ if (topLevelError) {
                              kind: 'text/plain', size: 12}]});
     p.replay = arts();
   } catch (e) { more.artifactsError = (e && e.stack) || String(e); }
+
+  // ---- W1.6 folding + W1.7 the note on a reaction -------------------------
+  try {
+    const p = more.fold = {};
+    await ctx.newChat();
+    const feed = byId['feed'];
+    const rows = () => [...feed.children].filter(
+      c => String(c.className || '').indexOf('msg') >= 0);
+    const last = () => rows()[rows().length - 1];
+    const say = (text, extra, kind) => ctx.uiEvent({event: 'message', payload:
+      Object.assign({speaker: 0, provider: kind || 'claude', name: 'Claude',
+                     text: text, round: 1,
+                     message_id: 'x' + rows().length}, extra || {})});
+    const btn = (rowEl, cls) => rowEl.querySelector('.' + cls);
+    const folded = rowEl => String(rowEl.className || '')
+      .indexOf('msg-folded') >= 0;
+    // 1. fold / unfold, and the one line a folded row keeps
+    say('The first line of the reply.\nAnd a second one.', {message_id: 'f1'});
+    let r1 = last();
+    btn(r1, 'fold-btn').onclick({stopPropagation() {}});
+    p.foldedClass = folded(r1);
+    const peekEl = r1.querySelector('.msg-peek');
+    p.peek = peekEl ? String(peekEl.textContent || '') : null;
+    btn(r1, 'fold-btn').onclick({stopPropagation() {}});
+    p.unfoldedClass = folded(r1);
+    // 2. the peek is the row's own text, not its rendered markdown
+    say('# A heading line\n\nbody', {message_id: 'f2'});
+    btn(last(), 'fold-btn').onclick({stopPropagation() {}});
+    p.peekMarkdown = String((last().querySelector('.msg-peek') || {})
+      .textContent || '');
+    // 3. a row that ends with a directive refuses, out loud
+    say('Nothing left to add. [[WRAP]]', {message_id: 'f3'});
+    const dirRow = last();
+    btn(dirRow, 'fold-btn').onclick({stopPropagation() {}});
+    p.directiveFolded = folded(dirRow);
+    p.directiveTitle = String(btn(dirRow, 'fold-btn').title || '');
+    // 4. alt-click folds every row from that speaker, and only that speaker
+    await ctx.newChat();
+    say('one', {message_id: 'a1', speaker: 0});
+    say('two', {message_id: 'a2', speaker: 1});
+    say('three', {message_id: 'a3', speaker: 0});
+    btn(rows()[0], 'fold-btn').onclick({stopPropagation() {}, altKey: true});
+    p.afterAltClick = rows().map(folded);
+    await ctx.newChat();
+    say('plain', {message_id: 'b1', speaker: 0});
+    say('done here [[WRAP]]', {message_id: 'b2', speaker: 0});
+    btn(rows()[0], 'fold-btn').onclick({stopPropagation() {}, altKey: true});
+    p.altClickWithDirective = rows().map(folded);
+    // 5. a system row has nothing worth folding
+    await ctx.newChat();
+    ctx.addMsg('system', 'relay', 'a note from the relay', '');
+    p.systemHasFold = !!btn(last(), 'fold-btn');
+    // 6. a find hit inside a folded row opens it before scrolling.
+    //    The stub parses innerHTML into ELEMENTS only, so a rendered body
+    //    holds no text nodes for collectFindHits to walk; a real one does.
+    //    Appending one gives find something it can genuinely find, and the
+    //    rest of the path -- findRun, paintFind, scrollFindCurrent -- is the
+    //    shipping code.
+    await ctx.newChat();
+    say('the needle is in here somewhere', {message_id: 'n1'});
+    const nrow = last();
+    nrow.querySelector('.msg-body')
+      .appendChild(document.createTextNode('the needle is in here'));
+    btn(nrow, 'fold-btn').onclick({stopPropagation() {}});
+    p.foldedBeforeFind = folded(nrow);
+    ctx.findOpen();
+    byId['findInput'].value = 'needle';
+    ctx.findRun();
+    p.stillFoldedAfterFind = folded(nrow);
+    ctx.findClose();
+    // ---- W1.7
+    await ctx.newChat();
+    playbookCalls.length = 0;
+    reactCalls.length = 0;
+    ctx.addMsg('claude', 'Claude', 'a reply worth noting', 'round 1', null,
+               '2026-08-27T10:00:00', null, null,
+               {message_id: 'm9', delivered_to: [], speaker: 0,
+                _reaction: 'not_helpful',
+                _reactionNote: 'It answered a different question.'});
+    const nr = last();
+    p.noteText = String((nr.querySelector('.msg-note') || {})
+      .textContent || '');
+    // The REAL inline editor, driven the way a person drives it: open it,
+    // type into its textarea, click one of its own two buttons.
+    const editNote = async (rowEl, text) => {
+      btn(rowEl, 'note-btn').onclick({stopPropagation() {}});
+      const box = rowEl.querySelector('.msg-note-edit');
+      const ta = box.querySelector('textarea');
+      const buttons = [...box.querySelectorAll('button')];
+      if (text === null) buttons[1].onclick({stopPropagation() {}});
+      else { ta.value = text; buttons[0].onclick({stopPropagation() {}}); }
+      await new Promise(r => setTimeout(r, 0));
+    };
+    // cancel changes nothing
+    await editNote(nr, null);
+    p.cancelCalls = reactCalls.length;
+    p.noteAfterCancel = String((nr.querySelector('.msg-note') || {})
+      .textContent || '');
+    // ...and saving carries the row's OWN verdict plus the typed words
+    await editNote(nr, 'typed words');
+    p.saveCall = reactCalls[0] || null;
+    // a plain thumb click passes NO note at all
+    reactCalls.length = 0;
+    nr.querySelectorAll('.react-btn')[0].onclick({stopPropagation() {}});
+    await new Promise(r => setTimeout(r, 0));
+    p.thumbCall = reactCalls[0] || null;
+    // removing the thumb clears the note from the row too
+    reactCalls.length = 0;
+    nr.querySelectorAll('.react-btn')[0].onclick({stopPropagation() {}});
+    await new Promise(r => setTimeout(r, 0));
+    p.noteAfterUnreact = String((nr.querySelector('.msg-note') || {})
+      .textContent || '');
+    // a note on a row with no thumb adopts the gentle reading
+    reactCalls.length = 0;
+    ctx.addMsg('claude', 'Claude', 'unmarked', 'round 2', null,
+               '2026-08-27T10:01:00', null, null,
+               {message_id: 'm7', delivered_to: [], speaker: 0});
+    await editNote(last(), 'just saying');
+    p.bareNoteCall = reactCalls[0] || null;
+    // Replay repaints a stored note. Driven through the REAL openChat, not
+    // by handing addMsg the field: the line that maps get_reactions onto
+    // each row is the one that can be lost, and a probe that sets the field
+    // itself would pass with or without it.
+    reactionsReply = {stub1: {verdict: 'helpful', note: 'from the record'}};
+    await ctx.openChat('some-chat');
+    await new Promise(r => setTimeout(r, 0));
+    p.replayNote = String((byId['feed'].querySelector('.msg-note') || {})
+      .textContent || '');
+    reactionsReply = {};
+  } catch (e) { more.foldError = (e && e.stack) || String(e); }
 
   // ---- W1.5: stats + the playbook's first UI ------------------------------
   // Driven through the REAL `stats` and `playbook` events. The rule the
