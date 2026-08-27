@@ -9990,6 +9990,7 @@ CHECKIN_DEFAULT_MINUTES = 30
 GATE_TIMEOUT = 900              # a whole suite, not a unit test
 GATE_TAIL = 2000
 MAX_BARREN_REVIVALS = 3         # restarts that committed nothing at all
+OBJECTIVE_MEMORY_FILES = 6   # files named in one remembered objective
 OBJECTIVE_HISTORY_MAX = 40
 
 
@@ -10301,16 +10302,78 @@ def archive_objective(state):
         delivered = sorted({f for t in tasks
                             for f in ((t.get("verified") or {}).get("delivered")
                                       or [])})
-        pol.setdefault("history", []).append({
+        record = {
             "goal": state.get("supervisor_goal") or "",
             "tasks": len(tasks),
             "failed": sum(1 for t in tasks if t.get("status") == "failed"),
             "delivered": delivered[:40],
             "gate": (pol.get("gate") or {}).get("last"),
-        })
+        }
+        pol.setdefault("history", []).append(record)
         del pol["history"][:-OBJECTIVE_HISTORY_MAX]
+        remember_objective(state, record)
     state["workstreams"] = None
     pol["stuck"] = {}
+
+
+def describe_objective(record):
+    """One readable sentence about a settled objective, or '' if there is
+    nothing worth keeping."""
+    goal = " ".join((record.get("goal") or "").split())[:200]
+    if not goal:
+        return ""
+    n, failed = int(record.get("tasks") or 0), int(record.get("failed") or 0)
+    parts = ["Objective met: %s." % goal.rstrip("."),
+             "%d task%s" % (n, "" if n == 1 else "s")]
+    if failed:
+        parts.append("%d failed" % failed)
+    files = list(record.get("delivered") or [])
+    if files:
+        shown = ", ".join(files[:OBJECTIVE_MEMORY_FILES])
+        if len(files) > OBJECTIVE_MEMORY_FILES:
+            shown += " and %d more" % (len(files) - OBJECTIVE_MEMORY_FILES)
+        parts.append("delivered " + shown)
+    else:
+        # said out loud rather than left as an absence: a research wave
+        # legitimately writes nothing, and a note that just stops after the
+        # task count reads like the file list went missing
+        parts.append("no files changed")
+    gate = record.get("gate") or {}
+    if gate.get("ok") is True:
+        parts.append("verification passed")
+    elif gate.get("ok") is False:
+        parts.append("verification failed")
+    return parts[0] + " " + "; ".join(parts[1:]) + "."
+
+
+def remember_objective(state, record):
+    """Write a settled objective into Alloy's memory. Zero CLI calls.
+
+    Here rather than in the run-end epilogue because THIS is the only place
+    that sees an objective ROLL OVER: a Keep Improving run that works through
+    five objectives ends once, and an epilogue would record the last one and
+    lose four. It runs at a barrier, so it swallows everything -- a memory
+    write must never be able to break the run it is describing.
+
+    PROJECT SCOPE ONLY, deliberately. A record like "delivered src/a.py" is
+    about one codebase; written to the global scope it would surface in every
+    unrelated scratch chat, and a scratch run's deliveries live in a session
+    folder nobody will open again. So a Keep Improving run in a scratch
+    workspace records nothing, and that is not the feature being off -- there
+    is no project for the note to be ABOUT.
+    """
+    try:
+        scope, label = memory_scope(state)
+        if not label:
+            return
+        text = describe_objective(record)
+        if not text:
+            return
+        memory_store.remember(MEMORY_DIR, scope, text,
+                              kind=memory_store.KIND_STRUCTURAL,
+                              who=room_helper_name(state, "supervisor"))
+    except Exception:
+        pass
 
 
 def next_objective(state, io):

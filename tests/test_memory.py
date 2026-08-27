@@ -847,6 +847,175 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("error", self.api.forget_memory("mzzzzzzzz"))
 
 
+# ------------------------------------------------ structural memory --------
+class StructuralTests(unittest.TestCase):
+    """What a settled objective leaves behind. Zero CLI calls, by design:
+    archive_objective already builds a filesystem-VERIFIED record and threw
+    it away."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="alloy-mem-struct-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.mem = os.path.join(self.tmp, "memory")
+        old = relay.MEMORY_DIR
+        relay.MEMORY_DIR = self.mem
+        self.addCleanup(setattr, relay, "MEMORY_DIR", old)
+        self.proj = os.path.join(self.tmp, "someproj")
+        os.makedirs(self.proj, exist_ok=True)
+
+    def state(self, project=True, goal="Tidy the tests", delivered=("a.py",),
+              failed=0, gate=None, tasks=None):
+        st = build_state(self.tmp, [["a"]], turns=1,
+                         workspace=self.proj if project else None)
+        st["supervisor_goal"] = goal
+        st["continuous"] = relay.continuous_policy({"on": True})
+        if gate is not None:
+            st["continuous"]["gate"]["last"] = gate
+        st["workstreams"] = tasks if tasks is not None else [
+            {"id": "t1", "status": "done",
+             "verified": {"delivered": list(delivered)}},
+            {"id": "t2", "status": "failed" if failed else "done",
+             "verified": {"delivered": []}},
+        ]
+        return st
+
+    def notes(self, st):
+        scope = relay.memory_scope(st)[0]
+        return memory.load(self.mem, scope)["entries"]
+
+    def test_a_settled_objective_is_remembered(self):
+        st = self.state(gate={"ok": True})
+        relay.archive_objective(st)
+        rows = self.notes(st)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["kind"], memory.KIND_STRUCTURAL)
+        self.assertIn("Tidy the tests", rows[0]["text"])
+        self.assertIn("a.py", rows[0]["text"])
+        self.assertIn("verification passed", rows[0]["text"])
+
+    def test_the_note_is_written_by_the_rooms_own_manager_name(self):
+        st = self.state()
+        st["supervisor"] = {"name": "Foreman"}
+        relay.archive_objective(st)
+        self.assertEqual(self.notes(st)[0]["who"], "Foreman")
+
+    def test_an_unnamed_manager_falls_back_to_the_role_word(self):
+        st = self.state()
+        relay.archive_objective(st)
+        self.assertEqual(self.notes(st)[0]["who"], "Supervisor")
+
+    def test_a_SCRATCH_run_records_nothing_and_that_is_deliberate(self):
+        # "delivered src/a.py" is about one codebase; in the global scope it
+        # would surface in every unrelated scratch chat, and a scratch run's
+        # files live in a session folder nobody opens again
+        st = self.state(project=False)
+        relay.archive_objective(st)
+        self.assertEqual(memory.load(self.mem, memory.GLOBAL_SCOPE)["entries"],
+                         [])
+
+    def test_an_objective_with_no_tasks_leaves_nothing(self):
+        st = self.state(tasks=[])
+        relay.archive_objective(st)
+        self.assertEqual(self.notes(st), [])
+
+    def test_a_nameless_objective_leaves_nothing(self):
+        # a record whose goal never got set says only "N tasks", which is not
+        # worth a permanent note
+        st = self.state(goal="")
+        relay.archive_objective(st)
+        self.assertEqual(self.notes(st), [])
+
+    def test_EVERY_rollover_is_recorded_not_just_the_last(self):
+        # the whole reason this lives at the barrier rather than in the
+        # run-end epilogue: a Keep Improving run ends ONCE, and an epilogue
+        # would keep the final objective and lose every one before it
+        st = self.state(goal="First")
+        relay.archive_objective(st)
+        st["supervisor_goal"] = "Second"
+        st["workstreams"] = [{"id": "t3", "status": "done",
+                              "verified": {"delivered": ["b.py"]}}]
+        relay.archive_objective(st)
+        self.assertEqual([e["text"].split()[2] for e in self.notes(st)],
+                         ["First.", "Second."])
+
+    def test_the_record_still_reaches_the_policys_own_history(self):
+        # the memory write is additive; it must not displace what the UI and
+        # the next plan already read
+        st = self.state()
+        relay.archive_objective(st)
+        self.assertEqual(len(st["continuous"]["history"]), 1)
+        self.assertEqual(st["continuous"]["history"][0]["goal"],
+                         "Tidy the tests")
+
+    def test_a_broken_memory_store_never_breaks_the_barrier(self):
+        st = self.state()
+        real = memory.remember
+
+        def boom(*a, **k):
+            raise RuntimeError("disk on fire")
+        memory.remember = boom
+        self.addCleanup(setattr, memory, "remember", real)
+        relay.archive_objective(st)                    # must not raise
+        self.assertIsNone(st["workstreams"])
+        self.assertEqual(len(st["continuous"]["history"]), 1)
+
+    def test_the_note_reaches_a_later_chats_preamble_in_that_project(self):
+        # the point of the whole commit: the next run in this folder starts
+        # knowing what the last one settled
+        st = self.state(gate={"ok": True})
+        relay.archive_objective(st)
+        later = build_state(self.tmp, [["a"]], turns=1, workspace=self.proj)
+        block = relay.memory_preamble_block(relay.memory_record(later), 4000)
+        self.assertIn("Tidy the tests", block)
+        self.assertIn("Supervisor", block)
+
+    def test_it_does_NOT_reach_a_different_projects_chat(self):
+        st = self.state()
+        relay.archive_objective(st)
+        other = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(other, exist_ok=True)
+        later = build_state(self.tmp, [["a"]], turns=1, workspace=other)
+        self.assertEqual(relay.memory_record(later)["entries"], [])
+
+
+class ObjectiveSentenceTests(unittest.TestCase):
+    def sentence(self, **kw):
+        rec = {"goal": "Tidy the tests", "tasks": 4, "failed": 0,
+               "delivered": ["a.py"], "gate": None}
+        rec.update(kw)
+        return relay.describe_objective(rec)
+
+    def test_a_research_wave_says_no_files_rather_than_trailing_off(self):
+        # left as an absence, the sentence stops after the task count and
+        # reads as though the file list went missing
+        self.assertIn("no files changed", self.sentence(delivered=[]))
+
+    def test_failures_are_named(self):
+        self.assertIn("2 failed", self.sentence(failed=2))
+
+    def test_a_clean_wave_does_not_mention_failures(self):
+        self.assertNotIn("failed", self.sentence())
+
+    def test_a_long_file_list_is_cut_and_counts_what_it_cut(self):
+        got = self.sentence(delivered=["f%d.py" % i for i in range(20)])
+        self.assertIn("and %d more" % (20 - relay.OBJECTIVE_MEMORY_FILES), got)
+
+    def test_a_SKIPPED_gate_claims_neither_pass_nor_fail(self):
+        # ok is None there, and "verification passed" would be a lie while
+        # "verification failed" would be a different one
+        got = self.sentence(gate={"skipped": "no test command", "ok": None})
+        self.assertNotIn("verification", got)
+
+    def test_a_red_gate_is_recorded_as_red(self):
+        self.assertIn("verification failed", self.sentence(gate={"ok": False}))
+
+    def test_one_task_is_singular(self):
+        self.assertIn("1 task;", self.sentence(tasks=1))
+
+    def test_a_goal_with_no_text_produces_no_sentence(self):
+        self.assertEqual(self.sentence(goal="   "), "")
+
+
 class SiblingTests(unittest.TestCase):
     def test_a_memory_folder_INSIDE_sessions_would_ship_a_phantom_rail_row(self):
         # the reason MEMORY_DIR is a sibling, kept as a live demonstration
