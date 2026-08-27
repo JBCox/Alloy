@@ -2150,6 +2150,53 @@ if (topLevelError) {
                            total_tokens: 6});
     p.nothingReported = pill({});
   } catch (e) { more.usagePillError = (e && e.stack) || String(e); }
+  // ---- W2.0: a background chat must not yank the visible transcript -------
+  // The webhook (and every scheduled room after it) starts a conversation
+  // while Josh is reading something else. `started` used to do
+  // `activeId = id; openTab(id)` unconditionally.
+  try {
+    const p = more.bg = {};
+    await ctx.newChat();
+    ctx.uiEvent({event: 'started', payload: {
+      session: {id: 'sess-mine', title: 'Mine', participants: [],
+                mode: 'round_robin', can_continue: false},
+      transcript: 'x/transcript.md', workspace: '', mode: 'round_robin'}});
+    // top-level `let`s live in the context's LEXICAL scope, not on the
+    // sandbox object, so `ctx.activeId` is undefined however healthy the page
+    // is. Evaluating in the same context is the only honest read.
+    const peek = expr => vm.runInContext(expr, ctx);
+    p.activeAfterMine = peek('activeId');
+    p.tabsAfterMine = peek('tabs.map(t => t.id)');
+    const feedBefore = (byId['feed'].children || []).length;
+    ctx.uiEvent({event: 'started', payload: {
+      background: true,
+      session: {id: 'sess-bg', title: 'From a script', participants: [],
+                mode: 'round_robin', can_continue: false},
+      transcript: 'y/transcript.md', workspace: '', mode: 'round_robin'}});
+    p.activeAfterBg = peek('activeId');
+    p.tabsAfterBg = peek('tabs.map(t => t.id)');
+    // it still earns a rail row and a status of its own
+    p.knownToTheRail = peek("sessions.some(s => s.id === 'sess-bg')");
+    p.bgStatus = (ctx.runFor('sess-bg') || {}).status;
+    p.mineStatus = (ctx.runFor('sess-mine') || {}).status;
+    // ...and its transcript rows stay out of the one on screen
+    ctx.uiEvent({event: 'message', payload: {
+      chat_id: 'sess-bg', speaker: 0, provider: 'claude', name: 'Claude',
+      text: 'work from the background chat', round: 1}});
+    p.feedGrewFromBg = (byId['feed'].children || []).length - feedBefore;
+    // an event from a background chat that has NO id yet (its setup runs
+    // before the session dir exists) must be dropped, not painted here
+    ctx.uiEvent({event: 'status', payload: {
+      background: true, text: 'a background chat is setting up'}});
+    p.feedGrewFromAnonymousBg =
+      (byId['feed'].children || []).length - feedBefore;
+    // the same event WITHOUT the stamp is the visible chat's own setup
+    ctx.uiEvent({event: 'status', payload: {text: 'my own setup'}});
+    p.feedGrewFromMyOwnStatus =
+      (byId['feed'].children || []).length - feedBefore;
+    await ctx.newChat();
+  } catch (e) { more.bgError = (e && e.stack) || String(e); }
+
   // Put the boot roster back: report() reads the LIVE DOM, so leaving the
   // stage solo would hand every other test in this file a one-seat page.
   try { ctx.addSeat('gpt'); ctx.addSeat('gemini'); } catch (e) {}
@@ -2816,6 +2863,44 @@ class UiBootTests(unittest.TestCase):
     def test_escape_clears_the_search_outright(self):
         self.assertEqual(self.report.get("valueAfterEscape"), "")
         self.assertTrue(self.report.get("railRestoredAfterEscape"))
+
+    # ---- W2.0: background chats (run pinning) ------------------------------
+    def _bg(self):
+        self.assertIsNone(self.report.get("bgError"),
+                          "background probe threw: %s" % self.report.get("bgError"))
+        return self.report["bg"]
+
+    def test_a_chat_started_from_this_stage_takes_the_focus(self):
+        b = self._bg()
+        self.assertEqual(b["activeAfterMine"], "sess-mine")
+        self.assertIn("sess-mine", b["tabsAfterMine"])
+
+    def test_a_background_start_does_not_steal_the_transcript(self):
+        """`started` did `activeId = id; openTab(id)` unconditionally, so a
+        webhook firing while Josh read another chat swapped it under him."""
+        b = self._bg()
+        self.assertEqual(b["activeAfterBg"], "sess-mine",
+                         "a background chat took the screen")
+        self.assertNotIn("sess-bg", b["tabsAfterBg"],
+                         "a background chat opened a tab nobody asked for")
+
+    def test_a_background_chat_still_earns_a_rail_row_and_a_status(self):
+        """Not showing it is not the same as hiding it."""
+        b = self._bg()
+        self.assertTrue(b["knownToTheRail"])
+        self.assertEqual(b["bgStatus"], "running")
+        self.assertEqual(b["mineStatus"], "running")
+
+    def test_a_background_chats_messages_stay_out_of_the_open_one(self):
+        self.assertEqual(self._bg()["feedGrewFromBg"], 0)
+
+    def test_a_background_event_with_no_chat_id_yet_is_dropped(self):
+        """Its setup runs before the session dir exists, so those events carry
+        chat_id null — which the routing gate reads as "the chat on screen"."""
+        b = self._bg()
+        self.assertEqual(b["feedGrewFromAnonymousBg"], 0)
+        self.assertGreater(b["feedGrewFromMyOwnStatus"], 0,
+                           "the visible chat's own status row was dropped too")
 
     # ---- memory modal (Wave 3) ---------------------------------------------
     def _mem(self):

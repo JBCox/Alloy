@@ -163,7 +163,10 @@ class AutoTitleTests(unittest.TestCase):
             io._api = api
             io._run = types.SimpleNamespace(
                 id="fake-run", stop_flag=threading.Event(),
-                human_q=queue.Queue(), thinking={}, staged_roles=[])
+                human_q=queue.Queue(), thinking={}, staged_roles=[],
+                # _AppIO.emit reads it on every event: a stand-in for a Run
+                # has to carry the fields the real component consumes
+                background=False)
             return io
 
         io = make_io(False)

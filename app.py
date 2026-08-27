@@ -324,10 +324,16 @@ class Run:
     started (a draft has no identity yet — that is what `adopt` is for).
     """
 
-    def __init__(self, chat_id=None):
+    def __init__(self, chat_id=None, background=False):
         self.id = chat_id
         self.state = None            # relay state dict (the old Api._conv)
         self.thread = None
+        # Started by something OTHER than the visible stage (the webhook, and
+        # every scheduled room after it). It still earns a rail row, a status
+        # and a tab-less life of its own; what it must never do is take the
+        # focus pointer, because that yanks the transcript Josh is reading out
+        # from under him mid-sentence.
+        self.background = bool(background)
         self.stop_flag = threading.Event()
         self.human_q = queue.Queue()
         self.session_dir = None
@@ -339,7 +345,13 @@ class Run:
         self.ask_lock = threading.Lock()
         self.status = "idle"         # the RunState vocabulary (see set_status)
         self.pending_ask = None
-        self.unread = 0
+        # NO `unread` here on purpose. There used to be one; it was set to 0 in
+        # this constructor and never incremented anywhere in Python, while the
+        # UI read a key (`unread_count`) that Python never sent — two halves of
+        # one dead path, publishing a permanent zero. Unread is a front-end
+        # fact (which chat is visible, how far it is scrolled), the UI has
+        # always maintained its own, and a number nobody measures is not a
+        # number to publish.
         # Seats currently inside a turn: slot id -> {name, provider, started,
         # limit}. Typing indicators are LIVE-only in the UI, so reopening a
         # chat mid-turn used to wipe them and never bring them back — a room
@@ -370,6 +382,11 @@ class RunManager:
         self._runs = {}              # chat_id -> Run
         self._draft = Run()          # the unstarted new-chat stage
         self._focus = None           # chat_id, or None meaning the draft
+        # Runs that have a thread but not yet an id. A conversation spends its
+        # first seconds here (the session dir, and therefore `adopt`, happens
+        # well INTO _conversation), and `live()` reading only the adopted map
+        # is what let a second start slip through exactly that window.
+        self._pending = []
         self._lock = threading.RLock()
 
     def focused(self):
@@ -388,19 +405,103 @@ class RunManager:
 
     def live(self):
         """Runs with a loop thread still going — what a new chat must not
-        disturb, and what a window close has to stop."""
-        with self._lock:
-            return [r for r in self._runs.values() if r.is_running()]
+        disturb, and what a window close has to stop.
 
-    def adopt(self, run, chat_id):
-        """Give a run its identity the moment its session dir exists."""
+        Includes runs that have a thread but no id yet (`_pending`): a chat is
+        live from the instant its worker starts, not from the moment it
+        earns a directory, and the gap between the two is seconds of real CLI
+        work.
+        """
         with self._lock:
+            out, seen = [], set()
+            for r in list(self._runs.values()) + list(self._pending):
+                if id(r) in seen or not r.is_running():
+                    continue
+                seen.add(id(r))
+                out.append(r)
+            return out
+
+    def spawn(self, target, args=(), run=None):
+        """Start a conversation worker ON a run, and record its thread.
+
+        THE way a conversation thread comes into being. `Api.start` and
+        `continue_chat` used to assign `run.thread` themselves and the webhook
+        path did not — so a webhook-started chat ran with `is_running()` False
+        forever, `live()` returned [], and every "refuse while a chat is live"
+        guard in the app was decoration (it refused nothing, ever).
+
+        The thread is recorded BEFORE it starts: a guard that reads
+        `is_running()` in between must see True, not a hole one instruction
+        wide.
+        """
+        with self._lock:
+            if run is None:
+                run = self._draft
+            # a finished pending run has either been adopted (so it is in the
+            # map) or died; either way it stops being pending here rather than
+            # leaking for the life of the window
+            self._pending = [r for r in self._pending
+                             if r is run or (r.id is None and r.is_running())]
+            run.thread = threading.Thread(target=target, args=tuple(args),
+                                          daemon=True)
+            if run.id is None and not any(r is run for r in self._pending):
+                self._pending.append(run)
+        run.thread.start()
+        return run
+
+    def background(self):
+        """A Run of its own for a chat nobody is watching.
+
+        Never the draft: a webhook (and, later, a schedule) that borrowed the
+        draft would adopt the very stage Josh is composing on, registering his
+        half-typed room under someone else's chat id.
+        """
+        with self._lock:
+            run = Run(background=True)
+            self._pending.append(run)
+            return run
+
+    def adopt(self, run, chat_id, focus=False):
+        """Give a run its identity the moment its session dir exists.
+
+        `focus` is opt-IN because stealing the focus pointer is the dangerous
+        half: a background run that took it would repaint Josh's window with a
+        conversation he never opened.
+        """
+        with self._lock:
+            # Re-adopting a run that already has an id must not leave the old
+            # key pointing at it: `_runs[old]` and `_runs[new]` would be the
+            # SAME object with `.id == new`, so open_session(old) served the
+            # new chat's state under the old id. `fresh_stage` is what stops
+            # this happening at all; this is the belt to its braces, and it is
+            # what makes the failure loud instead of silent if a third start
+            # path ever appears.
+            if run.id and run.id != chat_id:
+                if self._runs.get(run.id) is run:
+                    del self._runs[run.id]
+                if self._focus == run.id:
+                    self._focus = None
             run.id = chat_id
             self._runs[chat_id] = run
+            self._pending = [r for r in self._pending if r is not run]
             if run is self._draft:
                 self._draft = Run()          # a fresh stage for the next chat
-            self._focus = chat_id
+            if focus:
+                self._focus = chat_id
             return run
+
+    def fresh_stage(self):
+        """The Run a NEW conversation starts on: the draft, never an adopted one.
+
+        Josh typing into a reopened chat starts a new conversation — the UI
+        clears `activeId` — but the PYTHON focus pointer still names the chat
+        he reopened. So `focused()` handed `start` an already-adopted run and
+        `_conversation` adopted it a second time under the new directory.
+        """
+        with self._lock:
+            if self.focused().id is not None:
+                self._focus = None           # back to the draft stage
+            return self._draft
 
     def focus(self, chat_id):
         """Switch which chat the window is SHOWING. Never touches threads:
@@ -446,6 +547,12 @@ class _AppIO(LoopIO):
     def emit(self, event, payload=None):
         payload = dict(payload or {})
         payload.setdefault("chat_id", self._run.id)
+        # Before this run is adopted its chat_id is None, and the UI reads a
+        # null chat_id as "belongs to the chat on screen". The stamp is what
+        # lets it drop a background run's pre-identity events instead of
+        # painting them into whatever Josh is reading.
+        if self._run.background:
+            payload["background"] = True
         # Track in-flight seats here rather than in Api.emit, which must stay
         # a pure enqueue, and rather than in the loop, which would have to
         # learn about front-end state it has no business knowing.
@@ -585,14 +692,11 @@ class Api:
     def _conv(self, value):
         self._runs.focused().state = value
 
-    @property
-    def _thread(self):
-        return self._runs.focused().thread
-
-    @_thread.setter
-    def _thread(self, value):
-        self._runs.focused().thread = value
-
+    # `_thread`, `_staged_roles`, `_ask_lock` and `_chat_id` used to live
+    # here. They are gone rather than kept "for symmetry": every one had zero
+    # callers left, and a focused-run view with no caller is a focus leak
+    # waiting for its first one (Api.start read `_thread` and refused a second
+    # chat on the strength of an unrelated one).
     @property
     def _stop_flag(self):
         return self._runs.focused().stop_flag
@@ -600,14 +704,6 @@ class Api:
     @property
     def _human_q(self):
         return self._runs.focused().human_q
-
-    @property
-    def _staged_roles(self):
-        return self._runs.focused().staged_roles
-
-    @property
-    def _ask_lock(self):
-        return self._runs.focused().ask_lock
 
     @property
     def _session_dir(self):
@@ -618,10 +714,25 @@ class Api:
         # The moment a chat has a directory it has an identity, so this is the
         # one hook that registers it. Doing it here rather than at each call
         # site means no start path can forget and leave a run untracked.
+        #
+        # This property is BY DEFINITION a view onto the focused run, so it
+        # focuses. A run that must not take the focus pointer (anything
+        # background) calls `_adopt_run` directly instead — see _conversation.
         run = self._runs.focused()
+        self._adopt_run(run, value)
+
+    def _adopt_run(self, run, value):
+        """Register ONE run under its session dir. Focus follows `background`.
+
+        Split out of the `_session_dir` setter so a webhook- (or, later,
+        schedule-) started conversation can earn its identity without
+        repainting the window Josh is looking at.
+        """
         run.session_dir = value
         if value:
-            self._runs.adopt(run, os.path.basename(os.path.normpath(value)))
+            self._runs.adopt(run, os.path.basename(os.path.normpath(value)),
+                             focus=not run.background)
+        return run
 
     @property
     def _view_workspace(self):
@@ -646,11 +757,12 @@ class Api:
         if status not in self.RUN_STATES:      # a typo'd state would silently
             status = "running"                 # freeze a rail row forever
         run.status = status
-        payload = {"chat_id": run.id, "status": status,
-                   "unread": run.unread,
-                   "pending_ask": run.pending_ask}
+        payload = {"status": status, "pending_ask": run.pending_ask}
         payload.update(extra)
-        self.emit("run_status", payload)
+        # through _emit_for so a background run's status rows carry the same
+        # identity stamp as everything else it produces — a status row with a
+        # null chat_id lands on whatever chat the window is showing
+        self._emit_for(run, "run_status", payload)
 
     def run_status(self, chat_id=None):
         """Snapshot for the rail — pure cache read, safe on the bridge thread.
@@ -662,7 +774,7 @@ class Api:
         runs = self._runs.all() if not chat_id else             [r for r in [self._runs.get(chat_id)] if r]
         return {"runs": [{"chat_id": r.id, "status": r.status,
                           "running": r.is_running(),
-                          "unread": r.unread,
+                          "background": r.background,
                           "pending_ask": r.pending_ask} for r in runs]}
 
     # ---------------------------------------------------------- to the UI --
@@ -671,6 +783,23 @@ class Api:
         self._emit_q.put((event,
                           json.dumps({"event": event,
                                       "payload": payload or {}})))
+
+    def _emit_for(self, run, event, payload=None):
+        """Emit an event that belongs to ONE run, stamped with its identity.
+
+        `_AppIO.emit` already does this for everything the LOOP produces;
+        these are the app's own setup and failure notices, which happen before
+        there is a loop and sometimes before there is an id at all. A
+        background run that fails during setup has neither a chat id nor a
+        rail row yet, and without the `background` stamp the UI would paint
+        that failure onto whatever conversation Josh happens to be reading.
+        """
+        payload = dict(payload or {})
+        if run is not None:
+            payload.setdefault("chat_id", run.id)
+            if run.background:
+                payload["background"] = True
+        self.emit(event, payload)
 
     def _drain_emits(self):
         while True:
@@ -1109,12 +1238,14 @@ class Api:
         new conversation per call, and racing an active loop would fork its
         emit queue mid-turn. Runs on the webhook handler thread (a normal
         thread), so spawning the conversation worker here is safe."""
-        for run in list(self._runs._runs.values()):
-            if run.is_running():
-                # raise, not return: the webhook module turns a raised
-                # exception into an HTTP 500 {"error": …}, and a script must
-                # see the refusal as a FAILURE, not as ok-with-error attached
-                raise ValueError("A conversation is already running.")
+        # `live()`, not a walk of the adopted map: a chat is live from the
+        # instant its worker starts, and before this refactor it was live with
+        # `is_running()` False, so this guard passed every single time.
+        if self._runs.live():
+            # raise, not return: the webhook module turns a raised
+            # exception into an HTTP 500 {"error": …}, and a script must
+            # see the refusal as a FAILURE, not as ok-with-error attached
+            raise ValueError("A conversation is already running.")
         seatable = {p["id"] for p in Api._seatable_providers()}
         asked = [str(s) for s in payload.get("seats") or []]
         # `seats` is now honoured down to ONE, because a solo run is a
@@ -1139,8 +1270,14 @@ class Api:
         ws = payload.get("workspace")
         if ws and os.path.isdir(ws):
             cfg["workspace"] = ws
-        threading.Thread(target=self._conversation, args=(dict(cfg),),
-                         daemon=True).start()
+        # A Run OF ITS OWN, and spawned through the manager. Borrowing the
+        # draft would adopt the stage Josh is composing on; a bare
+        # threading.Thread would leave run.thread None, which is precisely how
+        # every "refuse while a chat is live" guard in this app came to refuse
+        # nothing. `_run`, not `_conversation`, so a failure is reported
+        # instead of dying silently on a detached thread.
+        run = self._runs.background()
+        self._runs.spawn(self._run, (dict(cfg), run), run=run)
         return {"started": True}
 
     def _webhook_apply(self, cfg):
@@ -1842,13 +1979,18 @@ class Api:
                 summary["can_continue_reason"] = str(e) or \
                     "Saved chat state is incomplete — view only"
 
-        self._session_dir = path
+        # `focus` above already made this chat's run the focused one, so the
+        # three writes below land on it. Named explicitly all the same: a
+        # focused-run view read three lines from a focus switch is how the
+        # next reader assumes the wrong run.
+        run = self._runs.focused()
+        self._adopt_run(run, path)
         # view-only chats have no live state; the Files rail and inline
         # previews still need THIS chat's recorded workspace (may be gone —
         # confine/read handle that with placeholders, never a broken tag)
-        self._view_workspace = summary.get("workspace") or None
-        while not self._human_q.empty():
-            self._human_q.get_nowait()
+        run.view_workspace = summary.get("workspace") or None
+        while not run.human_q.empty():
+            run.human_q.get_nowait()
 
         if state is not None:
             store = SessionStore(path)
@@ -2192,11 +2334,26 @@ class Api:
             if payload.get(key):
                 detail = str(payload[key])
                 break
-        session_id, title = "", ""
+        # THE FIRING RUN, not the focused one. Every payload that reaches
+        # here carries its own identity — `_AppIO.emit` stamps `chat_id` on
+        # everything the loop produces, and `done` carries the session summary
+        # — so reading the focus pointer meant a background chat's hook fired
+        # with the id of whatever conversation Josh happened to be reading,
+        # which is worse than firing with none: a script that acts on
+        # AICHAT_SESSION would act on the wrong conversation.
+        session_id = (payload.get("chat_id")
+                      or payload.get("session_id")
+                      or (payload.get("session") or {}).get("id")
+                      or "")
+        title = ""
         try:
-            run = self._runs.focused()
-            if run is not None and run.id:
-                session_id = run.id
+            run = (self._runs.get(session_id) if session_id
+                   else self._runs.focused())
+            if run is not None:
+                if not session_id and run.id:
+                    session_id = run.id
+                # in-memory only: the emitter thread must never do file I/O
+                title = str((run.state or {}).get("title") or "")
         except Exception:
             pass
         env = hook_environment(hook_name, session_id, title, detail)
@@ -2276,13 +2433,16 @@ class Api:
 
     # ------------------------------------------------------- conversation --
     def start(self, cfg):
-        if self._thread and self._thread.is_alive():
+        # The DRAFT, not whatever is focused: see RunManager.fresh_stage.
+        run = self._runs.fresh_stage()
+        if run.is_running():
             return {"error": "A conversation is already running."}
-        self._stop_flag.clear()
-        while not self._human_q.empty():
-            self._human_q.get_nowait()
-        self._thread = threading.Thread(target=self._run, args=(cfg,), daemon=True)
-        self._thread.start()
+        run.stop_flag.clear()
+        while not run.human_q.empty():
+            run.human_q.get_nowait()
+        # spawn() records the thread BEFORE starting it, so the run is live to
+        # every guard from the first instruction — see RunManager.spawn.
+        self._runs.spawn(self._run, (cfg, run), run=run)
         return {"ok": True}
 
     def continue_chat(self, cfg):
@@ -2298,10 +2458,11 @@ class Api:
         if not run.state:
             return {"error": "No conversation to continue."}
         self._runs.focus(run.id) if run.id else None
+        # Josh reopened it and typed into it, so it is his chat now whatever
+        # started it — a resumed background run stops being background.
+        run.background = False
         run.stop_flag.clear()
-        run.thread = threading.Thread(target=self._run_continue, args=(cfg,),
-                                      daemon=True)
-        run.thread.start()
+        self._runs.spawn(self._run_continue, (cfg, run), run=run)
         return {"ok": True}
 
     def reset_conversation(self):
@@ -2538,14 +2699,6 @@ class Api:
             "role": agent.role or "",
             "role_instructions": agent.role_instructions or ""})
 
-    def _chat_id(self):
-        """The id of the run this Api currently owns (session dir basename).
-
-        Until the run registry lands there is exactly one, so this is the
-        single point that has to change when there are many."""
-        d = self._session_dir
-        return os.path.basename(os.path.normpath(d)) if d else None
-
     def _resolve_chat(self, chat_id):
         """(run, error) for a chat-scoped call.
 
@@ -2651,23 +2804,33 @@ class Api:
         return {"ok": True, "stopped": len(hit),
                 "seats": [slots[i] if i < len(slots) else i for i in hit]}
 
-    def _run(self, cfg):
+    def _run(self, cfg, run=None):
+        run = run if run is not None else self._runs.focused()
         try:
-            self._conversation(cfg)
+            self._conversation(cfg, run)
         except Exception as e:
-            self.emit("error", {"message": str(e)})
-            self.emit("done", {"transcript": None,
-                               "can_continue": bool(self._conv)})
+            self._emit_for(run, "error", {"message": str(e)})
+            self._emit_for(run, "done", {"transcript": None,
+                                         "can_continue": bool(run.state)})
 
-    def _run_continue(self, cfg):
+    def _run_continue(self, cfg, run=None):
+        run = run if run is not None else self._runs.focused()
         try:
-            self._continue(cfg)
+            self._continue(cfg, run)
         except Exception as e:
-            self.emit("error", {"message": str(e)})
-            self.emit("done", {"transcript": None,
-                               "can_continue": bool(self._conv)})
+            self._emit_for(run, "error", {"message": str(e)})
+            self._emit_for(run, "done", {"transcript": None,
+                                         "can_continue": bool(run.state)})
 
-    def _conversation(self, cfg):
+    def _conversation(self, cfg, run=None):
+        # PINNED, never re-read from the focus pointer. Everything below used
+        # to go through the `self._conv` / `session_dir` views, which
+        # resolve to whatever chat the WINDOW is showing — so a conversation
+        # this window did not start from the visible stage (the webhook) wrote
+        # its state, its directory and its identity onto Josh's draft, or onto
+        # whichever chat he had open.
+        run = run if run is not None else self._runs.focused()
+        emit = lambda event, payload=None: self._emit_for(run, event, payload)
         topic = (cfg.get("topic") or "").strip()
         opener = (cfg.get("opener") or "").strip()
         turns = max(1, int(cfg.get("turns", 10)))
@@ -2730,13 +2893,13 @@ class Api:
         mode, recipe, orchestration_adjustments = _app_orchestration_config(
             cfg, turns, until_done=until_done, ceiling=ceiling)
         if mode not in MODES:
-            self.emit("error", {"message": f"Unknown mode {mode!r}."})
-            self.emit("done", {"transcript": None})
+            emit("error", {"message": f"Unknown mode {mode!r}."})
+            emit("done", {"transcript": None})
             return
         if mode not in IMPLEMENTED_MODES:
-            self.emit("error", {"message": f"Mode '{mode}' isn't available "
-                                           f"yet."})
-            self.emit("done", {"transcript": None})
+            emit("error", {"message": f"Mode '{mode}' isn't available "
+                 f"yet."})
+            emit("done", {"transcript": None})
             return
         # The normalized recipe owns the Advanced drawer's budget.  Keep the
         # engine's mechanical cap in lockstep so its lazy orchestration(state)
@@ -2750,9 +2913,9 @@ class Api:
             m = cfg.get("moderator") or {}
             provider = (m.get("provider") or "claude").lower()
             if provider not in AGENT_TYPES:
-                self.emit("error", {"message": f"Unknown moderator provider "
-                                               f"{provider!r}."})
-                self.emit("done", {"transcript": None})
+                emit("error", {"message": f"Unknown moderator provider "
+                     f"{provider!r}."})
+                emit("done", {"transcript": None})
                 return
             moderator_spec = {"provider": provider,
                               "model": m.get("model") or None,
@@ -2781,8 +2944,8 @@ class Api:
         # refuses.
         refusal = relay.seat_count_refusal(mode, len(picked))
         if refusal:
-            self.emit("error", {"message": refusal})
-            self.emit("done", {"transcript": None})
+            emit("error", {"message": refusal})
+            emit("done", {"transcript": None})
             return
         slot_ids = [s.get("id", i) for i, s in enumerate(picked)]
         panel_state = None
@@ -2795,9 +2958,9 @@ class Api:
             # hand-made cfg whose legacy `mode` disagrees with its workflow,
             # which is the one way the refusal above can be sidestepped.
             if len(picked) != 2:
-                self.emit("error", {"message": "A battle needs exactly two "
-                                               "participants."})
-                self.emit("done", {"transcript": None})
+                emit("error", {"message": "A battle needs exactly two "
+                     "participants."})
+                emit("done", {"transcript": None})
                 return
             battle_state = {"phase": "blind",
                             "slots": sorted(slot_ids)[:2]}
@@ -2806,21 +2969,21 @@ class Api:
                 panel_state = {"synthesizer":
                                _panel_synthesizer(cfg, slot_ids)}
             except ValueError as e:
-                self.emit("error", {"message": str(e)})
-                self.emit("done", {"transcript": None})
+                emit("error", {"message": str(e)})
+                emit("done", {"transcript": None})
                 return
         try:
             labels = assign_labels([(s["provider"], s.get("label"),
                                      s.get("model")) for s in picked])
         except ValueError as e:
-            self.emit("error", {"message": str(e)})
-            self.emit("done", {"transcript": None})
+            emit("error", {"message": str(e)})
+            emit("done", {"transcript": None})
             return
         blockers = self._auth_blockers(s["provider"] for s in picked)
         if blockers:
-            self.emit("error", {"message": " ".join(blockers)})
-            self.emit("done", {"transcript": None,
-                               "can_continue": bool(self._conv)})
+            emit("error", {"message": " ".join(blockers)})
+            emit("done", {"transcript": None,
+                 "can_continue": bool(run.state)})
             return
 
         # Everything from here to `started` is real work with no seat in
@@ -2829,16 +2992,17 @@ class Api:
         # a large repo, and until now it was indistinguishable from a dead
         # window. The UI holds this row back for a beat, so a fast setup
         # still shows nothing.
-        with relay.working(_AppIO(self), "setup"):
+        with relay.working(_AppIO(self, run), "setup"):
             stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
             attachments = cfg.get("attachments") or []
             title_src = topic or opener or \
                 (attachments[0].get("name", "") if attachments else "")
             slug = re.sub(r"[^a-z0-9]+", "-", title_src.lower())[:40].strip("-") or "chat"
-            self._session_dir = os.path.join(SESSIONS_DIR, f"{stamp}-{slug}")
-            self._view_workspace = None      # the live _conv is authoritative now
-            workspace = cfg.get("workspace") or os.path.join(self._session_dir, "workspace")
-            os.makedirs(self._session_dir, exist_ok=True)
+            session_dir = os.path.join(SESSIONS_DIR, f"{stamp}-{slug}")
+            self._adopt_run(run, session_dir)
+            run.view_workspace = None    # the live state is authoritative now
+            workspace = cfg.get("workspace") or os.path.join(session_dir, "workspace")
+            os.makedirs(session_dir, exist_ok=True)
             os.makedirs(workspace, exist_ok=True)
             if continuous_cfg:
                 # Both of these need the real folder, which only exists now. The
@@ -2852,7 +3016,7 @@ class Api:
             # attachment lines join the opener AFTER the title is set — the rail
             # title should stay the words Josh typed, not a wall of file paths
             opener = with_attachments(opener, save_attachments(attachments, workspace))
-            transcript = os.path.join(self._session_dir, "transcript.md")
+            transcript = os.path.join(session_dir, "transcript.md")
 
             agents = []
             for s, label in zip(picked, labels):
@@ -2885,7 +3049,7 @@ class Api:
 
             # Full opener text is the title — the rail ellipsizes in CSS and uses
             # the rest as a tooltip, so truncating here would throw it away.
-            store = SessionStore(self._session_dir)
+            store = SessionStore(session_dir)
             store.open_transcript(title_src, agents, turns)
 
             state = {
@@ -2935,32 +3099,32 @@ class Api:
             state["log"] = log = make_log(state, store)
             # _session_dir was set above, so the focused run is this chat's — pin
             # it to the state before any thread can move the focus pointer.
-            state["_run"] = self._runs.focused()
+            state["_run"] = run
             if (cfg.get("plan") or {}).get("enabled"):
                 # Read-only from the FIRST turn, before any seat has spoken:
                 # starting in execution and downgrading later would leave a window
                 # in which a seat could already have written something.
                 relay.start_plan(state, cfg.get("opener") or cfg.get("topic") or "")
-            self._conv = state
+            run.state = state
             # Persist before the first turn: if the app dies here, Josh's opener is
             # the only content that exists and it must still be resumable.
             store.save(state)
 
-        self.emit("started", {
-            "session_dir": self._session_dir, "workspace": workspace,
-            "transcript": store.transcript, "mode": mode,
-            "session": session_summary(self._session_dir),
-            # Anything the engine had to correct in the requested recipe, so
-            # the UI can show it in the same badges as its own adjustments.
-            "orchestration_adjustments": orchestration_adjustments,
-            "participants": [
-                {"id": slot_ids[i], "provider": providers[i],
-                 "name": agents[i].name,
-                 "model": picked[i].get("model") or "default",
-                 "effort": picked[i].get("effort") or "",
-                 "role": agents[i].role or "",
-                 "role_instructions": agents[i].role_instructions or ""}
-                for i in range(len(picked))],
+        emit("started", {
+             "session_dir": session_dir, "workspace": workspace,
+             "transcript": store.transcript, "mode": mode,
+             "session": session_summary(session_dir),
+             # Anything the engine had to correct in the requested recipe, so
+             # the UI can show it in the same badges as its own adjustments.
+             "orchestration_adjustments": orchestration_adjustments,
+             "participants": [
+             {"id": slot_ids[i], "provider": providers[i],
+             "name": agents[i].name,
+             "model": picked[i].get("model") or "default",
+             "effort": picked[i].get("effort") or "",
+             "role": agents[i].role or "",
+             "role_instructions": agents[i].role_instructions or ""}
+             for i in range(len(picked))],
         })
 
         # After `started` so a slow read shows a status line instead of a
@@ -2970,7 +3134,7 @@ class Api:
         # `start` spawned, not the js-bridge thread.
         def brief_status_row(text):
             store.system(text, round=0)
-            self.emit("status", {"text": text})
+            emit("status", {"text": text})
 
         # Every browser-fence correction, as a row rather than a badge: the
         # site list is the one control here that is actually enforcing, so a
@@ -2978,7 +3142,7 @@ class Api:
         for note in browser_notes:
             brief_status_row(note)
 
-        brief = project_brief(workspace, self._session_dir,
+        brief = project_brief(workspace, session_dir,
                               spec=helper_spec([s.get("provider")
                                                 for s in picked],
                                                moderator_spec,
@@ -2991,7 +3155,7 @@ class Api:
             state["brief"] = brief
             if brief.get("usage"):
                 relay.record_usage(state, brief["usage"], kind="brief")
-            write_project_context(self._session_dir, brief)
+            write_project_context(session_dir, brief)
             store.save(state)
 
         if opener:
@@ -2999,28 +3163,33 @@ class Api:
             # same keys (ts, meta, …) for this message
             target, rest = relay.parse_mention(opener, state["agents"])
             if target is None:
-                self.emit("message", log("Josh (human)", opener))
+                emit("message", log("Josh (human)", opener))
                 for j in state["pending"]:
                     state["pending"][j].append(
                         f"Josh (human) opens the conversation: {opener}")
             else:
                 # "@Seat ..." opener: the named seat alone opens with it
                 sid = state["slot_ids"][target]
-                self.emit("message", log("Josh (human)", opener, envelope={
-                    "audience": [sid], "delivered_to": [sid]}))
+                emit("message", log("Josh (human)", opener, envelope={
+                     "audience": [sid], "delivered_to": [sid]}))
                 state["pending"][target].append(
                     f"Josh (human) opens the conversation: {rest}")
             store.save(state)
         self._rounds(state)
 
-    def _continue(self, cfg):
+    def _continue(self, cfg, run=None):
         """Resume a finished conversation: same agents, same sessions."""
-        state = self._conv
+        # Pinned like _conversation: `self._conv` is a view onto the FOCUSED
+        # run, so continuing a chat while looking at another one resumed the
+        # wrong conversation's state.
+        run = run if run is not None else self._runs.focused()
+        emit = lambda event, payload=None: self._emit_for(run, event, payload)
+        state = run.state
         blockers = self._auth_blockers(state["providers"])
         if blockers:
-            self.emit("error", {"message": " ".join(blockers)})
-            self.emit("done", {"transcript": state["transcript"],
-                               "can_continue": True})
+            emit("error", {"message": " ".join(blockers)})
+            emit("done", {"transcript": state["transcript"],
+                 "can_continue": True})
             return
         opener = (cfg.get("opener") or "").strip()
         opener = with_attachments(
@@ -3059,7 +3228,7 @@ class Api:
                         "Improving settings before continuing, or this run "
                         "will stop again immediately.")
                 state["store"].system(note, round=state["rnd"])
-                self.emit("status", {"text": note})
+                emit("status", {"text": note})
         # Project docs may have moved since this chat started. REPORT it, never
         # swap it: the seats already hold the original text, so regenerating
         # here would give a later /clear'd seat different context than its
@@ -3071,18 +3240,18 @@ class Api:
                     f"({', '.join(drift)}). The seats still have the original "
                     f"text; start a new chat to pick up the new version.")
             state["store"].system(note, round=state["rnd"])
-            self.emit("status", {"text": note})
+            emit("status", {"text": note})
         if opener:
             target, rest = relay.parse_mention(opener, state["agents"])
             if target is None:
-                self.emit("message", state["log"]("Josh (human)", opener))
+                emit("message", state["log"]("Josh (human)", opener))
                 for j in state["pending"]:
                     state["pending"][j].append(f"Josh (human) says: {opener}")
             else:
                 sid = state["slot_ids"][target]
-                self.emit("message", state["log"](
-                    "Josh (human)", opener,
-                    envelope={"audience": [sid], "delivered_to": [sid]}))
+                emit("message", state["log"](
+                     "Josh (human)", opener,
+                     envelope={"audience": [sid], "delivered_to": [sid]}))
                 state["pending"][target].append(
                     f"Josh (human) says to you: {rest}")
             state["store"].save(state)
@@ -3124,15 +3293,16 @@ class Api:
         self._set_status(run, "stopped" if outcome_kind == "stopped"
                          else "failed" if outcome_kind == "fatal" else "done",
                          outcome=outcome_kind)
-        self.emit("done", {"transcript": state["transcript"],
-                           "session_dir": session_dir,
-                           "session": summary,
-                           "feedback": rec.get("human_feedback") or {},
-                           # read back from what was actually persisted rather
-                           # than asserted — if a seat's id didn't save, the
-                           # composer must say so instead of promising a resume
-                           "can_continue": summary["can_continue"],
-                           "can_continue_reason": summary["can_continue_reason"]})
+        self._emit_for(run, "done", {
+            "transcript": state["transcript"],
+            "session_dir": session_dir,
+            "session": summary,
+            "feedback": rec.get("human_feedback") or {},
+            # read back from what was actually persisted rather than asserted —
+            # if a seat's id didn't save, the composer must say so instead of
+            # promising a resume
+            "can_continue": summary["can_continue"],
+            "can_continue_reason": summary["can_continue_reason"]})
 
     # --------------------------------------------------- slash commands --
     def _do_command(self, state, text):

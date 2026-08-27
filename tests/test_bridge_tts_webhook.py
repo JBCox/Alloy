@@ -127,7 +127,10 @@ class WebhookTests(unittest.TestCase):
         self.api = app.Api()
         self.api._window = FakeWindow()
         self.started = []
-        self.api._conversation = lambda cfg: self.started.append(cfg)
+        # the real signature is _conversation(cfg, run=None): Api._run passes
+        # the Run it was spawned on, and a one-argument fake would swallow a
+        # TypeError on the worker thread and report nothing at all
+        self.api._conversation = lambda cfg, run=None: self.started.append(cfg)
 
     def _enable(self, **kw):
         r = self.api.set_webhook(True, **kw)

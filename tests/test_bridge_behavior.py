@@ -41,7 +41,10 @@ class BridgeBehaviorTests(unittest.TestCase):
         run.view_workspace = self.tmp
         if running:
             run.thread = AliveThread()
-        api._runs.adopt(run, chat_id)
+        # focus=True explicitly: adopting no longer moves the focus pointer
+        # on its own (a background chat that took it would repaint the window
+        # Josh is reading), and these tests are about the FOCUSED chat.
+        api._runs.adopt(run, chat_id, focus=True)
         return api, run
 
     def test_ui_positional_calls_route_to_the_named_chat(self):

@@ -4572,6 +4572,12 @@ window.uiEvent = packet => {
   // still respects the gate — a background chat's work is not this
   // transcript's business.
   if (event === "working" && payload.done) hideWorking(payload.id);
+  // A chat this window did not start from the visible stage stamps every
+  // event `background`. Before it has an id there is not even a rail row to
+  // update, so its setup failures are dropped here rather than painted onto
+  // whatever conversation Josh is reading. With an id it falls through to the
+  // rail prelude below and is stopped by the ordinary not-my-chat gate.
+  if (payload.background && !chatId) return;
   // Maintain the rail even when this event belongs to a background chat. The
   // active transcript is updated only below, after the chat-id routing gate.
   if (chatId && event === "workstreams") {
@@ -4591,12 +4597,23 @@ window.uiEvent = packet => {
   } else if (chatId && event === "run_status") {
     const patch = {};
     if (payload.pending_ask !== undefined) patch.question = payload.pending_ask;
-    if (Number.isFinite(payload.unread_count)) patch.unread = payload.unread_count;
+    // No unread patch: the count is the front end's own (which chat is on
+    // screen, how far it is scrolled). This line used to read `unread_count`,
+    // a key Python has never sent, next to a Python `unread` that was never
+    // incremented — a dead branch guarding a permanent zero, both halves now
+    // gone.
     setRunStatus(chatId, payload.status || "running", patch);
   } else if (event === "started" && payload.session?.id) {
     const id = payload.session.id;
-    activeId = id;                 // starts are initiated from the visible draft
-    openTab(id);                   // a started conversation earns its tab
+    // Only a chat STARTED FROM THIS STAGE earns the focus and a tab. A
+    // webhook (and, later, a scheduled room) fires while Josh is reading
+    // something else, and taking `activeId` there would swap the transcript
+    // under him mid-sentence and leave his draft registered under a chat id
+    // he never opened. It still gets its rail row and its status below.
+    if (!payload.background) {
+      activeId = id;               // starts are initiated from the visible draft
+      openTab(id);                 // a started conversation earns its tab
+    }
     sessions = [payload.session, ...sessions.filter(s => s.id !== id)];
     runFor(id, payload.session);
     setRunStatus(id, "running", {permission: payload.session.permission || payload.permission});
