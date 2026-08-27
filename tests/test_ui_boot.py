@@ -414,6 +414,7 @@ let playbookReply = null;    // set to {error} to drive the refusal path
 let interjectReply = null;   // set to {error} to drive the refusal path
 const dockCalls = [];        // W2.1: what the queue dock asked the bridge to do
 let prepareReply = null;     // what prepare_message hands back; null = an echo
+let openSessionExtra = {};   // merged into the reopened chat's session summary
 function apiReply(name, args) {
   apiCalls.push(name);
   switch (name) {
@@ -483,10 +484,12 @@ function apiReply(name, args) {
                  {speaker: 0, provider: 'claude', name: 'Claude',
                   text: 'an earlier reply', meta: 'round 1', delivered_to: [],
                   ts: '2026-08-23T08:01:00', message_id: 'stub1'}],
-      session: {id: args && args[0], title: 'Death Factory', participants: [],
-                can_continue: true, interrupted: true, mode: 'round_robin',
-                workspace: '', project: '', transcript: '', completion:
-                {lifecycle: 'active', goal_verdict: 'unknown'}},
+      session: Object.assign(
+        {id: args && args[0], title: 'Death Factory', participants: [],
+         can_continue: true, interrupted: true, mode: 'round_robin',
+         workspace: '', project: '', transcript: '', completion:
+         {lifecycle: 'active', goal_verdict: 'unknown'}},
+        openSessionExtra),
     };
     case 'list_workspace_files': return [];
     case 'list_runs': return {runs: []};
@@ -2190,6 +2193,50 @@ if (topLevelError) {
                            total_tokens: 6});
     p.nothingReported = pill({});
   } catch (e) { more.usagePillError = (e && e.stack) || String(e); }
+  // ---- W2.4: the Master goal chip shows the MANAGER's goal -----------------
+  // `goal` on a session summary is meta["topic"] — the words Josh typed to
+  // open the chat — so a supervised run showed its opening message as its
+  // master goal for the whole conversation, and a Keep Improving run on its
+  // third objective showed the first thing anyone ever said.
+  try {
+    const p = more.goalChip = {};
+    await ctx.newChat();
+    const chip = () => deepText(byId['supervisorGoal']);
+    ctx.renderSupervisorOverview('', [], '');
+    ctx.uiEvent({event: 'started', payload: {
+      session: {id: 'sess-goal', title: 'Goal', participants: [],
+                mode: 'supervisor', can_continue: false,
+                goal: 'the opening message Josh typed',
+                supervisor_goal: 'what the manager is actually working on'},
+      transcript: 'x/transcript.md', workspace: '', mode: 'supervisor'}});
+    p.afterStarted = chip();
+    // a trace entry carrying a goal repaints it live — that is how a
+    // /objective re-target reaches the chip
+    ctx.uiEvent({event: 'supervisor', payload: {
+      chat_id: 'sess-goal',
+      entry: {id: 'e1', type: 'objective_set', phase: 'objective', wave: 1,
+              title: 'Josh set the objective', detail: 'ship the docs',
+              goal: 'ship the docs'}}});
+    p.afterRetarget = chip();
+    // and a chat with no manager goal at all still falls back to the opener
+    ctx.uiEvent({event: 'started', payload: {
+      session: {id: 'sess-goal2', title: 'Goal2', participants: [],
+                mode: 'supervisor', can_continue: false,
+                goal: 'only an opener here'},
+      transcript: 'x/transcript.md', workspace: '', mode: 'supervisor'}});
+    p.fallback = chip();
+    // ...and the REOPEN path, which is a second call site: openChat passes
+    // the summary's fields straight to renderSupervisorOverview, so fixing
+    // only runFor left a reopened chat still showing its opener
+    openSessionExtra = {mode: 'supervisor',
+                        goal: 'the opening message Josh typed',
+                        supervisor_goal: 'what the manager settled on'};
+    await ctx.openChat('sess-goal-reopen');
+    p.afterReopen = chip();
+    openSessionExtra = {};
+    await ctx.newChat();
+  } catch (e) { more.goalChipError = (e && e.stack) || String(e); }
+
   // ---- W2.1: the queue dock, driven like a user ---------------------------
   // Things only an executed page can see: that Enter still SENDS while
   // Ctrl+Enter holds, that an edit to a held row is what actually goes out,
@@ -2999,6 +3046,30 @@ class UiBootTests(unittest.TestCase):
     def test_escape_clears_the_search_outright(self):
         self.assertEqual(self.report.get("valueAfterEscape"), "")
         self.assertTrue(self.report.get("railRestoredAfterEscape"))
+
+    # ---- W2.4: the Master goal chip ----------------------------------------
+    def _goal(self):
+        self.assertIsNone(self.report.get("goalChipError"),
+                          "goal probe threw: %s"
+                          % self.report.get("goalChipError"))
+        return self.report["goalChip"]
+
+    def test_the_master_goal_is_the_managers_goal_not_the_opener(self):
+        g = self._goal()
+        self.assertEqual(g["afterStarted"],
+                         "what the manager is actually working on")
+
+    def test_a_retarget_repaints_the_chip_live(self):
+        self.assertEqual(self._goal()["afterRetarget"], "ship the docs")
+
+    def test_it_falls_back_to_the_opener_when_no_goal_was_ever_set(self):
+        self.assertEqual(self._goal()["fallback"], "only an opener here")
+
+    def test_a_reopened_chat_shows_the_managers_goal_too(self):
+        """openChat is a SECOND call site; fixing only runFor left every
+        reopened supervised chat showing its opening message."""
+        self.assertEqual(self._goal()["afterReopen"],
+                         "what the manager settled on")
 
     # ---- W2.1: the queue dock ----------------------------------------------
     def _dock(self):

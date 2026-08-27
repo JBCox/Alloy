@@ -4536,7 +4536,8 @@ HELP_TEXT = ("Commands: /clear [seat] · /compact [seat] · /next <seat> · "
              "/remember <note> · /forget <id> · /memory · "
              "/retro · /turns N · "
              "/ceiling N (until-done chats) · "
-             "/checkin · /objective <text> · /limits (Keep Improving) · "
+             "/checkin · /limits (Keep Improving) · "
+             "/objective <text> (with a Supervisor) · "
              "/stop · /help — seat is a name "
              "('claude 2') or a provider (claude/gpt/gemini); no seat means "
              "every seat. Roles are edited on the seat cards — Apply role "
@@ -8273,27 +8274,54 @@ def dispatch_command(state, text, io):
         io.emit("status", {"text": note})
         state["store"].system(note, round=state["rnd"])
         state["store"].save(state)
-    elif cmd in ("checkin", "objective", "limits"):
+    elif cmd == "objective":
+        # Gated on the SUPERVISOR mode, not on "not continuous". Build
+        # Together and Keep Improving are the same workflow (the only
+        # difference between the two presets is `continuous.on`), and a
+        # manager that can be re-targeted only when the run is unattended is
+        # exactly backwards. `state["mode"]` rather than the orchestration
+        # workflow because that is the test supervise_next_wave,
+        # replan_failed_workstreams, note_unfinished_supervision and
+        # supervisor_status all make — gating this one differently would
+        # reintroduce the divergence it is meant to close.
+        if state.get("mode") != "supervisor":
+            note = ("/objective only means something in a conversation with a "
+                    "Supervisor — Build Together or Keep Improving.")
+        elif not arg:
+            note = "Usage: /objective <what to work on next>"
+        else:
+            # Steering, not an override, and deliberately NOT a re-plan: this
+            # runs at a drain site, and in run_parallel that is mid-round with
+            # seat threads alive, where supervise_next_wave's barrier-only
+            # contract says nothing may touch the board. The manager picks the
+            # next wave against the new goal at the next barrier, which is
+            # where it is safe.
+            retarget_supervisor(state, arg)
+            pol = state.get("continuous")
+            if isinstance(pol, dict):
+                # only Keep Improving keeps an objective HISTORY; an ordinary
+                # supervisor run has state["continuous"] = None, and this line
+                # used to be an unguarded setdefault on it
+                pol.setdefault("objectives", []).append(arg)
+                del pol["objectives"][:-OBJECTIVE_HISTORY_MAX]
+            for j in range(len(state.get("agents") or ())):
+                state["pending"][j].append(
+                    "Josh (human) set the next objective: " + arg)
+            # so the control log shows the re-target, and the goal chip
+            # follows it live (the UI updates on a trace entry carrying `goal`)
+            supervisor_trace(state, io, "objective",
+                             "Josh set the objective", arg,
+                             status="ready", goal=arg)
+            note = "Next objective set: " + arg
+        io.emit("status", {"text": note})
+        state["store"].system(note, round=state["rnd"])
+        state["store"].save(state)
+    elif cmd in ("checkin", "limits"):
         if not continuous_on(state):
             note = ("/%s only means something in a Keep Improving "
                     "conversation." % cmd)
         elif cmd == "limits":
             note = describe_limits(state)
-        elif cmd == "objective":
-            if not arg:
-                note = "Usage: /objective <what to work on next>"
-            else:
-                # Steering, not an override: the objective the manager is on
-                # right now keeps its wave; this lands as the seats' next
-                # instruction and as the manager's stated next goal.
-                state["continuous"].setdefault("objectives", []).append(arg)
-                state["supervisor_goal"] = arg
-                # A fresh objective is an explicit retry of planning.
-                state["supervisor_plan_attempted"] = False
-                for j in range(len(state.get("agents") or ())):
-                    state["pending"][j].append(
-                        "Josh (human) set the next objective: " + arg)
-                note = "Next objective set: " + arg
         else:
             # A check-in on demand is the same call the schedule makes, so it
             # also resets the clock — asking now and being asked again in two
@@ -10141,6 +10169,36 @@ def current_objective(state):
     return (state.get("supervisor_goal") or state.get("topic") or "").strip()
 
 
+def retarget_supervisor(state, goal):
+    """Point the manager at a new objective, with a fresh wave budget.
+
+    `SUPERVISOR_MAX_WAVES` measures "can this manager converge on ONE goal" —
+    which is exactly why continuous mode already makes it per-objective — so a
+    re-target that left the counter alone would hand the manager a goal it has
+    no waves left to pursue, and `supervise_next_wave` would then return
+    "idle" at every barrier, silently, forever. `supervisor_capped` is popped
+    with it: that flag is only the "already said so" latch, and a run that is
+    no longer capped has to be able to say it again if it caps a second time.
+
+    The wave INDEX is deliberately untouched. It is what the UI cuts its
+    collapsible wave boxes on, so restarting it would fold the new objective
+    into the old one's box.
+
+    Called by `/objective`, by the watchdog's `replan` remedy and (inline, for
+    its own bookkeeping) by `next_objective` — the three places a run changes
+    what it is working on.
+    """
+    goal = (goal or "").strip()
+    if not goal:
+        return ""
+    state["supervisor_goal"] = goal
+    state["supervisor_waves"] = 0
+    state.pop("supervisor_capped", None)
+    # an explicit re-target is also an explicit retry of planning
+    state["supervisor_plan_attempted"] = False
+    return goal
+
+
 def continuous_status(state):
     """The live strip's payload: objective, wave, spend, next check-in."""
     pol = state.get("continuous") or {}
@@ -10431,13 +10489,7 @@ def next_objective(state, io):
         pol["objectives"].append(closed)
     pol["objectives"].append(goal)
     del pol["objectives"][:-OBJECTIVE_HISTORY_MAX]
-    # The wave CAP measures "can this manager converge on ONE goal", so it
-    # resets with the goal. The wave INDEX keeps climbing, because the UI cuts
-    # its collapsible wave boxes on it and restarting at 1 would fold the new
-    # objective into the old one's box.
-    state["supervisor_waves"] = 0
-    state.pop("supervisor_capped", None)
-    state["supervisor_goal"] = goal
+    retarget_supervisor(state, goal)
     number = len(pol["objectives"])
     supervisor_trace(state, io, "objective",
                      "Objective %d: %s" % (number, goal),
@@ -10610,8 +10662,11 @@ def apply_remedy(state, io, remedy, detail):
         archive_objective(state)
         rearm_seats(state)
         # An explicit replan is exactly what the latch exists to block on
-        # resume — so it clears the latch for this and future attempts.
-        state["supervisor_plan_attempted"] = False
+        # resume, so it clears the latch — AND the wave budget. Without the
+        # second half a watchdog that repaired a capped run left it capped:
+        # the new plan dispatched, and supervise_next_wave then returned
+        # "idle" at every barrier for the rest of the run.
+        retarget_supervisor(state, goal)
         wave_index = max(1, int(state.get("supervisor_wave_index") or 1))
         tasks = plan_workstreams(state, io, goal=goal)
         state["supervisor_wave_index"] = wave_index + 1

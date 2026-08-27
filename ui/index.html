@@ -2846,21 +2846,29 @@ function eventChatId(packet) {
 }
 function runFor(id, seed) {
   if (!id) return null;
+  // supervisor_goal FIRST. `goal` is meta["topic"] — the words Josh typed to
+  // open the chat — so a supervised run showed its opening message as its
+  // "Master goal" for the whole conversation, and a Keep Improving run on its
+  // third objective showed the first thing anyone ever said. The engine has
+  // published supervisor_goal on session_summary all along and nothing in
+  // this file ever read it. Resolved ONCE: it used to be written twice, and
+  // the second write silently decided the answer.
+  const seededGoal = seed?.supervisor_goal || seed?.session?.supervisor_goal
+    || seed?.goal || seed?.session?.goal || "";
   if (!chatRuns.has(id)) chatRuns.set(id, {
     status: canonicalRunState(seed?.status) || (seed?.running ? "running" : "idle"),
     thinkers: new Set(), question: seed?.question || null,
     unread: Number(seed?.unread || 0), completionUnread: false,
     plan: seed?.plan || null, permission: seed?.permission || seed?.session?.permission || null,
     supervisorTrace: [...(seed?.supervisor_trace || seed?.session?.supervisor_trace || [])],
-    supervisorGoal: seed?.goal || seed?.session?.goal || "",
+    supervisorGoal: seededGoal,
     supervisorTasks: [...(seed?.tasks || seed?.session?.tasks || [])],
     completion: seed?.completion || seed?.session?.completion || null
   });
   const run = chatRuns.get(id);
   const seededPermission = seed?.permission || seed?.session?.permission;
   if (seededPermission) run.permission = seededPermission;
-  if (seed?.goal || seed?.session?.goal)
-    run.supervisorGoal = seed.goal || seed.session.goal;
+  if (seededGoal) run.supervisorGoal = seededGoal;
   if (Array.isArray(seed?.tasks || seed?.session?.tasks))
     run.supervisorTasks = [...(seed.tasks || seed.session.tasks)];
   if (seed?.completion || seed?.session?.completion)
@@ -9449,7 +9457,10 @@ async function openChat(id, findQuery, findExcerpt) {
   clearSeatContexts();                                  // replay repaints them from its own rows
   refreshFiles();
   restoreModerator(s.mode === "supervisor" ? s.supervisor : s.moderator);
-  renderSupervisorOverview(s.goal || "", s.tasks || [], s.mode || "");
+  // supervisor_goal, falling back to the opener only when the manager never
+  // set one — see runFor. Both call sites, or the reopen path keeps lying.
+  const supGoal = s.supervisor_goal || s.goal || "";
+  renderSupervisorOverview(supGoal, s.tasks || [], s.mode || "");
   renderSupervisorTrace(s.supervisor_trace || [], s.mode || "");
   $("untilDone").checked = !!s.until_done;
   $("permissionMode").value = s.permission || (s.yolo ? "full" : "auto");
@@ -9472,7 +9483,7 @@ async function openChat(id, findQuery, findExcerpt) {
   budgetRestore(s.usage);
    renderCompletion(s.completion);
    renderWorkstreams(s.tasks || []);
-   renderSupervisorOverview(s.goal || "", s.tasks || [], s.mode || "");
+   renderSupervisorOverview(supGoal, s.tasks || [], s.mode || "");
    // BEFORE the replay loop: an unvoted duel must already be masked when its
    // rows render, or the first paint leaks both identities.
    syncBattleUI(s);
