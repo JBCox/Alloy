@@ -61,6 +61,35 @@ class OrchestrationUiTests(unittest.TestCase):
                      "inventing its own next improvements"]:
             self.assertIn(desc, self.source)
 
+    def test_the_run_pill_is_the_third_composer_pill(self):
+        # 2026-08-27: pace & limits, side workers, board review, the
+        # synthesizer and the Advanced drawer left the seat rail for a third
+        # composer pill between the mode and permission pills. Every control
+        # kept its id (the cfg builders, restore paths and setSeated read by
+        # id), so the pin here is the pill's existence, its position, and the
+        # two behaviors a moved popover must have: it locks with setSeated
+        # and Escape closes it.
+        for needle in ['id="runPickWrap"', 'id="runSetupBtn"',
+                       'id="runPickLabel"', 'id="runSetupMenu"']:
+            self.assertIn(needle, self.source)
+        self.assertLess(self.source.index('id="modePickWrap"'),
+                        self.source.index('id="runPickWrap"'),
+                        "the run pill sits after the mode pill")
+        self.assertLess(self.source.index('id="runPickWrap"'),
+                        self.source.index('id="permPickWrap"'),
+                        "the run pill sits before the permission pill")
+        # the moved controls really live inside the menu now, not the rail
+        menu = self.source.split('id="runSetupMenu"', 1)[1]
+        menu = menu.split('id="permPickWrap"', 1)[0]
+        for moved in ['id="rVal"', 'id="untilDone"', 'id="spawnSel"',
+                      'id="boardReview"', 'id="advancedOrchestration"']:
+            self.assertIn(moved, menu)
+        # locks with the conversation like its siblings
+        self.assertIn('$("runSetupBtn").disabled = seated;', self.source)
+        # Escape closes it from the shared listener
+        esc = self.source.split("closeAccounts(); closeRole();", 1)[1][:600]
+        self.assertIn("closeRunMenu();", esc)
+
     def test_hand_edited_axes_read_as_custom_on_the_pill(self):
         # presetForCurrentRecipe's custom verdict must reach the ONE visible
         # surface now: no row is highlighted and the label says Custom.

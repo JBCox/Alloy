@@ -4127,30 +4127,26 @@ class UiBootTests(unittest.TestCase):
     def test_every_sidebar_button_is_in_the_shared_style_rule(self):
         """Found in a real browser, invisible everywhere else.
 
-        The sidebar buttons are styled by ONE id-list selector, and both
-        #statsBtn (shipped 2026-08-27) and #memBtn were left out of it -- so
-        they rendered as raw browser defaults, Arial on white with a square
-        2px black border, among four styled siblings. No text-level test and
-        no node harness can see that; only getComputedStyle on a real page
-        can. This reads the ids straight out of the <aside> so the NEXT
-        button is caught by the same check.
+        The app-nav buttons are styled by ONE id-list selector, and in their
+        previous home (the seat-rail bottom stack) both #statsBtn (shipped
+        2026-08-27) and #memBtn were left out of it -- so they rendered as
+        raw browser defaults, Arial on white with a square 2px black border,
+        among four styled siblings. No text-level test and no node harness
+        can see that; only getComputedStyle on a real page can. This reads
+        the ids straight out of #appNav so the NEXT button is caught by the
+        same check.
         """
         with open(UI, encoding="utf-8") as f:
             src = f.read()
-        # the bottom action group, anchored on the last thing above it --
-        # indentation is not consistent enough to select on, and the buttons
-        # higher in the aside (stop, new tab, the rounds steppers) are styled
-        # by their own rules
-        aside = src.split("<aside", 1)[1].split("</aside>", 1)[0]
-        aside = aside.split('id="rungAdvisory"', 1)[1]
-        ids = re.findall(r'<button id="(\w+)"', aside)
+        nav = src.split('<nav id="appNav"', 1)[1].split("</nav>", 1)[0]
+        ids = re.findall(r'<button id="(\w+)"', nav)
         self.assertIn("memBtn", ids)
         self.assertIn("statsBtn", ids)
         # keep the anchor IN the slice, or #acctBtn reads as missing from
         # the very rule it opens
         rule = "#acctBtn, " + src.split("#acctBtn, ", 1)[1].split("{", 1)[0]
         missing = [i for i in ids if "#" + i not in rule]
-        self.assertEqual(missing, [], "sidebar buttons with no shared style")
+        self.assertEqual(missing, [], "app-nav buttons with no shared style")
 
     # ---- spawn-lineage tree (t6) -------------------------------------------
     def _lineage(self):

@@ -154,6 +154,14 @@
   /* ---------- layout ---------- */
   main { flex: 1; display: flex; min-height: 0; }
 
+  /* ---------- app nav (far-left icon column) ---------- */
+  #appNav {
+    width: 48px; flex: 0 0 auto; border-right: 1px solid var(--line);
+    background: #131118; display: flex; flex-direction: column;
+    align-items: center; justify-content: space-between; padding: 10px 0 12px;
+  }
+  .nav-grp { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+
   /* ---------- chat rail (history) ---------- */
   #chatRail {
     width: 224px; flex: 0 0 auto; border-right: 1px solid var(--line);
@@ -539,6 +547,13 @@
     border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px;
     font: 12.5px "Cascadia Mono", Consolas, monospace; outline: none;
   }
+  /* model + thinking share one row — two stacked full-width selects made
+     every card two rows taller than it needed to be. The effort select can
+     be [hidden] per model (Ox), and flex lets the model box take the row. */
+  .seat-sels { display: flex; gap: 6px; margin-top: 7px; }
+  .seat-sels select { margin-top: 0; width: auto; min-width: 0; }
+  .seat-sels .model { flex: 1.6; }
+  .seat-sels .effort { flex: 1; }
   .seat .role-btn {
     width: 100%; margin-top: 7px; background: var(--surface2); color: var(--muted);
     border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px;
@@ -792,35 +807,36 @@
     color: var(--muted); user-select: all; overflow-wrap: anywhere;
   }
   .btn-sm.danger { border-color: var(--danger); color: var(--danger); }
-  /* EVERY sidebar button belongs in this list. #statsBtn was left out when
-     it shipped and rendered as a raw browser default -- Arial, white, square,
-     2px black border -- among five styled ones, which no text-level test and
-     no node harness can see, only getComputedStyle on a real page. There is
-     now a test that reads the button ids straight out of the <aside> and
-     checks each one appears here. */
+  /* EVERY app-nav button belongs in this list. #statsBtn was left out of its
+     predecessor (the old seat-rail stack) when it shipped and rendered as a
+     raw browser default -- Arial, white, square, 2px black border -- among
+     five styled ones, which no text-level test and no node harness can see,
+     only getComputedStyle on a real page. There is now a test that reads the
+     button ids straight out of #appNav and checks each one appears here. */
   #acctBtn, #skillBtn, #memBtn, #statsBtn, #roomsBtn, #schedBtn, #soundBtn,
   #hooksBtn {
-    width: 100%; display: flex; align-items: center; gap: 8px;
-    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
-    color: var(--text); padding: 9px 12px; margin-top: 16px; cursor: pointer;
-    font-family: Bahnschrift, sans-serif; font-size: 12px; letter-spacing: .14em;
-    text-transform: uppercase;
+    width: 38px; height: 38px; display: flex; align-items: center;
+    justify-content: center; position: relative; flex: 0 0 auto;
+    background: none; border: 1px solid transparent; border-radius: 10px;
+    color: var(--muted); padding: 0; cursor: pointer;
+    transition: color .15s, background .15s;
   }
-  #skillBtn { margin-top: 16px; font-size: 11px; }
-  #memBtn { margin-top: 6px; font-size: 11px; }
-  #statsBtn { margin-top: 6px; font-size: 11px; }
-  #roomsBtn { margin-top: 6px; font-size: 11px; }
-  #schedBtn { margin-top: 6px; font-size: 11px; }
-  #soundBtn { margin-top: 6px; font-size: 11px; }
-  #soundBtn.off { color: var(--muted); }
-  #hooksBtn { margin-top: 6px; font-size: 11px; }
-  #acctBtn { margin-top: 6px; }
+  #soundBtn.off .nav-ico { opacity: .38; }
   #acctBtn:hover, #skillBtn:hover, #memBtn:hover, #statsBtn:hover,
   #roomsBtn:hover, #schedBtn:hover, #soundBtn:hover,
-  #hooksBtn:hover { border-color: rgba(255,255,255,.25); }
+  #hooksBtn:hover { color: var(--text); background: var(--surface2); }
+  .nav-ico { display: block; }
+  .nav-ico svg { width: 19px; height: 19px; display: block; }
+  /* visually hidden, still the accessible name — and #soundLbl keeps its id
+     here so the toggle's JS keeps writing "Sound on"/"Sound off" into it */
+  .nav-lbl {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap;
+  }
   #acctBadge {
-    margin-left: auto; background: var(--danger); color: #fff; border-radius: 999px;
-    font: 11px "Cascadia Mono", Consolas, monospace; padding: 1px 7px;
+    position: absolute; top: 1px; right: 1px; min-width: 14px;
+    background: var(--danger); color: #fff; border-radius: 999px;
+    font: 9.5px/14px "Cascadia Mono", Consolas, monospace; padding: 0 3px;
   }
   #acctModal, #roleModal, #askModal, #skillModal, #contModal, #kbdModal,
   #hooksModal, #roomsModal, #schedModal, #deskModal, #brwsModal, #statsModal,
@@ -1946,7 +1962,7 @@
   #composerBar {
     flex-basis: 100%; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
   }
-  #modePickWrap, #permPickWrap { position: relative; display: flex; }
+  #modePickWrap, #permPickWrap, #runPickWrap { position: relative; display: flex; }
   #permPickBtn {
     display: inline-flex; align-items: center; gap: 7px;
     border: 1px solid var(--line); background: none; color: var(--muted);
@@ -1960,11 +1976,18 @@
   #permPickBtn .perm-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--perm); }
   #permPickBtn .perm-caret { color: var(--muted); font-size: 10px; }
   #permPickMenu {
-    position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 60;
-    width: 320px; background: #241F2B; border: 1px solid var(--line);
-    border-radius: 10px; padding: 6px;
+    /* right-anchored: the pill sits mid-composer, and a 420px panel hung off
+       its LEFT edge runs past the window's right side */
+    position: absolute; bottom: calc(100% + 6px); right: 0; z-index: 60;
+    width: 420px; max-height: 72vh; overflow-y: auto;
+    background: #241F2B; border: 1px solid var(--line);
+    border-radius: 10px; padding: 8px;
     box-shadow: 0 10px 28px rgba(0,0,0,.5);
   }
+  /* the pill wears the advisory's warning so the admission is visible with
+     the panel closed */
+  #permPickBtn.warn { border-color: var(--danger); }
+  #permPickBtn.warn .perm-caret { color: var(--danger); }
   #permPickMenu[hidden] { display: none; }
   .perm-opt {
     display: flex; width: 100%; align-items: flex-start; gap: 8px;
@@ -1986,19 +2009,42 @@
   /* conversation-mode picker — same composer-pill pattern as permissions:
       a compact button that opens an upward menu of modes (2026-08-25; the old
       card grid ate the whole seat rail) */
-  #modePickBtn {
+  #modePickBtn, #runSetupBtn {
     display: inline-flex; align-items: center; gap: 7px;
     border: 1px solid var(--line); background: none; color: var(--muted);
     border-radius: 7px; padding: 5px 11px; font-size: 11.5px; cursor: pointer;
     width: max-content; font-family: Bahnschrift, "Segoe UI", sans-serif;
   }
-  #modePickBtn:hover, #modePickBtn[aria-expanded=true] {
+  #modePickBtn:hover, #modePickBtn[aria-expanded=true],
+  #runSetupBtn:hover, #runSetupBtn[aria-expanded=true] {
     color: var(--text); border-color: rgba(255,255,255,.25);
   }
-  #modePickBtn:disabled { opacity: .4; cursor: default; }
-  #modePickBtn .mode-ico { display: inline-flex; color: var(--alloy); opacity: .85; }
-  #modePickBtn .mode-ico svg { width: 13px; height: 13px; display: block; }
-  #modePickBtn .perm-caret { color: var(--muted); font-size: 10px; }
+  #modePickBtn:disabled, #runSetupBtn:disabled { opacity: .4; cursor: default; }
+  #modePickBtn .mode-ico, #runSetupBtn .mode-ico { display: inline-flex; color: var(--alloy); opacity: .85; }
+  #modePickBtn .mode-ico svg, #runSetupBtn .mode-ico svg { width: 13px; height: 13px; display: block; }
+  #modePickBtn .perm-caret, #runSetupBtn .perm-caret { color: var(--muted); font-size: 10px; }
+  /* the run-setup menu: the third composer pill's popover. Wider than the
+     mode menu because the Advanced drawer's 2-col policy grid lives here now,
+     and scrollable because Keep Improving can stack every section at once. */
+  #runSetupMenu {
+    position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 60;
+    width: 380px; max-height: 72vh; overflow-y: auto; background: #241F2B;
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px;
+    box-shadow: 0 10px 28px rgba(0,0,0,.5);
+  }
+  #runSetupMenu[hidden] { display: none; }
+  /* inside the popover the .ctl box sheds its card chrome — the popover IS
+     the card — but keeps .ctl's label/select styling (and the pinned
+     `.ctl label[hidden]` rule keeps covering the labels that moved here) */
+  #runSetupMenu .ctl, #permPickMenu .ctl { background: none; border: 0; padding: 2px; margin: 0; }
+  .run-h, .acc-h {
+    font-family: Bahnschrift, sans-serif; font-size: 9.5px;
+    letter-spacing: .16em; text-transform: uppercase;
+    color: var(--muted); opacity: .8; margin: 14px 2px 8px;
+  }
+  #runSetupMenu .ctl > .run-h:first-child { margin-top: 0; }
+  #permPickMenu .ctl > .acc-h:first-child { margin-top: 4px; }
+  #runSetupMenu #advancedOrchestration { margin-top: 12px; }
   #modePickMenu {
     position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 60;
     width: 330px; background: #241F2B; border: 1px solid var(--line);
@@ -2206,6 +2252,49 @@
 <div id="tabMenu" role="menu" aria-label="Tab colour"></div>
 
 <main>
+  <!-- App-level nav: libraries on top, system settings pinned to the bottom.
+       Every button keeps the id it had in the old seat-rail stack — the
+       handlers, badge writer and sound label all bind by id. NOT a bindRail
+       rail: it never collapses and RAIL_BANDS never sheds it. -->
+  <nav id="appNav" aria-label="App">
+    <div class="nav-grp">
+      <button id="roomsBtn" title="Saved rooms — save this lineup (seats, models, roles, limits) and start it again in one click">
+        <span class="nav-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4h10v16l-5-3.5L7 20z"/></svg></span>
+        <span class="nav-lbl">Saved rooms</span>
+      </button>
+      <button id="schedBtn" title="Scheduled rooms — start a saved room on a timer, nightly, weekly, or every so often, while you are away">
+        <span class="nav-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg></span>
+        <span class="nav-lbl">Scheduled rooms</span>
+      </button>
+      <button id="memBtn" title="Memory — what Alloy remembers between sessions: your notes, what the seats recorded, and what past runs delivered">
+        <span class="nav-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6.5" rx="7" ry="2.8"/><path d="M5 6.5v11c0 1.55 3.13 2.8 7 2.8s7-1.25 7-2.8v-11"/><path d="M5 12c0 1.55 3.13 2.8 7 2.8s7-1.25 7-2.8"/></svg></span>
+        <span class="nav-lbl">Memory</span>
+      </button>
+      <button id="statsBtn" title="Stats &amp; playbook — what every provider has actually cost, how long it took, how much came from cache, and the playbook those outcomes derived">
+        <span class="nav-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16"/><path d="M6.5 20v-7M12 20V5.5M17.5 20v-10"/></svg></span>
+        <span class="nav-lbl">Stats &amp; playbook</span>
+      </button>
+    </div>
+    <div class="nav-grp nav-end">
+      <button id="skillBtn" title="Skills &amp; Connections — write skills once and give them to every seat; manage MCP servers">
+        <span class="nav-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7V3M15 7V3"/><path d="M7 7h10v4a5 5 0 0 1-10 0z"/><path d="M12 16v5"/></svg></span>
+        <span class="nav-lbl">Skills &amp; Connections</span>
+      </button>
+      <button id="hooksBtn" title="Event hooks — run your own shell commands when a conversation asks you something, checks in, finishes, or its verification gate fails">
+        <span class="nav-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3L5 13h5l-1 8 8-10h-5z"/></svg></span>
+        <span class="nav-lbl">Event hooks</span>
+      </button>
+      <button id="soundBtn" title="Sound cues when a conversation needs you or finishes — a question, a check-in, a completed run">
+        <span class="nav-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10v4h4l5 4V6l-5 4z"/><path d="M16.5 9a4.5 4.5 0 0 1 0 6"/></svg></span>
+        <span id="soundLbl" class="nav-lbl">Sound on</span>
+      </button>
+      <button id="acctBtn" title="Accounts — sign in and out of the AI accounts">
+        <span class="nav-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c1.2-3.4 3.9-5 7-5s5.8 1.6 7 5"/></svg></span>
+        <span class="nav-lbl">Accounts</span><span id="acctBadge" hidden></span>
+      </button>
+    </div>
+  </nav>
+
   <nav id="chatRail">
     <div class="rail-reopen" title="Show chat history" role="button" tabindex="0"
          aria-label="Show chat history">»</div>
@@ -2251,18 +2340,13 @@
       <button class="btn-sm" id="addSeatBtn" title="Add another participant card">+ Add seat</button>
     </div>
 
-    <div class="rail-label">Conversation</div>
+    <div class="rail-sub">Room staff</div>
     <div class="ctl" id="orchestrationCtl">
       <!-- The mode picker itself moved into the composer pill (#modePickBtn);
            #presetSel stays here as the hidden STATE HOLDER every engine-facing
            read (orchestrationCfg, restore, setSeated) goes through. What is
            left in the rail is only the workflow's own contextual controls. -->
       <input type="hidden" id="presetSel" value="open_discussion">
-      <div id="contSummary" hidden></div>
-      <div id="synthCtl" hidden>
-        <label>Synthesizer — writes the final Panel result</label>
-        <select id="synthSel"></select>
-      </div>
       <div id="modToggleRow" hidden>
         <label class="mod-toggle"><input type="checkbox" id="modOn"> Let an AI moderate — it picks who speaks next</label>
         <i>A separate cheap call each turn. It never speaks in the conversation.</i>
@@ -2282,147 +2366,6 @@
                title="Name this one — leave blank for the default">
       </div>
     </div>
-    <details id="advancedOrchestration">
-      <summary>Advanced orchestration</summary>
-      <div class="policy-body">
-        <div class="policy-h">Shape of the conversation</div>
-        <div class="policy-grid">
-          <!-- Persisted for older Alloy versions, never shown: it is saved
-               metadata, not a behavioral control anyone should be steering. -->
-          <label hidden id="modeSelRow">Compatibility recipe<select id="modeSel" title="Nearest legacy recipe saved for older Alloy versions.">
-            <option value="round_robin">Round-robin</option>
-            <option value="speaker">Speaker picks next</option>
-            <option value="moderator">Moderator decides</option>
-            <option value="parallel">Parallel</option>
-            <option value="free">Free-running</option>
-            <option value="supervisor">Supervisor</option>
-            <option value="panel">Panel</option>
-            <option value="battle">Battle</option>
-          </select></label>
-          <label>What the room is doing<select id="workflowSel"><option value="conversation">Talking it through</option><option value="panel">Each answering, then one final answer</option><option value="supervisor">Building real files in your folder</option><option value="battle">Blind duel — answer, vote, reveal</option></select><i>Talking needs no files; building splits the work up and checks it.</i></label>
-          <label>When they reply<select id="concurrencySel"><option value="sequential">One at a time</option><option value="barrier">All at once, each round</option><option value="reactive">Whenever each one is ready</option></select><i>“All at once” is faster but noisier; “whenever ready” has no turns at all.</i></label>
-          <label>Who speaks next<select id="floorSel"><option value="cyclic">Fixed rotation</option><option value="nomination">The last AI names who is next</option><option value="moderated">A moderator AI picks</option><option value="all">Everyone, every round</option><option value="fair">No turns — first ready, fairly capped</option><option value="manager">The work manager assigns it</option></select><i>A moderator or manager is a separate cheap AI call that never speaks in the chat.</i></label>
-        </div>
-        <div class="policy-h">Privacy &amp; endings</div>
-        <div class="policy-grid">
-          <label>Who sees each message<select id="routingSel"><option value="broadcast">Everyone sees everything</option><option value="addressed">Only who it is addressed to, plus a digest</option><option value="isolated">Workers only see their own task</option></select><i>Isolating workers is what stops them overwriting each other while building.</i></label>
-          <label>Who decides it is finished<select id="completionSel"><option value="participants">The AIs themselves</option><option value="moderator">The moderator AI</option><option value="synthesizer">The AI writing the final answer</option><option value="supervisor">The work manager</option></select><i>Whoever decides, the length limit below is still a hard stop.</i></label>
-        </div>
-        <div class="policy-h">Counting &amp; fairness</div>
-        <div class="policy-grid">
-          <label>How the length is counted<select id="budgetUnitSel"><option value="laps">Laps — everyone speaks once per lap</option><option value="turns">Turns — one reply each</option><option value="phases">Phases — draft, critique, final</option><option value="waves">Waves — plan, build, review</option><option value="ceiling">Ceiling — hard stop only</option></select><i>Sets what the number in the Rounds box counts.</i></label>
-          <label>Maximum lead<select id="fairnessLeadSel"><option value="1">1 turn</option><option value="2" selected>2 turns</option><option value="3">3 turns</option></select><i>Only bites when they reply whenever ready: how far the fastest may get ahead.</i></label>
-        </div>
-        <div id="policyReason"></div>
-        <div id="policyChanges"></div>
-      </div>
-    </details>
-    <div class="rail-sub">Pace &amp; limits</div>
-    <div class="ctl">
-      <label id="roundsLabel">Rounds — each seat speaks once per round</label>
-      <div class="rounds">
-        <button id="rMinus" title="Lower the count" aria-label="Lower the count">−</button>
-        <input id="rVal" class="mono" type="text" inputmode="numeric"
-               autocomplete="off" spellcheck="false" maxlength="4"
-               value="6" aria-labelledby="roundsLabel">
-        <button id="rPlus" title="Raise the count" aria-label="Raise the count">+</button>
-      </div>
-      <label class="check-row"
-             title="When checked, they decide when to stop — the number becomes a safety ceiling instead of a round count">
-        <input type="checkbox" id="untilDone"> Until done — they decide when to stop
-      </label>
-      <div id="callEstimate" role="status"></div>
-    </div>
-    <div class="rail-sub">Side workers</div>
-    <div class="ctl">
-      <div class="duo-grid">
-        <label>Helpers — one-shot AIs
-          <select id="spawnSel" title="Seats end a reply with [[SPAWN: provider | task]] to run a one-shot helper. Each helper is a real CLI call.">
-            <option value="0">Off</option>
-            <option value="3">Up to 3</option>
-            <option value="10">Up to 10</option>
-          </select>
-        </label>
-        <label>Teams — side chats
-          <select id="teamSel" title="Seats end a reply with [[TEAM: seats | task]] to run a whole side conversation that reports back. A team is MANY real CLI calls.">
-            <option value="0">Off</option>
-            <option value="1">Up to 1</option>
-            <option value="3">Up to 3</option>
-          </select>
-        </label>
-      </div>
-    </div>
-    <div class="rail-sub">Context &amp; access</div>
-    <div class="ctl">
-      <label>Working folder — files they read &amp; write</label>
-      <div id="folderRow">
-        <span id="folderPath">auto (fresh per conversation)</span>
-        <button class="btn-sm" id="pickFolder">Choose</button>
-      </div>
-      <label class="check-row"
-             title="Each CLI only auto-loads its own doc (Claude reads CLAUDE.md, GPT reads AGENTS.md, Gemini reads AGENTS.md/GEMINI.md), so without this the seats start with very unequal knowledge of the project. Only applies to a chosen folder.">
-        <input type="checkbox" id="projBrief" checked> Share the folder's AI docs with every seat
-      </label>
-      <label class="check-row check-div"
-             title="Build Together and Keep Improving only. The Supervisor's task board pauses for you before each wave dispatches: drop tasks, reword them, reassign them, reorder them, or send the whole board back with a note it plans against. A board nobody answers dispatches nothing.">
-        <input type="checkbox" id="boardReview"> Review the task board before work starts
-      </label>
-      <label class="check-row check-div">
-        <input type="checkbox" id="connectors"> Connected apps (Gmail, Drive, Calendar…)
-      </label>
-      <div class="yolo-note" id="connNote">Seats can act in those accounts unattended — including sending mail. Skills, shell and document building work without this.</div>
-      <label class="check-div" for="desktopMode">Desktop control — your screen, not the folder</label>
-      <select id="desktopMode" title="Locked once the conversation starts">
-        <option value="off" selected>Off — seats cannot see your screen</option>
-        <option value="ask">Ask every time</option>
-        <option value="allowlist">Allowed apps only</option>
-        <option value="full">Unattended — no prompts</option>
-      </select>
-      <div id="desktopApps" hidden>
-        <input id="desktopAppList" type="text" spellcheck="false"
-               placeholder="Notepad$, \.exe$ — window title or program, comma separated">
-      </div>
-      <div class="yolo-note" id="desktopNote" hidden></div>
-      <label class="check-div" for="browserMode">Browser control — a real Chrome, only where you say</label>
-      <select id="browserMode" title="Locked once the conversation starts">
-        <option value="off" selected>Off — seats cannot open a browser</option>
-        <option value="read">Look only — no clicking or typing</option>
-        <option value="ask">Ask before acting</option>
-        <option value="full">Unattended — no prompts</option>
-      </select>
-      <div id="browserSites" hidden>
-        <input id="browserSiteList" type="text" spellcheck="false"
-               placeholder="https://example.com/* — allowed sites, comma separated">
-        <div class="yolo-note">Chrome is blocked from everything not listed, including your files and this machine's own ports. Leave it empty and it reaches nothing.</div>
-      </div>
-      <div class="yolo-note" id="browserNote" hidden></div>
-      <div class="yolo-note danger" id="rungAdvisory" hidden></div>
-    </div>
-
-    <button id="skillBtn" title="Write skills once and give them to every seat; manage MCP servers">
-      <span>Skills &amp; Connections</span>
-    </button>
-    <button id="memBtn" title="What Alloy remembers between sessions — your notes, what the seats recorded, and what past runs delivered">
-      <span>Memory</span>
-    </button>
-    <button id="statsBtn" title="What every provider has actually cost, how long it took, how much came from cache — and the playbook those outcomes derived">
-      <span>Stats &amp; playbook</span>
-    </button>
-    <button id="roomsBtn" title="Save this lineup — seats, models, roles, limits — and start it again in one click">
-      <span>Saved rooms</span>
-    </button>
-    <button id="schedBtn" title="Start a saved room on a timer — nightly, weekly, or every so often — while you are away">
-      <span>Scheduled rooms</span>
-    </button>
-    <button id="soundBtn" title="Sound cues when a conversation needs you or finishes — a question, a check-in, a completed run">
-      <span id="soundLbl">Sound on</span>
-    </button>
-    <button id="hooksBtn" title="Run your own shell commands when a conversation asks you something, checks in, finishes, or its verification gate fails">
-      <span>Event hooks</span>
-    </button>
-    <button id="acctBtn" title="Sign in and out of the AI accounts">
-      <span>Accounts</span><span id="acctBadge" hidden></span>
-    </button>
   </aside>
 
   <div class="stage">
@@ -2544,6 +2487,98 @@
             <div id="modeOptList"></div>
           </div>
         </div>
+        <div id="runPickWrap">
+          <!-- run-setup pill: same composer-pill pattern as mode/permissions.
+               Everything inside the menu MOVED from the old seat-rail stack
+               keeping its id — the cfg builders, restore paths and setSeated
+               all read these controls by id and are unchanged. -->
+          <button id="runSetupBtn" aria-haspopup="true" aria-expanded="false"
+                  title="Run setup — length, side workers, turn mechanics">
+            <span class="mode-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h7"/></svg></span>
+            <span id="runPickLabel">6 rounds</span>
+            <span class="perm-caret">⌄</span>
+          </button>
+          <div id="runSetupMenu" hidden>
+            <div class="ctl">
+              <div class="run-h">Length</div>
+              <label id="roundsLabel">Rounds — each seat speaks once per round</label>
+              <div class="rounds">
+                <button id="rMinus" title="Lower the count" aria-label="Lower the count">−</button>
+                <input id="rVal" class="mono" type="text" inputmode="numeric"
+                       autocomplete="off" spellcheck="false" maxlength="4"
+                       value="6" aria-labelledby="roundsLabel">
+                <button id="rPlus" title="Raise the count" aria-label="Raise the count">+</button>
+              </div>
+              <label class="check-row"
+                     title="When checked, they decide when to stop — the number becomes a safety ceiling instead of a round count">
+                <input type="checkbox" id="untilDone"> Until done — they decide when to stop
+              </label>
+              <div id="callEstimate" role="status"></div>
+              <div id="contSummary" hidden></div>
+              <div class="run-h">Side workers</div>
+              <div class="duo-grid">
+                <label>Helpers — one-shot AIs
+                  <select id="spawnSel" title="Seats end a reply with [[SPAWN: provider | task]] to run a one-shot helper. Each helper is a real CLI call.">
+                    <option value="0">Off</option>
+                    <option value="3">Up to 3</option>
+                    <option value="10">Up to 10</option>
+                  </select>
+                </label>
+                <label>Teams — side chats
+                  <select id="teamSel" title="Seats end a reply with [[TEAM: seats | task]] to run a whole side conversation that reports back. A team is MANY real CLI calls.">
+                    <option value="0">Off</option>
+                    <option value="1">Up to 1</option>
+                    <option value="3">Up to 3</option>
+                  </select>
+                </label>
+              </div>
+              <div class="run-h">Workflow</div>
+              <div id="synthCtl" hidden>
+                <label>Synthesizer — writes the final Panel result</label>
+                <select id="synthSel"></select>
+              </div>
+              <label class="check-row"
+                     title="Build Together and Keep Improving only. The Supervisor's task board pauses for you before each wave dispatches: drop tasks, reword them, reassign them, reorder them, or send the whole board back with a note it plans against. A board nobody answers dispatches nothing.">
+                <input type="checkbox" id="boardReview"> Review the task board before work starts
+              </label>
+            </div>
+            <details id="advancedOrchestration">
+              <summary>Advanced orchestration</summary>
+              <div class="policy-body">
+                <div class="policy-h">Shape of the conversation</div>
+                <div class="policy-grid">
+                  <!-- Persisted for older Alloy versions, never shown: it is saved
+                       metadata, not a behavioral control anyone should be steering. -->
+                  <label hidden id="modeSelRow">Compatibility recipe<select id="modeSel" title="Nearest legacy recipe saved for older Alloy versions.">
+                    <option value="round_robin">Round-robin</option>
+                    <option value="speaker">Speaker picks next</option>
+                    <option value="moderator">Moderator decides</option>
+                    <option value="parallel">Parallel</option>
+                    <option value="free">Free-running</option>
+                    <option value="supervisor">Supervisor</option>
+                    <option value="panel">Panel</option>
+                    <option value="battle">Battle</option>
+                  </select></label>
+                  <label>What the room is doing<select id="workflowSel"><option value="conversation">Talking it through</option><option value="panel">Each answering, then one final answer</option><option value="supervisor">Building real files in your folder</option><option value="battle">Blind duel — answer, vote, reveal</option></select><i>Talking needs no files; building splits the work up and checks it.</i></label>
+                  <label>When they reply<select id="concurrencySel"><option value="sequential">One at a time</option><option value="barrier">All at once, each round</option><option value="reactive">Whenever each one is ready</option></select><i>“All at once” is faster but noisier; “whenever ready” has no turns at all.</i></label>
+                  <label>Who speaks next<select id="floorSel"><option value="cyclic">Fixed rotation</option><option value="nomination">The last AI names who is next</option><option value="moderated">A moderator AI picks</option><option value="all">Everyone, every round</option><option value="fair">No turns — first ready, fairly capped</option><option value="manager">The work manager assigns it</option></select><i>A moderator or manager is a separate cheap AI call that never speaks in the chat.</i></label>
+                </div>
+                <div class="policy-h">Privacy &amp; endings</div>
+                <div class="policy-grid">
+                  <label>Who sees each message<select id="routingSel"><option value="broadcast">Everyone sees everything</option><option value="addressed">Only who it is addressed to, plus a digest</option><option value="isolated">Workers only see their own task</option></select><i>Isolating workers is what stops them overwriting each other while building.</i></label>
+                  <label>Who decides it is finished<select id="completionSel"><option value="participants">The AIs themselves</option><option value="moderator">The moderator AI</option><option value="synthesizer">The AI writing the final answer</option><option value="supervisor">The work manager</option></select><i>Whoever decides, the length limit below is still a hard stop.</i></label>
+                </div>
+                <div class="policy-h">Counting &amp; fairness</div>
+                <div class="policy-grid">
+                  <label>How the length is counted<select id="budgetUnitSel"><option value="laps">Laps — everyone speaks once per lap</option><option value="turns">Turns — one reply each</option><option value="phases">Phases — draft, critique, final</option><option value="waves">Waves — plan, build, review</option><option value="ceiling">Ceiling — hard stop only</option></select><i>Sets what the number in the Rounds box counts.</i></label>
+                  <label>Maximum lead<select id="fairnessLeadSel"><option value="1">1 turn</option><option value="2" selected>2 turns</option><option value="3">3 turns</option></select><i>Only bites when they reply whenever ready: how far the fastest may get ahead.</i></label>
+                </div>
+                <div id="policyReason"></div>
+                <div id="policyChanges"></div>
+              </div>
+            </details>
+          </div>
+        </div>
         <div id="permPickWrap">
           <!-- state holder: every engine-facing read (cfgFor, restore, setSeated)
                goes through this select; the pill and menu below drive it -->
@@ -2558,9 +2593,57 @@
             <span class="perm-dot"></span><span id="permPickLabel">Workspace</span>
             <span class="perm-caret">⌄</span>
           </button>
-          <div id="permPickMenu" role="listbox" aria-label="Permission mode" hidden>
-            <div id="permOptList"></div>
+          <div id="permPickMenu" hidden>
+            <div id="permOptList" role="listbox" aria-label="Permission mode"></div>
             <div class="permission-note" id="permissionNote"></div>
+            <!-- the Access panel: everything that decides what a run can
+                 touch, in the one popover that already owned the permission
+                 rung. Moved from the old seat-rail "Context & access" block
+                 keeping every id — cfg builders and restore paths are
+                 unchanged. -->
+            <div class="ctl">
+              <div class="acc-h">Workspace</div>
+              <label>Working folder — files they read &amp; write</label>
+              <div id="folderRow">
+                <span id="folderPath">auto (fresh per conversation)</span>
+                <button class="btn-sm" id="pickFolder">Choose</button>
+              </div>
+              <label class="check-row"
+                     title="Each CLI only auto-loads its own doc (Claude reads CLAUDE.md, GPT reads AGENTS.md, Gemini reads AGENTS.md/GEMINI.md), so without this the seats start with very unequal knowledge of the project. Only applies to a chosen folder.">
+                <input type="checkbox" id="projBrief" checked> Share the folder's AI docs with every seat
+              </label>
+              <div class="acc-h">Capabilities</div>
+              <label class="check-row">
+                <input type="checkbox" id="connectors"> Connected apps (Gmail, Drive, Calendar…)
+              </label>
+              <div class="yolo-note" id="connNote">Seats can act in those accounts unattended — including sending mail. Skills, shell and document building work without this.</div>
+              <label class="check-div" for="desktopMode">Desktop control — your screen, not the folder</label>
+              <select id="desktopMode" title="Locked once the conversation starts">
+                <option value="off" selected>Off — seats cannot see your screen</option>
+                <option value="ask">Ask every time</option>
+                <option value="allowlist">Allowed apps only</option>
+                <option value="full">Unattended — no prompts</option>
+              </select>
+              <div id="desktopApps" hidden>
+                <input id="desktopAppList" type="text" spellcheck="false"
+                       placeholder="Notepad$, \.exe$ — window title or program, comma separated">
+              </div>
+              <div class="yolo-note" id="desktopNote" hidden></div>
+              <label class="check-div" for="browserMode">Browser control — a real Chrome, only where you say</label>
+              <select id="browserMode" title="Locked once the conversation starts">
+                <option value="off" selected>Off — seats cannot open a browser</option>
+                <option value="read">Look only — no clicking or typing</option>
+                <option value="ask">Ask before acting</option>
+                <option value="full">Unattended — no prompts</option>
+              </select>
+              <div id="browserSites" hidden>
+                <input id="browserSiteList" type="text" spellcheck="false"
+                       placeholder="https://example.com/* — allowed sites, comma separated">
+                <div class="yolo-note">Chrome is blocked from everything not listed, including your files and this machine's own ports. Leave it empty and it reaches nothing.</div>
+              </div>
+              <div class="yolo-note" id="browserNote" hidden></div>
+              <div class="yolo-note danger" id="rungAdvisory" hidden></div>
+            </div>
           </div>
         </div>
       </div>
@@ -5638,6 +5721,7 @@ function contLimitWords() {
 function renderContSummary() {
   const box = $("contSummary");
   if (!box) return;
+  paintRunPill();                  // contOn changes what the run pill says
   box.hidden = !contOn;
   if (!contOn) return;
   box.replaceChildren();
@@ -5651,7 +5735,9 @@ function renderContSummary() {
   text.append(stops, contCfg.gate ? " · verifies each round " : " · no verification ");
   const edit = document.createElement("button");
   edit.type = "button"; edit.textContent = "change";
-  edit.onclick = () => openContinuous(false);
+  // the run menu is z-60 and #contModal z-50 — an open menu would sit ON TOP
+  // of the modal it just raised, so it closes first
+  edit.onclick = () => { closeRunMenu(); openContinuous(false); };
   box.append(text, edit);
 }
 // The acknowledgement has to describe the configuration the user actually
@@ -6138,6 +6224,37 @@ $("modePickBtn").onclick = e => {
 };
 document.addEventListener("click", e => {
   if (!$("modePickMenu").hidden && !$("modePickWrap").contains(e.target)) closeModeMenu();
+});
+/* ---------- run-setup pill (the third composer pill) ---------- */
+// The label is a PAINT of the same state syncRoundsCtl reads (rounds /
+// ceiling / untilDone / contOn) — it is repainted from syncRoundsCtl and
+// renderContSummary, which every restore path already drives, so a reopened
+// chat's pill is truthful with no extra calls here.
+function paintRunPill() {
+  const lbl = $("runPickLabel");
+  if (!lbl) return;
+  if (contOn) lbl.textContent = "Runs until stopped";
+  else if (untilDoneOn()) lbl.textContent = `Until done · cap ${ceiling}`;
+  else lbl.textContent = `${rounds} ${soloStage()
+    ? (rounds === 1 ? "turn" : "turns")
+    : (rounds === 1 ? "round" : "rounds")}`;
+}
+function openRunMenu() {
+  if ($("runSetupBtn").disabled) return;
+  $("runSetupMenu").hidden = false;
+  $("runSetupBtn").setAttribute("aria-expanded", "true");
+}
+function closeRunMenu() {
+  if ($("runSetupMenu").hidden) return;
+  $("runSetupMenu").hidden = true;
+  $("runSetupBtn").setAttribute("aria-expanded", "false");
+}
+$("runSetupBtn").onclick = e => {
+  e.stopPropagation();
+  if ($("runSetupMenu").hidden) openRunMenu(); else closeRunMenu();
+};
+document.addEventListener("click", e => {
+  if (!$("runSetupMenu").hidden && !$("runPickWrap").contains(e.target)) closeRunMenu();
 });
 // The pill names a preset only when the recipe EXACTLY equals that preset.
 // Anything else is honestly Custom -- calling a hand-tuned recipe "Discuss in
@@ -6691,8 +6808,10 @@ function addSeat(provider, forceId) {
     </div>
     <div class="seat-workstream"></div>
     <div class="seat-ctx"></div>
-    <select class="model" title="Model — what this seat runs on; options come from its provider"></select>
-    <select class="effort" title="Thinking effort — options come from each model"></select>
+    <div class="seat-sels">
+      <select class="model" title="Model — what this seat runs on; options come from its provider"></select>
+      <select class="effort" title="Thinking effort — options come from each model"></select>
+    </div>
     <button class="role-btn" title="Role — give this seat a public name plus private instructions only it sees"></button>`;
   seat.el = d;
   refreshRoleBtn(seat);
@@ -6739,7 +6858,7 @@ function fillSeat(seat) {
   const eSel = seat.el.querySelector(".effort");
   if (seat.provider === "claude") {
     fill(mSel, uiCfg.claude_models, uiCfg.claude_default_model);
-    fill(eSel, ["low", "medium", "high", "xhigh", "max"].map(l => ({id: l, label: "Thinking: " + l})),
+    fill(eSel, ["low", "medium", "high", "xhigh", "max"].map(l => ({id: l, label: l})),
          uiCfg.claude_default_effort);
   } else if (seat.provider === "gpt") {
     fill(mSel, gptModels.map(m => ({id: m.id, label: m.label})),
@@ -6997,6 +7116,10 @@ function setSeated(on) {
   $("permPickBtn").disabled = seated;
   if (seated) closePermMenu(); else renderPermPick();
   if (seated) closeModeMenu(); else renderModePick();
+  // the run pill locks with the controls inside it — an open menu would
+  // offer choices the engine just refused; the pill itself stays readable
+  $("runSetupBtn").disabled = seated;
+  if (seated) closeRunMenu();
   $("connectors").disabled = seated;
   // Desktop control is conversation-level like the rest of this group: the
   // seats' CLIs were handed the server (or not) at launch, so changing it
@@ -7947,7 +8070,8 @@ document.addEventListener("keydown", e => {
     // false = refused, so Escape reverts the picker like Cancel does
     if ($("deskModal").classList.contains("show")) closeDeskModal(false);
     if ($("brwsModal").classList.contains("show")) closeBrwsModal(false);
-    closeModeMenu();                   // the composer's own popover
+    closeModeMenu();                   // the composer's own popovers
+    closeRunMenu();
     closeJobs();                       // and the rail's
     if ($("findBar") && !$("findBar").hidden) findClose();
     if (micOn) micStop(true);          // a live mic is the one thing Escape must kill
@@ -9095,9 +9219,9 @@ bindRail("no-files", "hideFileRail", "filesCollapse", "#fileRail");
 // crossing out of a band restores whatever the user actually chose. Reopening
 // a rail inside a band is respected until the window leaves that band.
 const RAIL_BANDS = [                 // widest first; band i implies bands < i
-  { limit: 1240, cls: "no-files", store: "hideFileRail" },
-  { limit: 1040, cls: "no-chats", store: "hideChatRail" },
-  { limit: 860,  cls: "no-seats", store: "hideSeatRail" },
+  { limit: 1288, cls: "no-files", store: "hideFileRail" },
+  { limit: 1088, cls: "no-chats", store: "hideChatRail" },
+  { limit: 908,  cls: "no-seats", store: "hideSeatRail" },
 ];
 let railBandSeen = -1;
 function syncRailBands() {
@@ -9141,6 +9265,7 @@ function syncRoundsCtl() {
     if (document.activeElement !== box) box.value = rounds;
   }
   if ($("callEstimate")) updateCallEstimate();
+  paintRunPill();
 }
 // Clamp on COMMIT and repaint the clamped number, so a refused value is
 // visible rather than silently corrected. Garbage keeps the last good one.
@@ -9185,6 +9310,11 @@ const FOLDER_AUTO = "auto (fresh per conversation)";
 function showFolder(f) {
   $("folderPath").textContent = f || FOLDER_AUTO;
   $("folderPath").style.color = f ? "var(--text)" : "";
+  // the folder lives inside the Access panel now — its pill says which
+  // project is armed without opening anything
+  const base = f ? String(f).replace(/[\\/]+$/, "").split(/[\\/]/).pop() : "";
+  $("permPickBtn").title = "Permissions — what the seats may change"
+    + (base ? " · folder: " + base : "");
 }
 function setFolder(f) {
   customFolder = f || null;
@@ -9242,7 +9372,10 @@ function syncRungAdvisory() {
   if ($("desktopMode").value !== "off") on.push("desktop");
   if ($("browserMode").value !== "off") on.push("browser");
   const box = $("rungAdvisory");
-  if (!on.length) { box.hidden = true; box.textContent = ""; return; }
+  // the advisory lives inside the Access panel now, so the pill wears its
+  // warning — a red paragraph behind a closed popover fires when nobody looks
+  const warn = state => $("permPickBtn").classList.toggle("warn", state);
+  if (!on.length) { box.hidden = true; box.textContent = ""; warn(false); return; }
   // Read only is the other end of the same honesty problem: there the axes
   // are not weak, they are INERT. Claude refuses every MCP tool in its
   // read-only (plan) mode, so the engine registers nothing at all — measured
@@ -9253,10 +9386,11 @@ function syncRungAdvisory() {
       + "refuses " + on.join(" and ") + " tools in its read-only mode, so "
       + "nothing is handed to them. Raise the permission mode to use it.";
     box.hidden = false;
+    warn(true);
     return;
   }
   const loose = perm === "auto" || perm === "full";
-  if (!loose) { box.hidden = true; box.textContent = ""; return; }
+  if (!loose) { box.hidden = true; box.textContent = ""; warn(false); return; }
   box.textContent = "At this permission mode the seats already have a shell, "
     + "so the " + on.join(" and ") + " approval settings above are a guard "
     + "against accident rather than a boundary."
@@ -9264,6 +9398,7 @@ function syncRungAdvisory() {
        ? " The list of allowed sites is enforced inside Chrome and does hold."
        : "");
   box.hidden = false;
+  warn(true);
 }
 /* ---------- permission mode picker (composer bottom bar) ---------- */
 const PERM_MODES = [
@@ -9365,7 +9500,9 @@ function closeDeskModal(accepted) {
 }
 $("desktopMode").onchange = () => {
   const mode = $("desktopMode").value;
-  if (mode === "full") { openDeskModal(); return; }
+  // the menu is z-60 and the ack modal z-50 — an open panel would sit ON TOP
+  // of the modal it just raised
+  if (mode === "full") { closePermMenu(); openDeskModal(); return; }
   desktopPrev = mode;
   syncDesktopNote();
 };
@@ -9449,7 +9586,8 @@ function closeBrwsModal(accepted) {
 }
 $("browserMode").onchange = () => {
   const mode = $("browserMode").value;
-  if (mode === "full") { openBrwsModal(); return; }
+  // same z-index rule as the desktop ladder: panel closes before its modal
+  if (mode === "full") { closePermMenu(); openBrwsModal(); return; }
   browserPrev = mode;
   syncBrowserNote();
 };
@@ -9486,6 +9624,11 @@ document.addEventListener("click", e => {
 document.addEventListener("keydown", e => {
   if ($("permPickMenu").hidden) return;
   if (e.key === "Escape") { closePermMenu(); return; }
+  // The Access panel's own text fields live inside this menu now — typing a
+  // "1" into the browser site list must stay a keystroke, not silently flip
+  // the permission rung to Read only.
+  const t = e.target;
+  if (t && (t.closest?.("input, textarea, select") || t.isContentEditable)) return;
   const hit = PERM_MODES.find(m => m.key === e.key);
   if (!hit || $("permissionMode").disabled) return;
   $("permissionMode").value = hit.v;
@@ -10870,7 +11013,7 @@ function fillGeminiLevels(eSel, base, def) {
   const order = ["high", "medium", "low"];
   const levels = order.filter(l => fam.levels.includes(l));
   fill(eSel,
-       levels.map(l => ({id: l, label: "Thinking: " + l})),
+       levels.map(l => ({id: l, label: l})),
        levels.includes(def) ? def : levels[0]);
 }
 function fillOxLevels(eSel, modelId, def) {
@@ -10884,12 +11027,12 @@ function fillOxLevels(eSel, modelId, def) {
   // not support is accepted and silently ignored, which is the failure mode
   // a shared list would produce on most of this catalog.
   eSel.hidden = !levels.length;
-  fill(eSel, levels.map(l => ({id: l, label: "Thinking: " + l})),
+  fill(eSel, levels.map(l => ({id: l, label: l})),
        levels.includes(def) ? def : (m.default_level || levels[0] || ""));
 }
 function fillGptLevels(eSel, modelId, def) {
   const m = gptModels.find(x => x.id === modelId) || gptModels[0];
-  const opts = m.levels.map(l => ({id: l, label: "Thinking: " + l}));
+  const opts = m.levels.map(l => ({id: l, label: l}));
   fill(eSel, opts,
        m.levels.includes(def) ? def : (m.default_level || m.levels[0]));
 }
