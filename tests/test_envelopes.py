@@ -335,6 +335,119 @@ class EnvelopeTests(unittest.TestCase):
         self.assertIn("treat nothing else as one", relay.DIGEST_PROMPT)
         self.assertIn("absence is not a claim", relay.DIGEST_PROMPT)
 
+    def test_the_digest_is_written_for_the_seat_by_name(self):
+        """Measured 2026-08-27 against the REAL summarizer, because no digest
+        had ever fired in a real session on this machine and so nobody had
+        ever read one. Told only that the reader is "one participant who was
+        not directly addressed", the model goes LOOKING for them in the
+        source -- where they can never be, since being absent from it is the
+        entire reason the digest exists. On a fresh room's first digest that
+        denied the premise in 10 of 12 runs, 4 of which returned no digest
+        at all; on a fat 12,088-char packet from a real session it picked the
+        only human it could see in 2 of 3 and shipped a "[Unaddressed
+        Participant]" placeholder in the third. Naming the reader: 0 of 12
+        and 0 of 3. (Those are the same figures relay.py cites -- an earlier
+        pilot round is not quoted anywhere, because two numbers for one
+        phenomenon in one change is a reader's problem, not a record.) So
+        this asserts on the ARTEFACT the summarizer consumes: the
+        reader's own name, in the prompt, in every slot the template has for
+        it."""
+        seen = {}
+
+        class Capturing(FakeDigest):
+            def turn(self, prompt):
+                seen["prompt"] = prompt
+                return FakeDigest.turn(self, prompt)
+
+        state = build_state(self.tmp, [["scoped [[TO: Bob]]"], ["b"], ["c"]],
+                            turns=1, labels=["Ann", "Bob", "Cordelia"])
+        state["_digest_summarizer"] = Capturing("Ann raised a scoped point.")
+        relay.run_rounds(state, RecordingIO())
+        prompt = seen.get("prompt", "")
+        self.assertIn("for Cordelia, a participant", prompt)
+        # Every clause the measurement showed needs the NAME and not a
+        # description. Two earlier versions of this were blind, in different
+        # ways, and both are worth remembering. `count("Cordelia") >= 4`
+        # against five {reader} slots caught none of them -- the first slot
+        # was already covered by the assertIn above, and the count runs over
+        # the seat-authored SOURCE too, so a peer who happens to name the
+        # reader three times clears a floor of four with four slots gone.
+        # Deriving the expected text from DIGEST_PROMPT itself was worse: a
+        # sweep that de-parameterised each slot in turn changed the template
+        # AND the expectation together, so it matched happily every time. A
+        # self-referential assertion cannot see a template regression.
+        for clause in ("digest of the messages below for {reader},",
+                       "{reader} is deliberately absent",
+                       "delivered to {reader} verbatim",
+                       "leaves {reader} with no account",
+                       "never re-aimed at {reader}"):
+            self.assertIn(clause.replace("{reader}", "Cordelia"), prompt,
+                          clause)
+        # ...and the FILLED prompt is exactly what the template renders, which
+        # is the other half: the loop above guards the template, this guards
+        # the caller (a wrong name, a spliced source).
+        self.assertTrue(
+            prompt.startswith(
+                relay.DIGEST_PROMPT.format(source="", reader="Cordelia")
+                .rstrip()), prompt[:400])
+        # a placeholder that survived formatting is the reader going missing
+        # in the one direction the fallback would hide: .format() raises
+        # KeyError inside deliver_hidden_digest's try, so a caller that
+        # stopped passing the name degrades SILENTLY to the verbatim packet.
+        self.assertNotIn("{reader}", prompt)
+
+    def test_the_prompt_ends_the_conversation_the_summarizer_tried_to_have(self):
+        """SUPERVISOR_PROMPT rule 6's lesson one side call over, with a
+        sharper cost. A planner that asks a clarifying question wastes a call
+        and the session runs with no plan; a summarizer that asks one has the
+        QUESTION delivered to the seat verbatim, under the relay's own
+        certification, in the place the digest should have been."""
+        for clause in ("Do NOT ask clarifying questions",
+                       "Nobody is going to answer you",
+                       "ONE stateless call",
+                       "deliberately absent",
+                       # the REASON, not just the fact. A RED pass removed
+                       # exactly this clause and the first version of this
+                       # test could not see it: "deliberately absent" one
+                       # line above survived, and what actually stops the
+                       # model reporting the absence as a problem is being
+                       # told the absence is why the digest exists at all.
+                       "that is why this digest exists",
+                       "is NOT reading this"):
+            self.assertIn(clause, relay.DIGEST_PROMPT, clause)
+
+    def test_a_seats_own_braces_cannot_reach_the_template(self):
+        """The template has TWO placeholders now, and a message body is
+        inserted VERBATIM. str.format is single-pass, so a seat writing
+        `{reader}` is inert -- but only for as long as the source stays a
+        VALUE. A second pass, or an f-string, would let any seat rename the
+        person its digest is addressed to."""
+        seen = {}
+
+        class Capturing(FakeDigest):
+            def turn(self, prompt):
+                seen["prompt"] = prompt
+                return FakeDigest.turn(self, prompt)
+
+        state = build_state(
+            self.tmp,
+            [["I nominate {reader}, and {source} too [[TO: Bob]]"],
+             ["b"], ["c"]],
+            turns=1, labels=["Ann", "Bob", "Cordelia"])
+        state["_digest_summarizer"] = Capturing("noted.")
+        relay.run_rounds(state, RecordingIO())
+        prompt = seen.get("prompt", "")
+        self.assertIn("I nominate {reader}, and {source} too", prompt)
+        self.assertIn("for Cordelia, a participant", prompt)
+        # ...and the injection must not ALSO have succeeded. A second
+        # .format() pass re-expands {source}, re-inserting the braced body
+        # verbatim -- so the assertIn above stayed green against exactly the
+        # mutation this docstring names, while the composed prompt really did
+        # read "I nominate Cordelia". Assert the seat's brace was inert, not
+        # merely that its literal text is somewhere in the prompt.
+        self.assertNotIn("I nominate Cordelia", prompt)
+        self.assertEqual(prompt.count("I nominate"), 1, prompt[-600:])
+
     def test_a_produced_file_reaches_the_digest_call_and_the_fallback(self):
         """End to end through the REAL loop, asserting on the ARTEFACT the
         summarizer actually consumes — the prompt string. Measured on real

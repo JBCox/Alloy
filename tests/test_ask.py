@@ -3,9 +3,11 @@
 Run:  python tests/test_ask.py
 """
 
+import ast
 import json
 import os
 import re
+import subprocess
 import shutil
 import sys
 import tempfile
@@ -374,33 +376,132 @@ class UnattendedAskTests(unittest.TestCase):
         self.assertTrue(relay.unattended({"_unattended": True}))
         self.assertTrue(relay.unattended({"_unattended": 1}))
 
-    def test_the_engine_only_ever_reads_the_key(self):
-        """The app owns this fact (it is `Run.background`). If relay ever
-        started WRITING it, authority over "is anybody watching" would be
-        split between two modules that cannot see each other."""
+    # One walker, shared by the two structural tests below. Returns
+    # {"read": {func: [src, ...]}, "write": {func: [src, ...]}} for every
+    # STATEMENT mentioning the key, keyed by the function it sits in.
+    #
+    # AST rather than a regex, and that is the point of the rewrite: the
+    # regex this replaces had already been walked past by five write
+    # spellings in one adversarial pass, and even patched it could only ever
+    # say THAT relay wrote the key -- never WHERE, which is the whole rule
+    # now that exactly one write is correct. It also gets the
+    # statement-versus-mention distinction for free: a docstring naming a
+    # private key in prose (as `unattended`'s does for `_usage_io` and
+    # `_cont_mark`) is ONE Constant whose value is the whole docstring,
+    # never the bare key. Comments are not in the tree at all.
+    @staticmethod
+    def _key_sites(path, key="_unattended"):
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
+        tree = ast.parse(src)
+        sites = {"read": {}, "write": {}}
+
+        def note(kind, func, node):
+            sites[kind].setdefault(func, []).append(
+                (ast.get_source_segment(src, node) or "").strip())
+
+        def walk(node, func, parent):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                func = node.name
+            # A KEYWORD argument carries the name as a plain str field,
+            # not a Constant -- so `state.update(_unattended=True)` and
+            # `dict(state, _unattended=True)` produce no Constant, reach
+            # neither branch below, and slip past the fail-loud else as
+            # though they were nothing. The REGEX this walker replaced
+            # caught both, and both are live vocabulary in this repo.
+            if isinstance(node, ast.keyword) and node.arg == key:
+                note("write", func, node)
+            if isinstance(node, ast.Constant) and node.value == key:
+                if isinstance(parent, ast.Subscript):
+                    note("read" if isinstance(parent.ctx, ast.Load)
+                         else "write", func, parent)
+                elif isinstance(parent, ast.Dict):
+                    note("write", func, parent)
+                elif isinstance(parent, ast.Compare):
+                    note("read", func, parent)
+                elif (isinstance(parent, ast.Call)
+                      and isinstance(parent.func, ast.Attribute)):
+                    note("read" if parent.func.attr == "get" else "write",
+                         func, parent)
+                else:
+                    raise AssertionError(
+                        "unclassified mention of %r in %s: %r -- a spelling "
+                        "this walker does not understand must FAIL, never "
+                        "count as neither" % (key, func, ast.dump(parent)))
+            for child in ast.iter_child_nodes(node):
+                walk(child, func, node)
+
+        walk(tree, "<module>", None)
+        return sites
+
+    def test_only_a_front_end_declares_it(self):
+        """The ENGINE never writes this key. A FRONT END does, because a
+        front end is the only thing that can know how its own invocation was
+        started, and there are two of them: `app.Api` answers from
+        `Run.background`, `relay.main()` answers from --unattended.
+
+        That is not the split authority the first version of this rule was
+        written to prevent. Authority would be split if `run_rounds`, a loop,
+        or `ask_abort` decided it -- two modules that cannot see each other
+        disagreeing about whether anybody is watching. Two front ends each
+        declaring for the run IT started is the `LoopIO` seam, one state key
+        over."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        sites = self._key_sites(os.path.join(root, "relay.py"))
+        self.assertEqual(sorted(sites["write"]), ["main"], sites["write"])
+        self.assertEqual(sorted(sites["read"]), ["unattended"], sites["read"])
+        self.assertEqual(len(sites["read"]["unattended"]), 1,
+                         sites["read"]["unattended"])
+        self.assertEqual(len(sites["write"]["main"]), 1, sites["write"]["main"])
+
+    def test_the_terminal_declares_it_from_its_own_flag(self):
+        """--unattended is the whole point: without a flag, a `relay.py` run
+        from Task Scheduler is indistinguishable from Josh sitting at a
+        console, and it wedged on an unanswered [[ASK]] exactly as a
+        scheduled room used to. Both halves are asserted, because either one
+        alone passes while the feature is broken: argparse really accepts the
+        flag (a subprocess, so it is the SHIPPING parser and not a copy), and
+        main() really derives the state key from it."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        helped = subprocess.run(
+            [sys.executable, os.path.join(root, "relay.py"), "--help"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=120)
+        self.assertEqual(helped.returncode, 0, helped.stderr)
+        # NOT `assertIn`: a RED pass renamed the flag to
+        # "--unattendedX" and the substring match sailed straight
+        # past it while `args.unattended` was already an
+        # AttributeError waiting to happen. The wrap-token family --
+        # a match that cannot tell an option from a prefix of one.
+        self.assertRegex(helped.stdout, r"--unattended(?![\w-])")
+
         with open(os.path.join(root, "relay.py"), encoding="utf-8") as fh:
             src = fh.read()
-        # An ASSIGNMENT, not a mention: the docstring above names the key
-        # too, and a substring match that cannot tell a statement from a
-        # sentence about it is the wrap-token bug (and test_confinement_parity
-        # matching relay's name inside a promise never to import it).
-        #
-        # Both binders and both quote styles. The first version matched a
-        # literal `=` only, and an adversarial pass injected five write
-        # spellings past it -- the important one being `"_unattended": True`
-        # inside a state dict LITERAL, which is how relay builds every other
-        # state key (`"ask": not args.no_ask` in main()), so it is the most
-        # likely future edit and a colon is not an equals.
-        writes = re.findall(r"""^.*_unattended['"]?\]?\s*[:=][^=].*$""",
-                            src, re.M)
-        self.assertEqual(writes, [], writes)
-        mutated = re.findall(r"^.*(?:setdefault|update|pop)\([^)]*_unattended"
-                             r".*$", src, re.M)
-        self.assertEqual(mutated, [], mutated)
-        reads = [ln.strip() for ln in src.splitlines()
-                 if re.search(r"""\.get\(['"]_unattended['"]\)""", ln)]
-        self.assertEqual(len(reads), 1, reads)
+        tree = ast.parse(src)
+        main = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "main")
+        wired = [ast.get_source_segment(src, value)
+                 for node in ast.walk(main) if isinstance(node, ast.Dict)
+                 for k, value in zip(node.keys, node.values)
+                 if isinstance(k, ast.Constant) and k.value == "_unattended"]
+        self.assertEqual(len(wired), 1, wired)
+        # EXACT, not `assertIn`. A substring match sees the name and never
+        # the meaning: an adversarial pass flipped this to
+        # `not args.unattended` (every console run expiring its asks, and
+        # the flag itself wedging) and to `bool(args.unattended) and False`
+        # (the flag inert, the wedge this whole change fixes restored), and
+        # BOTH stayed green across all 2597 tests.
+        self.assertEqual(wired[0], "bool(args.unattended)")
+        # ...and the polarity of the flag ITSELF, which nothing else
+        # reaches: store_false would invert the default just as quietly.
+        flag = [c for c in ast.walk(main)
+                if isinstance(c, ast.Call)
+                and getattr(c.func, "attr", "") == "add_argument"
+                and any(isinstance(a, ast.Constant) and
+                        a.value == "--unattended" for a in c.args)]
+        self.assertEqual(len(flag), 1, flag)
+        self.assertEqual([k.value.value for k in flag[0].keywords
+                          if k.arg == "action"], ["store_true"])
 
     def test_the_key_is_never_persisted(self):
         """Private like `_usage_io` and `_cont_mark`: SessionStore.save
@@ -414,14 +515,26 @@ class UnattendedAskTests(unittest.TestCase):
         self.assertNotIn("_unattended", json.dumps(meta))
         self.assertFalse(relay.unattended(rehydrate(meta)))
 
-    def test_the_cli_never_sets_it(self):
-        """The CLI has no Run and is attended by definition. build_state
-        mirrors main()'s construction, so the key is simply absent."""
+    def test_a_terminal_run_is_attended_unless_it_says_otherwise(self):
+        """Attended is the DEFAULT, and that is right: a person at a console
+        is exactly who [[ASK]] is for, so a bare `relay.py` waits as long as
+        it always has.
+
+        This used to be `test_the_cli_never_sets_it` and it asserted the CLI
+        could not set the key at all. It drove `build_state`, never `main()`,
+        so when main() gained --unattended the test went on passing while its
+        own docstring became untrue -- a test that cannot see its own
+        subject. `test_the_terminal_declares_it_from_its_own_flag` above is
+        the half it was missing."""
         state = build_state(self.tmp, [["a1"], ["b1"]])
         self.assertNotIn("_unattended", state)
         self.assertFalse(relay.unattended(state))
         mine = lambda: False
         self.assertIs(relay.ask_abort(state, mine), mine)
+        # ...and the flag is what flips it, through the one public reader
+        self.assertTrue(relay.unattended(dict(state, _unattended=True)))
+        self.assertIsNot(relay.ask_abort(dict(state, _unattended=True), mine),
+                         mine)
 
     # ---- what the seat is told -------------------------------------------
     def _unanswered_note(self, **extra):

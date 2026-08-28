@@ -8940,16 +8940,51 @@ DIGEST_SOURCE_CHARS = 12000
 # failure it was written to prevent (a seat that starts failing every round
 # with an unexplained OSError from subprocess).
 DIGEST_ARTIFACT_CHARS = 400
+# The reader is NAMED, and that is the load-bearing half. Measured 2026-08-27
+# against the real summarizer (claude-haiku-4-5:low), because no digest had
+# ever fired in a real session on this machine and so nobody had ever read
+# one. Describing the recipient only as "one participant who was not directly
+# addressed" sends the model LOOKING for them in the source, where they can
+# never be: being absent from it is the entire reason the digest exists.
+#
+# Two packets. The first is a two-row FIXTURE in `_digest_source`'s exact
+# format standing in for a fresh live room's first digest -- invented, and
+# said so here because it carries most of the argument; the second is a real
+# 12,088-char packet lifted out of session 20260823-165418. Twelve trials on
+# the fixture, three on the real one. On the fixture the old wording denied
+# the premise in 10 of 12 runs -- "No third participant to relay to", "No
+# participant was excluded from these messages", which is not merely unhelpful
+# but FALSE, delivered into the excluded seat's own prompt under the relay's
+# certification -- and 4 of those 12 returned no digest whatever, only
+# questions back. On the real packet it instead picked the only human it could
+# see in 2 of 3 ("Relay Digest for Josh", "Awaiting your go-ahead", re-aiming
+# at the seat questions that had been put to Josh); the third wrote to a
+# literal "[Unaddressed Participant]" placeholder. Naming the reader: 0 of 12
+# and 0 of 3, and then live in a real three-seat room, where the two digest
+# calls were written for Ann and for Cal, each naming its own excluded seat.
+#
+# The "nobody is going to answer you" clause is SUPERVISOR_PROMPT rule 6's
+# lesson one side call over, with a sharper cost: a reply that is not a digest
+# is not merely wasted, it is delivered verbatim as though it were one.
 DIGEST_PROMPT = (
-    "You are a relay summarizer. Consolidate the hidden messages below for "
-    "one participant who was not directly addressed. Preserve decisions, "
-    "disagreements, questions, and artifact paths. A line directly under a "
-    "message's header beginning `files:` is the relay's own list of files it "
-    "verified on disk for that message — keep those paths exactly as "
-    "written, invent none, and treat nothing else as one. Its absence is not "
-    "a claim that nothing was produced. Do not add facts or speak as any "
-    "participant. Return only a compact factual digest."
-    "\n\n{source}")
+    "You are the relay's summarizer. Write ONE compact factual digest of the "
+    "messages below for {reader}, a participant who was not addressed by them "
+    "and so has not seen them. {reader} is deliberately absent from the "
+    "messages — that is why this digest exists, and it is not a problem to "
+    "report or a reason to withhold the summary.\n"
+    "Do NOT ask clarifying questions. Nobody is going to answer you: this is "
+    "ONE stateless call, and whatever you write is delivered to {reader} "
+    "verbatim as the relay's own digest. A reply that is not a digest is a "
+    "wasted call that leaves {reader} with no account of what was said.\n"
+    "Preserve decisions, disagreements, questions and artifact paths, and keep "
+    "every question with the person it was put to: Josh is the human here and "
+    "is NOT reading this, so a question someone asked Josh must be reported as "
+    "that and never re-aimed at {reader}. A line directly under a message's "
+    "header beginning `files:` is the relay's own list of files it verified on "
+    "disk for that message — keep those paths exactly as written, invent "
+    "none, and treat nothing else as one. Its absence is not a claim that "
+    "nothing was produced. Do not add facts and do not speak as any "
+    "participant.\n\n{source}")
 
 
 def build_digest_agent(state):
@@ -9116,8 +9151,29 @@ def deliver_hidden_digest(state, i, io, summarizer=None, lock=None):
     routing can never turn a summarizer outage into lost context — and rows
     the source could not FIT are deferred rather than consumed, so a length
     cap cannot do what an outage is not allowed to.
+
+    A THIRD way a summary can be unusable is deliberately NOT gated: one
+    that arrives, is not empty and is not a digest — the summarizer
+    answering back instead of doing the job. That is accepted verbatim and
+    the source is consumed with it, so unlike an outage it really does lose
+    the peers' messages. Measured 2026-08-27 against the real summarizer,
+    the first time anybody had read a digest: with the old prompt it
+    happened in 4 of 12 runs on a fresh room's first digest, and with the
+    prompt DIGEST_PROMPT carries now, 0 of 12 on the same source. So the
+    fix is the prompt, not a detector — and if this ever does need closing,
+    the honest shape is a positive output contract the code checks
+    (`moderator_pick`'s rule -- every side call the loop ROUTES on has one;
+    `project_brief` is the counterexample, and it has exactly the emptiness
+    check this paragraph calls insufficient), never a blacklist of refusal
+    phrases: a blacklist cannot tell a
+    refusal from a digest that merely quotes one, and it would fire on the
+    reply that says "Ann asked whether to stop".
     """
     key = _floor_key(state["slot_ids"][i])
+    # Named in the prompt, not described. Read here rather than inside the
+    # try below, because a digest that quietly fell back to the verbatim
+    # packet is exactly how a missing reader would hide.
+    reader = state["agents"][i].name
 
     def guarded():
         return lock if lock is not None else contextlib.nullcontext()
@@ -9148,7 +9204,8 @@ def deliver_hidden_digest(state, i, io, summarizer=None, lock=None):
         with working(io, "digest", "%d message%s" % (
                 len(rows), "" if len(rows) == 1 else "s")):
             summary = (digest_agent.turn(
-                DIGEST_PROMPT.format(source=source)) or "").strip()
+                DIGEST_PROMPT.format(source=source,
+                                     reader=reader)) or "").strip()
     except Exception as exc:
         io.emit("status", {"text": "Relay digest failed "
                                    f"({error_excerpt(exc)}) — delivering the "
@@ -11533,7 +11590,12 @@ ASK_WAIT_MAX = 600      # seconds a seat's [[ASK]] may hold an unanswerable run
 def unattended(state):
     """True when this run has nobody to ask, so a question cannot be answered.
 
-    The app sets `_unattended` from `Run.background`. Be precise about what
+    TWO front ends answer this, and the engine only ever READS it. A front
+    end is the only thing that can know how its own invocation was started,
+    so this is the `LoopIO` seam one state key over, not authority split
+    between two modules that cannot see each other.
+
+    The app answers from `Run.background`. Be precise about what
     that signal is: `Run.background` is a FOCUS policy — "this run must never
     take the transcript Josh is reading" — and the only two things that set
     it are the webhook and a scheduled fire, i.e. exactly the runs nobody
@@ -11552,11 +11614,15 @@ def unattended(state):
     therefore attended by construction, which is right: the thing resuming it
     is Josh.
 
-    The CLI sets nothing here and its behaviour is unchanged — a terminal run
-    waits as long as it always has. That is a deliberate boundary, not a
-    claim about the world: `relay.py` driven from Task Scheduler really is
-    unattended and would wedge exactly as a scheduled room used to, and there
-    is no flag for it today.
+    The terminal answers from `--unattended`, which a Task Scheduler or cron
+    run passes because it genuinely has nobody at a console. Without it a
+    terminal run is attended and waits as long as it always has, which is
+    the right default: a person at a console is exactly who [[ASK]] is for.
+    It is a DECLARATION, not a detection, and deliberately so — there is no
+    reliable way to ask Windows whether a human is watching, and the
+    tempting proxies are wrong in both directions (an absent console would
+    call an ssh session unattended; a present one says nothing about
+    whether anyone is reading it).
     """
     return bool(state.get("_unattended"))
 
@@ -14763,6 +14829,13 @@ def main():
                          "is dispatched: include, exclude, retitle, reassign "
                          "or reorder them, or send the whole board back with "
                          "a note. Supervisor modes only; off by default")
+    ap.add_argument("--unattended", action="store_true",
+                    help="nobody is watching this run (Task Scheduler, "
+                         "cron, a script): an unanswered [[ASK: …]] is "
+                         "given up on after at most %d minutes with a note "
+                         "in the asking seat's queue, instead of holding "
+                         "the run "
+                         "open forever" % (ASK_WAIT_MAX // 60))
     ap.add_argument("--no-ask", action="store_true",
                     help="don't tell seats they may put a [[ASK: …]] "
                          "question to you (asking is on by default; an ASK "
@@ -15149,6 +15222,11 @@ def main():
                        "max_teams": max(0, args.spawn_teams),
                        "teams_used": 0},
              "ask": not args.no_ask,
+             # Declared by the FRONT END, read by the engine (see
+             # `unattended`). The app answers from `Run.background`; this is
+             # the terminal's answer, and it is the only way a run started
+             # by Task Scheduler can say that nobody is there to ask.
+             "_unattended": bool(args.unattended),
              "board_review": bool(args.board_review),
              "pending": {i: [] for i in range(len(agents))},
              "introduced": [False] * len(agents),

@@ -1534,10 +1534,14 @@ class Api:
         """Copy `Run.background` onto the ONE plain bool relay reads.
 
         `relay.unattended` must not learn an app type, so the fact crosses as
-        a private key (never persisted — SessionStore.save whitelists). Three
-        writers, one implementation: the two that BUILD a run's state, and
-        `interject`, which is Josh typing into a chat that is already
-        running. That third one is not a nicety — `continue_chat` clears
+        a private key (never persisted — SessionStore.save whitelists). FOUR
+        writers, one implementation: the two that BUILD a run's state
+        (`_conversation`, `_continue`), `open_session`, and `interject`,
+        which is Josh typing into a chat that is already running. (It said
+        "three" and listed three until 2026-08-27: `open_session` — the door
+        that hands a run the very focus `background` exists to withhold —
+        was missing from both, and had been since the day this was written.
+        A count is a claim.) That last one is not a nicety — `continue_chat` clears
         `background` because typing is proof he is watching, and typing into
         a LIVE background chat is the same proof arriving through a different
         door; without it a scheduled run he joined mid-flight would go on
