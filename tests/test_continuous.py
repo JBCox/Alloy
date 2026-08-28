@@ -644,11 +644,13 @@ class ContinuousTest(unittest.TestCase):
                          relay.DEFAULT_CEILING)
 
     # ---- an unattended run cannot be held open by a question ------------
-    def test_a_seats_ask_gets_a_deadline_only_in_continuous_mode(self):
+    def test_a_seats_ask_gets_a_deadline_in_continuous_mode(self):
+        """The other way to be unanswerable — a run nobody is watching at
+        all — lives in tests/test_ask.py, next to the rest of [[ASK]]."""
         plain = {"continuous": None}
         sentinel = object()
         self.assertIs(relay.ask_abort(plain, sentinel), sentinel,
-                      "an ordinary chat waits as long as Josh needs")
+                      "an attended chat waits as long as Josh needs")
         state = self.sup_state()
         self.assertTrue(callable(relay.ask_abort(state)))
 

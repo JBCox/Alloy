@@ -6462,6 +6462,29 @@ function rosterChanged() {
   policyDescribeOnly = true;
   try { normalizePolicyControls(); } finally { policyDescribeOnly = false; }
   syncRoundsCtl();
+  syncDrawerVoice();
+}
+// Two <option> labels in the Advanced drawer describe a crowd, and at n=1
+// they describe nobody: a lap in which "everyone speaks once" is one reply,
+// and "The AIs themselves" is one AI. The solo work left them deliberately
+// and put the explanation in #policyReason above the drawer; this says it in
+// the words themselves. The stored VALUES never change -- meta, replay, forks
+// and saved rooms all read them, so a relabelled value is a silently
+// different room -- only the text. Same shape as MODE_PRESETS' soloName, and
+// repainted from rosterChanged() so including or removing a seat rewrites it.
+const SOLO_OPTION_WORDS = [
+  ["budgetUnitSel", "laps", "Laps — everyone speaks once per lap",
+   "Laps — one reply per lap"],
+  ["completionSel", "participants", "The AIs themselves", "The AI itself"],
+];
+function syncDrawerVoice() {
+  const solo = soloStage();
+  for (const [id, value, many, one] of SOLO_OPTION_WORDS) {
+    const sel = $(id);
+    if (!sel) continue;
+    const opt = [...(sel.options || [])].find(o => o.value === value);
+    if (opt) opt.textContent = solo ? one : many;
+  }
 }
 
 function syncHistoryLens() {
@@ -7307,6 +7330,19 @@ async function openMemory() {
   renderMemory(await pywebview.api.get_memory(activeId));
 }
 function closeMemory() { $("memModal").classList.remove("show"); }
+// The modal is a view of THIS chat's notes, and Ctrl+Tab / Ctrl+1-9 / Ctrl+T
+// change the chat straight through it -- a modal here is not a focus trap.
+// Left stale it is not merely cosmetic: the header names project A while
+// `memAdd` sends `activeId` at CALL time rather than open time, so the note
+// Josh types lands in project B and nothing says so. (`forget_memory` was
+// already safe -- the bridge refuses a scope this chat cannot see.)
+// Repainted rather than closed, and the draft in #memText is kept: this says
+// what changed instead of silently discarding what he was typing.
+async function memoryFollowsTheChat() {
+  if (!$("memModal").classList.contains("show")) return;
+  setMemNote("You switched chats — these are now this chat's notes.");
+  renderMemory(await pywebview.api.get_memory(activeId));
+}
 $("memBtn").onclick = openMemory;
 $("memClose").onclick = closeMemory;
 $("memAddBtn").onclick = memAdd;
@@ -10139,6 +10175,7 @@ async function openChat(id, findQuery, findExcerpt) {
   $("openWorkspace").style.display = workspacePath ? "" : "none";
   $("afterRow").classList.toggle("show", !!(transcriptPath || workspacePath));
   renderChats();
+  await memoryFollowsTheChat();
   $("say").focus();
 }
 
@@ -10249,6 +10286,7 @@ async function newChat() {
   resetStage();
   await restoreFolder();     // resetStage cleared it; the preference persists
   await refreshChats();
+  await memoryFollowsTheChat();
   $("say").focus();
 }
 $("tabNew").onclick = newChat;

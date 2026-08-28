@@ -119,25 +119,40 @@ class GrantPolicyTests(unittest.TestCase):
         self.assertIn("Desktop control is set to Ask", notes)
         self.assertIn("Browser control is set to Ask", notes)
 
-    def test_a_round_capped_room_is_warned_about_an_unanswered_ask(self):
-        """Measured, not guessed: relay.ask_abort gives an unanswered
-        [[ASK]] a deadline in CONTINUOUS mode only."""
-        # driven, not read off a docstring: a round-capped run gets the
-        # caller's abort back UNCHANGED, so an unanswered question has no
-        # deadline at all
+    def test_every_scheduled_room_is_told_a_question_will_not_be_answered(self):
+        """The note that used to state the WEDGE now states the fix.
+
+        It once said a round-capped scheduled run "waits for an answer — only
+        Keep Improving runs give an unanswered question a deadline", which was
+        accurate and was the bug: `relay.ask_abort` returned the caller's
+        abort UNCHANGED outside continuous mode, so a 01:00 room whose seat
+        ended a reply with [[ASK]] sat there until Josh pressed Stop. Driven
+        through the real engine, not read off a docstring.
+        """
         mine = lambda: False
+        # attended and round-capped: still waits as long as Josh needs
         self.assertIs(relay.ask_abort({"continuous": {"on": False}}, mine),
                       mine)
+        # the same room started BY A SCHEDULE: unanswerable, so it expires
         self.assertIsNot(
-            relay.ask_abort({"continuous": {"on": True, "checkin":
-                                            {"minutes": 5}}}, mine), mine)
-        notes = sched.unattended_notes({"continuous": False})
-        self.assertTrue(any("waits for an answer" in n for n in notes), notes)
-        # ...and a Keep Improving room does NOT get that note, because there
-        # the wait really does expire
-        notes2 = sched.unattended_notes({"continuous": True})
-        self.assertFalse(any("waits for an answer" in n for n in notes2),
-                         notes2)
+            relay.ask_abort({"continuous": {"on": False},
+                             "_unattended": True}, mine), mine)
+        for cont in (False, True):
+            notes = sched.unattended_notes({"continuous": cont})
+            self.assertTrue(any("nobody will be there to answer" in n
+                                for n in notes), (cont, notes))
+            self.assertTrue(any("never invents an answer" in n
+                                for n in notes), (cont, notes))
+
+    def test_the_ask_note_names_a_duration_only_when_it_is_given_one(self):
+        """schedule.py imports nothing from relay, so the wait crosses as an
+        ARGUMENT. Unnamed beats a second copy of the constant free to drift."""
+        named = " ".join(sched.unattended_notes({}, 600))
+        self.assertIn("at most 10 minutes", named)
+        for bad in (None, 0, "", 30, "soon", object()):
+            quiet = " ".join(sched.unattended_notes({}, bad))
+            self.assertNotIn("at most", quiet, bad)
+            self.assertIn("nobody will be there to answer", quiet)
 
     def test_a_shell_rung_is_named_as_the_ceiling_on_the_other_ladders(self):
         """relay.advisory_rung_note's admission, at the surface where a rung
@@ -743,6 +758,39 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(len(got["sentences"]), 2)
         self.assertTrue(any("Desktop control is set to Ask" in n
                             for n in got["notes"]), got["notes"])
+
+    def test_the_ask_wait_crosses_from_relay_through_the_bridge(self):
+        """schedule.py imports nothing from relay, so the number in the modal
+        can only be right if the BRIDGE carries it. A note that named ten
+        minutes on its own would be a second copy of ASK_WAIT_MAX, free to
+        drift from the one the engine enforces."""
+        api = self._api()
+        self._room("Quiet")
+        notes = " ".join(api.room_risk("Quiet")["notes"])
+        self.assertIn("at most %d minutes" % (relay.ASK_WAIT_MAX // 60), notes)
+        old = relay.ASK_WAIT_MAX
+        try:
+            relay.ASK_WAIT_MAX = 120
+            self.assertIn("at most 2 minutes",
+                          " ".join(api.room_risk("Quiet")["notes"]))
+        finally:
+            relay.ASK_WAIT_MAX = old
+
+    def test_a_keep_improving_room_is_quoted_its_own_shorter_wait(self):
+        """`relay.ask_wait_limit` caps a continuous run at its CHECK-IN
+        interval, because a wait that outlasted the watchdog would silence
+        the very thing watching the run. A flat ASK_WAIT_MAX in the modal
+        would promise ten minutes where the engine allows five — the
+        second-copy drift, on the sentence Josh reads before arming a
+        nightly room."""
+        api = self._api()
+        self._room("Nightly KI", continuous={
+            "on": True, "checkin": {"minutes": 5, "action": "notify"},
+            "limits": {"spend_usd": 1.0, "hours": 1,
+                       "watchdog_may_stop": True}})
+        notes = " ".join(api.room_risk("Nightly KI")["notes"])
+        self.assertIn("at most 5 minutes", notes)
+        self.assertNotIn("at most 10 minutes", notes)
 
     # ---- save / list -----------------------------------------------------
     def test_saving_needs_a_real_room(self):

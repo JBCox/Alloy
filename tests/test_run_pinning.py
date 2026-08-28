@@ -340,6 +340,107 @@ class RunPinningTests(unittest.TestCase):
         self.assertIsNone(draft.session_dir)
         self.assertIs(run.state["_run"], run)
 
+    def test_a_background_run_tells_the_engine_nobody_is_watching(self):
+        """`relay.ask_abort` gives a seat's [[ASK]] a deadline when the run is
+        unattended, and the ONE fact it reads is this plain bool. Before it,
+        a scheduled room whose seat asked a question blocked its barrier —
+        and the clock, the spend cap and the watchdog are all checked AT that
+        barrier, so nothing could fire until Josh pressed Stop."""
+        relay.AGENT_TYPES["claude"] = scripted_agent_class("Claude", ["one"])
+        api = self._api()
+        run = api._runs.background()
+        api._conversation(self._cfg(), run)
+        api._emit_q.join()
+        self.assertIs(run.state["_unattended"], True)
+        self.assertTrue(relay.unattended(run.state))
+        mine = lambda: False
+        self.assertIsNot(relay.ask_abort(run.state, mine), mine)
+
+    def test_a_foreground_start_is_attended(self):
+        relay.AGENT_TYPES["claude"] = scripted_agent_class("Claude", ["one"])
+        api = self._api()
+        api.start(self._cfg())
+        run = api._runs.focused()
+        self._wait(lambda: run.state is not None, "the chat's state")
+        run.thread.join(10)
+        api._emit_q.join()
+        self.assertIs(run.state["_unattended"], False)
+        mine = lambda: False
+        self.assertIs(relay.ask_abort(run.state, mine), mine,
+                      "Josh's own chat stopped waiting for him")
+
+    def test_continuing_a_background_chat_makes_it_attended_on_the_state(self):
+        """`continue_chat` clears `Run.background`; the STATE key has to
+        follow, or a run Josh is now watching would keep expiring his own
+        questions. Re-derived in _continue rather than carried over."""
+        relay.AGENT_TYPES["claude"] = scripted_agent_class(
+            "Claude", ["one", "two"])
+        api = self._api()
+        run = api._runs.background()
+        api._conversation(self._cfg(), run)
+        api._emit_q.join()
+        self.assertTrue(run.state["_unattended"])
+        api.continue_chat({"session_id": run.id, "opener": "carry on",
+                           "turns": 1})
+        run.thread.join(10)
+        api._emit_q.join()
+        self.assertIs(run.state["_unattended"], False)
+
+    def _live_background(self, api, gate):
+        """A background run that is provably still going, with an id."""
+        relay.AGENT_TYPES["claude"] = gated_agent_class("Claude", gate)
+        run = api._runs.background()
+        threading.Thread(
+            target=lambda: api._runs.spawn(api._conversation,
+                                           (self._cfg(), run), run=run),
+            daemon=True).start()
+        self._wait(lambda: run.state is not None and run.id, "the bg chat")
+        self.assertTrue(run.state["_unattended"])
+        return run
+
+    def test_typing_into_a_LIVE_background_chat_marks_it_attended(self):
+        """`continue_chat` clears `background` because typing is proof Josh is
+        watching — and it REFUSES while a run is live, so for a scheduled
+        chat he joined mid-flight `interject` is the only door that proof can
+        come through. Without this it went on expiring the questions he was
+        sitting there to answer."""
+        gate = self._gate()
+        api = self._api()
+        run = self._live_background(api, gate)
+        self.assertEqual(api.interject("carry on", None, run.id).get("ok"),
+                         True)
+        self.assertFalse(run.background)
+        self.assertIs(run.state["_unattended"], False)
+        mine = lambda: False
+        self.assertIs(relay.ask_abort(run.state, mine), mine)
+        gate.set()
+
+    def test_opening_a_LIVE_background_chat_marks_it_attended(self):
+        """`open_session` hands this run the focus `background` exists to
+        withhold — by Josh's own click — so the flag stops being true of
+        it at that moment, not at the next thing he types."""
+        gate = self._gate()
+        api = self._api()
+        run = self._live_background(api, gate)
+        got = api.open_session(run.id)
+        self.assertTrue(got.get("ok"), got)
+        self.assertFalse(run.background)
+        self.assertIs(run.state["_unattended"], False)
+        gate.set()
+
+    def test_the_key_never_reaches_meta_json(self):
+        """Private like `_usage_io`: SessionStore.save whitelists what it
+        writes, so a reopened scheduled chat is attended by construction."""
+        relay.AGENT_TYPES["claude"] = scripted_agent_class("Claude", ["one"])
+        api = self._api()
+        run = api._runs.background()
+        api._conversation(self._cfg(), run)
+        api._emit_q.join()
+        with open(os.path.join(run.session_dir, "meta.json"),
+                  encoding="utf-8") as fh:
+            raw = fh.read()
+        self.assertNotIn("_unattended", raw)
+
     def test_started_says_when_a_chat_is_in_the_background(self):
         relay.AGENT_TYPES["claude"] = scripted_agent_class("Claude", ["one"])
         api = self._api()

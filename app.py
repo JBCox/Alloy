@@ -1529,6 +1529,26 @@ class Api:
             "continuous_unbounded": unbounded,
         }
 
+    @staticmethod
+    def _mark_watch(run, state=None):
+        """Copy `Run.background` onto the ONE plain bool relay reads.
+
+        `relay.unattended` must not learn an app type, so the fact crosses as
+        a private key (never persisted — SessionStore.save whitelists). Three
+        writers, one implementation: the two that BUILD a run's state, and
+        `interject`, which is Josh typing into a chat that is already
+        running. That third one is not a nicety — `continue_chat` clears
+        `background` because typing is proof he is watching, and typing into
+        a LIVE background chat is the same proof arriving through a different
+        door; without it a scheduled run he joined mid-flight would go on
+        expiring his own questions. Writing one dict key from the bridge
+        thread is safe for the same reason `Run.background` itself is: an
+        item assignment is atomic, and `ask_abort` re-reads it per question.
+        """
+        state = state if state is not None else run.state
+        if isinstance(state, dict):
+            state["_unattended"] = bool(run.background)
+
     def _room_grants(self, name_or_cfg):
         """The standing grants a room hands out on EVERY scheduled run."""
         cfg = (name_or_cfg if isinstance(name_or_cfg, dict)
@@ -1549,7 +1569,18 @@ class Api:
         grants = schedule_mod.grants_for(axes)
         return {"ok": True, "grants": grants,
                 "sentences": schedule_mod.grant_sentences(grants),
-                "notes": schedule_mod.unattended_notes(axes)}
+                # The WAIT crosses here, computed by relay's own
+                # `ask_wait_limit` for THIS room, rather than being spelled a
+                # second time in schedule.py (which imports nothing from
+                # relay) — same rule as _room_axes doing the normalizing for
+                # grants_for. A Keep Improving room's cap is its check-in
+                # interval, so a flat ASK_WAIT_MAX here would overstate it.
+                "notes": schedule_mod.unattended_notes(
+                    axes,
+                    relay.ask_wait_limit(
+                        {"continuous": relay.continuous_policy(
+                            cfg.get("continuous")),
+                         "_unattended": True}))}
 
     def get_schedules(self):
         """Every schedule, each judged against its room AS IT IS NOW.
@@ -2385,6 +2416,14 @@ class Api:
         if existing is not None and existing.state is not None \
                 and existing.session_dir:
             self._runs.focus(session_id)
+            # He is looking at it, and the focus `background` exists to
+            # withhold has just been handed to this run by his own click — so
+            # the flag is no longer true of it. Without this, `continue_chat`
+            # was the only route that cleared it, and `continue_chat` REFUSES
+            # while a run is live: a scheduled chat Josh opened mid-flight
+            # went on expiring the questions he was sitting there to answer.
+            existing.background = False
+            Api._mark_watch(existing)
             thinking, working = existing.clocks()
             return {"ok": True,
                     "session": session_summary(existing.session_dir),
@@ -2977,6 +3016,10 @@ class Api:
                 return {"error": f"Could not save attachment: {e}"}
         if text:
             run.human_q.put(text)
+            # He is typing into it, so somebody is watching it — the same
+            # proof `continue_chat` acts on, arriving through the live door.
+            run.background = False
+            Api._mark_watch(run)
         # How many of Josh's lines are still waiting to be picked up, counted
         # at the moment his own was added. True when it is said; deliberately
         # not polled (see HumanQueue on why this side does not pretend to be
@@ -3649,7 +3692,11 @@ class Api:
                           "max_teams": max(0, int((cfg.get("spawn") or {})
                                                   .get("max_teams") or 0)),
                           "teams_used": 0},
-                # the app always has a human watching — seats may [[ASK]] Josh
+                # The app has a modal for it, so seats may [[ASK]] Josh —
+                # unlike the headless default, which answers None at once.
+                # Whether anyone is THERE is a separate question, answered a
+                # few lines down by `_mark_watch`: a scheduled or webhook run
+                # still offers the directive, and still expires it.
                 "ask": True,
                 # W2.2: pause before each Supervisor wave dispatches. Off
                 # unless Josh ticked it; a no-op outside supervisor modes.
@@ -3659,6 +3706,12 @@ class Api:
             # _session_dir was set above, so the focused run is this chat's — pin
             # it to the state before any thread can move the focus pointer.
             state["_run"] = run
+            # ...and the ONE fact the engine needs off it, as a plain bool:
+            # relay.ask_abort must not learn an app type, and a private key is
+            # never persisted by SessionStore.save (the `_usage_io` shape). A
+            # webhook or scheduled start has nobody to answer an [[ASK]], so
+            # the question gets a deadline instead of holding the run open.
+            Api._mark_watch(run, state)
             if (cfg.get("plan") or {}).get("enabled"):
                 # Read-only from the FIRST turn, before any seat has spoken:
                 # starting in execution and downgrading later would leave a window
@@ -3756,6 +3809,11 @@ class Api:
         run = run if run is not None else self._runs.focused()
         emit = lambda event, payload=None: self._emit_for(run, event, payload)
         state = run.state
+        # Re-derived, never carried over: `continue_chat` clears `background`
+        # the moment Josh types into a chat the schedule started, and the
+        # state key has to follow or a run he is now watching would keep
+        # expiring his own questions.
+        Api._mark_watch(run, state)
         blockers = self._auth_blockers(state["providers"])
         if blockers:
             emit("error", {"message": " ".join(blockers)})

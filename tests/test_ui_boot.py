@@ -1695,6 +1695,18 @@ if (topLevelError) {
   // block assumes the three-seat boot roster.
   try {
     more.solo = {};
+    // The Advanced drawer's two crowd-voiced option LABELS, read BEFORE the
+    // roster is torn down. Capturing "many" by adding a seat back afterwards
+    // would leave a different stage for every probe after this one.
+    const optText = (id, v) =>
+      [...byId[id].options].filter(o => o.value === v).map(o => o.textContent);
+    const drawerWords = () => ({
+      laps: optText('budgetUnitSel', 'laps'),
+      participants: optText('completionSel', 'participants'),
+      values: [...byId['budgetUnitSel'].options].map(o => o.value),
+    });
+    ctx.rosterChanged();
+    more.solo.drawerMany = drawerWords();
     const cards = [...document.querySelectorAll('.seat')];
     // the rail's own remove handler, not a shortcut past it
     cards.slice(1).forEach(c => c.querySelector('.rm').onclick());
@@ -1767,7 +1779,32 @@ if (topLevelError) {
     more.solo.badgeBefore = byId['policyChanges'].textContent;
     ctx.rosterChanged();
     more.solo.badgeAfterRoster = byId['policyChanges'].textContent;
+    ctx.rosterChanged();
+    more.solo.drawerSolo = drawerWords();
   } catch (e) { more.soloError = (e && e.stack) || String(e); }
+
+  // ---- the memory modal follows the chat ---------------------------------
+  // Ctrl+Tab / Ctrl+1-9 / Ctrl+T change the chat straight through an open
+  // modal, and every action in it sends `activeId` at CALL time -- so a stale
+  // header could name project A while memAdd wrote into project B.
+  try {
+    more.memFollow = {};
+    memReply = {scope: 'proj-b', label: 'Project B', global_scope: 'global',
+                truncated: false, error: null, entries: []};
+    memCalls.length = 0;
+    byId['memModal'].classList.add('show');
+    byId['memText'].value = 'half a thought';
+    await ctx.memoryFollowsTheChat();
+    more.memFollow.asked = memCalls.slice();
+    more.memFollow.header = deepText(byId['memScope']);
+    more.memFollow.draftKept = byId['memText'].value;
+    more.memFollow.note = byId['memNote'].textContent;
+    // ...and with the modal CLOSED it must not call the bridge at all
+    byId['memModal'].classList.remove('show');
+    memCalls.length = 0;
+    await ctx.memoryFollowsTheChat();
+    more.memFollow.askedWhenClosed = memCalls.slice();
+  } catch (e) { more.memFollowError = (e && e.stack) || String(e); }
 
   // ---- W1.1: produced-file chips, through the REAL message path ----------
   // The row's `artifacts` list has been stamped by the engine since it
@@ -3056,6 +3093,24 @@ class SoloStageUiTests(unittest.TestCase):
     def test_a_solo_reactive_recipe_says_it_will_not_start(self):
         self.assertIn("will not start", self.solo["reactiveReason"])
 
+    def test_the_advanced_drawer_stops_describing_a_crowd_at_one_seat(self):
+        """The solo work left these two deliberately and put the explanation
+        in #policyReason above the drawer; this says it in the words. The
+        stored VALUES may never move -- meta, replay, forks and saved rooms
+        all read them, so a relabelled value is a silently different room."""
+        solo = self.solo["drawerSolo"]
+        many = self.solo["drawerMany"]
+        self.assertEqual(solo["laps"], ["Laps — one reply per lap"])
+        self.assertEqual(solo["participants"], ["The AI itself"])
+        self.assertEqual(many["laps"],
+                         ["Laps — everyone speaks once per lap"])
+        self.assertEqual(many["participants"], ["The AIs themselves"])
+        self.assertEqual(solo["values"], many["values"])
+        self.assertEqual(
+            solo["values"],
+            ["laps", "turns", "phases", "waves", "ceiling"])
+
+
     def test_a_roster_change_keeps_the_badge_that_explains_a_move(self):
         """orchestrationCfg's own comment states the rule: an anchorless
         normalize wipes the badges that say what the app moved for you."""
@@ -3910,6 +3965,34 @@ class UiBootTests(unittest.TestCase):
         self.assertIsNone(self.report.get("memError"),
                           "memory probe threw: %s" % self.report.get("memError"))
         return self.report["mem"]
+
+    def test_the_memory_modal_follows_the_chat(self):
+        """Judged transient once and it is not: a modal here is not a focus
+        trap, `Ctrl+Tab` changes `activeId` underneath it, and `memAdd` sends
+        `activeId` at CALL time -- so the header could name project A while
+        the note landed in project B."""
+        self.assertIsNone(self.report.get("memFollowError"),
+                          self.report.get("memFollowError"))
+        mem = self.report["memFollow"]
+        self.assertEqual([c[0] for c in mem["asked"]], ["get_memory"],
+                         "it did not re-ask the bridge once for THIS chat")
+        self.assertIn("Project B", mem["header"])
+        self.assertEqual(mem["draftKept"], "half a thought",
+                         "a chat switch discarded what Josh was typing")
+        self.assertIn("switched chats", mem["note"])
+        self.assertEqual(mem["askedWhenClosed"], [],
+                         "a closed modal still called the bridge")
+
+    def test_both_chat_switches_make_the_memory_modal_follow(self):
+        """The probe above proves the function; this proves it is WIRED.
+        `openChat` is every rail click, tab click, Ctrl+Tab and Ctrl+1-9;
+        `newChat` is Ctrl+T. A helper nothing calls is the control that does
+        nothing, and the harness cannot drive either one end to end."""
+        src = open(UI, encoding="utf-8").read()
+        for fn in ("async function openChat(", "async function newChat("):
+            start = src.index(fn)
+            body = src[start:src.index(chr(10) + "}" + chr(10), start)]
+            self.assertIn("await memoryFollowsTheChat();", body, fn)
 
     def test_the_memory_modal_exists_and_starts_hidden(self):
         m = self._mem()

@@ -8934,11 +8934,22 @@ def artifact_descriptors(workspace, activity, producer, message_id,
 
 DIGEST_SOURCE_IDS = 8
 DIGEST_SOURCE_CHARS = 12000
+# Per row, and taken OUT OF DIGEST_SOURCE_CHARS rather than added to it: the
+# whole reason that budget exists is the Windows ~32,767-char argv limit, and
+# a descriptor block spending on top of the allowance would reintroduce the
+# failure it was written to prevent (a seat that starts failing every round
+# with an unexplained OSError from subprocess).
+DIGEST_ARTIFACT_CHARS = 400
 DIGEST_PROMPT = (
     "You are a relay summarizer. Consolidate the hidden messages below for "
     "one participant who was not directly addressed. Preserve decisions, "
-    "disagreements, questions, and artifact paths. Do not add facts or speak "
-    "as any participant. Return only a compact factual digest.\n\n{source}")
+    "disagreements, questions, and artifact paths. A line directly under a "
+    "message's header beginning `files:` is the relay's own list of files it "
+    "verified on disk for that message — keep those paths exactly as "
+    "written, invent none, and treat nothing else as one. Its absence is not "
+    "a claim that nothing was produced. Do not add facts or speak as any "
+    "participant. Return only a compact factual digest."
+    "\n\n{source}")
 
 
 def build_digest_agent(state):
@@ -8960,20 +8971,140 @@ def build_digest_agent(state):
                                  name="Relay digest")
 
 
+FILES_MARK = "files: "
+
+
+def _defuse_files_mark(text):
+    """A seat's own words must not be able to impersonate the relay's line.
+
+    `DIGEST_PROMPT` tells the summarizer that a `files:` line is the relay's
+    VERIFIED record, and a message body is inserted into the source verbatim
+    — so a reply containing a line beginning `files: ` would arrive at the
+    other seats carrying that certification, naming any path it liked, and
+    defeating the very confinement `artifact_descriptors` exists to enforce.
+    One leading space closes it: the marker is anchored at the start of a
+    line, and a space changes nothing a human reads. Exactly the move
+    memory.py's `_defuse` makes for a note whose body holds a markdown
+    heading — when a format has a structural marker, ask what happens when
+    the DATA contains it.
+    """
+    if FILES_MARK not in text:
+        return text
+    return "\n".join(" " + ln if ln.startswith(FILES_MARK) else ln
+                      for ln in text.split("\n"))
+
+
+def _digest_files_line(row):
+    """One row's verified produced files, as a bounded `files:` line.
+
+    ORCHESTRATION_DESIGN_V2.md § digests asks digest generation to prefer
+    artifact descriptors over verbose file descriptions. `artifact_descriptors`
+    has stamped a verified `artifacts` list on every seat row since W1.1 and
+    `_digest_source` read only `message_id`/`name`/`text`, so a file a seat
+    really produced reached the summary only if the prose happened to mention
+    it ABOVE the truncation point — the engine computing the answer and
+    throwing it away, which is W1.1's own shape one consumer over.
+
+    Paths stay workspace-RELATIVE. That is what the descriptor holds, what
+    `read_text`/`read_image` take, and what means the same thing to a seat
+    whose cwd IS the workspace; resolving here would put this machine's
+    absolute layout into a summary that travels into other seats' prompts.
+
+    Rows come off disk (`read_messages`), so every field is a claim: a
+    non-list, a non-dict entry, a blank path or a nonsense size is dropped
+    rather than rendered. Truncation announces itself — "[+2 more]" is the
+    difference between a short list and a list that looks complete.
+
+    `DIGEST_ARTIFACT_CHARS` bounds the list, with one stated exemption: the
+    FIRST entry is always shown whole, however long, because a truncated
+    path is a lie and a workspace-relative one is bounded by the OS anyway.
+    """
+    arts = row.get("artifacts")
+    if not isinstance(arts, list):
+        # the SHAPE is a claim too: a string or a dict iterates into nothing
+        # and looks handled, a bare int raises -- and `_digest_source` is
+        # called outside every try in `deliver_hidden_digest`, so it would
+        # reach a seat's turn as a TypeError
+        return ""
+    items = []
+    for art in arts:
+        if not isinstance(art, dict):
+            continue
+        path = str(art.get("path") or "").strip()
+        if not path:
+            continue
+        size = art.get("size")
+        items.append("%s (%d bytes)" % (path, size)
+                     if isinstance(size, int) and not isinstance(size, bool)
+                     and size >= 0 else path)
+    if not items:
+        return ""
+    shown, used, over = [], 0, 0
+    for k, piece in enumerate(items):
+        # always at least one, whole: a truncated path is a lie, and a
+        # workspace-relative one is bounded by the OS anyway
+        if shown and used + len(piece) + 2 > DIGEST_ARTIFACT_CHARS:
+            over = len(items) - k
+            break
+        shown.append(piece)
+        used += len(piece) + 2
+    line = FILES_MARK + ", ".join(shown)
+    if over:
+        line += " [+%d more]" % over
+    return line + "\n"
+
+
 def _digest_source(rows):
-    chunks, remaining = [], DIGEST_SOURCE_CHARS
-    for row in rows:
+    """`(source, used)` — the hidden rows as one bounded block, and how many
+    of them it actually covers.
+
+    The source is both the digest prompt's body and the verbatim packet
+    delivered when the summarizer fails, so `used` is what the caller may
+    consume from `hidden`. Rows past it are DEFERRED to the next digest
+    rather than dropped: this function used to render what fit and let the
+    caller delete the lot, which is precisely the "selective routing can
+    never turn a summarizer outage into lost context" rule losing to a
+    length cap instead of an outage. Progress is guaranteed because a chunk
+    is appended BEFORE the budget is re-checked, so `used` is never zero.
+
+    Both cuts say so. A long reply keeps its "[truncated]" marker, and a
+    deferred tail is announced rather than left as an absence — which reads
+    as "that was everything", and matters more now that descriptors spend
+    from the same allowance.
+    """
+    chunks, remaining, used, deferred = [], DIGEST_SOURCE_CHARS, 0, 0
+    for index, row in enumerate(rows):
         head = f"[{row.get('message_id')}] {row.get('name', 'Participant')}:\n"
-        allowance = max(100, min(2400, remaining - len(head)))
-        body = str(row.get("text") or "")
+        files = _digest_files_line(row)
+        # The files line comes out of this row's BODY allowance, and the
+        # subtraction lands after the per-row cap rather than inside it. Say
+        # exactly what that buys, because the obvious claim ("turning this on
+        # never grows a digest prompt") is false and an adversarial pass
+        # measured it: below the allowance the two spellings are byte-
+        # IDENTICAL and the line is purely additive either way, and on this
+        # repo's own sessions 62% of the rows that carry artifacts at all are
+        # under 2,200 chars. What the placement really buys is the other end
+        # — a row long enough to be truncated pays for its files line out of
+        # its own prose, so the chunks that would otherwise dominate the
+        # budget stay capped at head + 2400. The global `remaining` below is
+        # what actually bounds the source against the Windows argv limit, and
+        # the growth it absorbs is why rows now defer rather than vanish.
+        allowance = max(100, min(2400, remaining - len(head)) - len(files))
+        body = _defuse_files_mark(str(row.get("text") or ""))
         if len(body) > allowance:
             body = body[:allowance].rstrip() + "\n[truncated]"
-        chunk = head + body
+        chunk = head + files + body
         chunks.append(chunk)
+        used = index + 1
         remaining -= len(chunk)
         if remaining <= 100:
+            deferred = len(rows) - used
             break
-    return "\n\n".join(chunks)
+    if deferred:
+        chunks.append("[%d further message%s did not fit; they follow in the "
+                      "next digest]"
+                      % (deferred, "" if deferred == 1 else "s"))
+    return "\n\n".join(chunks), used
 
 
 def deliver_hidden_digest(state, i, io, summarizer=None, lock=None):
@@ -8982,7 +9113,9 @@ def deliver_hidden_digest(state, i, io, summarizer=None, lock=None):
     The source prefix is snapshotted while holding the state lock; the side
     call runs without it; commit then removes exactly that prefix. Empty/error
     summaries deliver a relay-labelled verbatim packet instead, so selective
-    routing can never turn a summarizer outage into lost context.
+    routing can never turn a summarizer outage into lost context — and rows
+    the source could not FIT are deferred rather than consumed, so a length
+    cap cannot do what an outage is not allowed to.
     """
     key = _floor_key(state["slot_ids"][i])
 
@@ -9001,7 +9134,11 @@ def deliver_hidden_digest(state, i, io, summarizer=None, lock=None):
     rows = [by_id[mid] for mid in source_ids if mid in by_id]
     if len(rows) != len(source_ids):
         return None                 # truncated/corrupt log: retry, never drop
-    source = _digest_source(rows)
+    source, used = _digest_source(rows)
+    # Only what the source actually covers is consumed below; a tail that did
+    # not fit stays in `hidden` for the next digest rather than being deleted
+    # with the batch.
+    source_ids = source_ids[:used]
     summary = None
     digest_agent = (summarizer if summarizer is not None else
                     state.get("_digest_summarizer"))
@@ -9023,8 +9160,18 @@ def deliver_hidden_digest(state, i, io, summarizer=None, lock=None):
     if summary:
         text = "Relay digest of messages not addressed to this seat:\n\n" + summary[:5000]
     else:
-        text = ("Relay synchronization fallback — original hidden messages, "
-                "verbatim:\n\n" + source)
+        text = ("Relay synchronization fallback — the original hidden "
+                "messages verbatim, each under a `files:` line naming what "
+                "the relay verified on disk for it:\n\n" + source)
+    if len(rows) > used:
+        # Stated by the relay rather than left to the summarizer: the source
+        # carries the same note so a summary cannot claim completeness, but a
+        # model told to be compact is exactly the wrong keeper of a fact the
+        # seat needs. This one cannot be summarized away.
+        left = len(rows) - used
+        text += ("\n\n(Relay: %d further message%s did not fit this digest; "
+                 "they follow in the next one.)"
+                 % (left, "" if left == 1 else "s"))
     with guarded():
         current = state.setdefault("hidden", {}).setdefault(key, [])
         if current[:len(source_ids)] == source_ids:
@@ -9392,9 +9539,15 @@ def board_abort(state, abort=None):
     A gate with no deadline reproduces the 2026-08-22 wedge exactly: it blocks
     the parallel barrier, and the accumulated clock, the spend cap and the
     scheduled watchdog are ALL checked at that barrier, so nothing can fire.
-    Unlike `ask_abort` this applies outside continuous mode too — a board
-    gate is not a seat's spontaneous question, it is the app holding a run
-    open, and Josh may simply have walked away.
+
+    This one applies to EVERY run, attended or not — a board gate is not a
+    seat's spontaneous question, it is the app holding a run open, and Josh
+    may simply have walked away. `ask_abort` is narrower on purpose: it waits
+    forever for an attended chat, because a seat asking Josh something is the
+    entire point of [[ASK]], and only expires when the run is continuous or
+    unattended. (That second case is new; this docstring used to say "unlike
+    `ask_abort`, outside continuous mode too", which stopped being the
+    distinction the moment `relay.unattended` existed.)
     """
     limit = BOARD_WAIT_MAX
     if continuous_on(state):
@@ -11374,29 +11527,91 @@ def wave_gate(state, io):
 
 # ------------------------------------------------------------------- revival
 
-ASK_WAIT_MAX = 600      # seconds a seat's [[ASK]] may hold an unattended run
+ASK_WAIT_MAX = 600      # seconds a seat's [[ASK]] may hold an unanswerable run
+
+
+def unattended(state):
+    """True when this run has nobody to ask, so a question cannot be answered.
+
+    The app sets `_unattended` from `Run.background`. Be precise about what
+    that signal is: `Run.background` is a FOCUS policy — "this run must never
+    take the transcript Josh is reading" — and the only two things that set
+    it are the webhook and a scheduled fire, i.e. exactly the runs nobody
+    asked for at that moment. It is the best available proxy, not a presence
+    sensor, and it is conservative in the direction that matters: both
+    `continue_chat` and `interject` clear it the instant Josh types into the
+    chat, and `open_session` clears it when he opens one (the focus it must
+    never take has just been handed to it by his own click). The mistake it
+    can still make is expiring a question in a run he started with the Run-
+    now button and stayed to watch without touching — a ten-minute wait, not
+    a lost answer.
+
+    A plain bool rather than the Run itself, because relay must not learn an
+    app type; and PRIVATE, like `_usage_io` and `_cont_mark`, so
+    `SessionStore.save`'s whitelist never persists it. A resumed chat is
+    therefore attended by construction, which is right: the thing resuming it
+    is Josh.
+
+    The CLI sets nothing here and its behaviour is unchanged — a terminal run
+    waits as long as it always has. That is a deliberate boundary, not a
+    claim about the world: `relay.py` driven from Task Scheduler really is
+    unattended and would wedge exactly as a scheduled room used to, and there
+    is no flag for it today.
+    """
+    return bool(state.get("_unattended"))
+
+
+def ask_wait_limit(state):
+    """Seconds an unanswered [[ASK]] is held, or None when it waits forever.
+
+    THE one answer, because two callers need it and they must agree: the
+    engine (`ask_abort`) and the sentence `#schedModal` shows Josh before he
+    arms a nightly room. A second copy of `min(ASK_WAIT_MAX, check-in)` next
+    to that modal is how a control comes to promise a wait the engine does
+    not honour — the modal used to say "at most 10 minutes" for a Keep
+    Improving room whose real cap was its five-minute check-in.
+    """
+    if continuous_on(state):
+        every = int((state["continuous"].get("checkin") or {}).get("minutes")
+                    or CHECKIN_DEFAULT_MINUTES) * 60
+        return min(ASK_WAIT_MAX, every)
+    if unattended(state):
+        return ASK_WAIT_MAX
+    return None
 
 
 def ask_abort(state, abort=None):
-    """Compose the caller's abort with a deadline — continuous mode only.
+    """Compose the caller's abort with a deadline when nobody can answer.
 
     Josh opted into `permission` check-ins waiting for him. He did NOT opt into
-    a seat's spontaneous ``[[ASK]]`` holding an unattended run open forever,
-    and that is not a theoretical worry: live on 2026-08-22, two haiku seats
-    ended round 4 with a clarifying question, the parallel barrier never
-    completed, and every later brake — the accumulated clock, the spend cap,
-    the scheduled watchdog — is checked AT that barrier. Nothing could fire.
-    The wait now expires and takes the documented unanswered path: a relay
-    note in the requester's queue, never a forged answer.
+    a seat's spontaneous ``[[ASK]]`` holding a run open forever when there is
+    nobody there to ask, and that is not a theoretical worry: live on
+    2026-08-22, two haiku seats ended round 4 with a clarifying question, the
+    parallel barrier never completed, and every later brake — the accumulated
+    clock, the spend cap, the scheduled watchdog — is checked AT that barrier.
+    Nothing could fire. The wait expires and takes the documented unanswered
+    path: a relay note in the requester's queue, never a forged answer.
+
+    TWO ways to be unanswerable, and they are not the same one:
+
+      * a Keep Improving run, which Josh armed to keep going without him. Its
+        deadline is capped by the check-in interval, because a wait that
+        outlasted the watchdog would silence the very thing watching the run.
+      * a run nobody is watching AT ALL (`unattended`) — a scheduled room at
+        01:00, or a webhook start from a script. Wave 4's #schedModal stated
+        this as a control that does nothing unattended; the engine now makes
+        that true instead of merely admitting it.
+
+    An ordinary chat is untouched: it gets the caller's abort back UNCHANGED
+    and waits as long as Josh needs, which is the entire point of [[ASK]].
 
     Both front ends already poll `abort` and return None from it, so this
     needs no change in CLIIO or _AppIO.
     """
-    if not continuous_on(state):
+    limit = ask_wait_limit(state)
+    if limit is None:
         return abort
-    every = int((state["continuous"].get("checkin") or {}).get("minutes")
-                or CHECKIN_DEFAULT_MINUTES) * 60
-    deadline = time.monotonic() + min(ASK_WAIT_MAX, every)
+    deadline = time.monotonic() + limit
 
     def expired():
         if abort is not None and abort():
@@ -12329,16 +12544,38 @@ def handle_ask_directive(state, i, reply, io, lock=None, abort=None):
                            "options": options},
                           abort=ask_abort(state, abort))
     if answer is None or not answer.strip():
+        # THREE arms, not two. The continuous one names Keep Improving out
+        # loud, so a scheduled round-capped run falling into it would be told
+        # it is something it is not; and the attended one ("Josh was
+        # unavailable") is equally wrong for a run he never opened. Whichever
+        # fires, it is a relay note in the REQUESTER's queue — nothing here
+        # may forge an answer.
+        if continuous_on(state):
+            owed = ("(Relay: nobody answered within the wait this Keep "
+                    "Improving run allows, so it moved on. Decide it yourself "
+                    "and say which way you went.)")
+        elif unattended(state):
+            owed = ("(Relay: this run was started in the background with "
+                    "nobody watching, and no answer came before it moved on. "
+                    "Decide it yourself and say which way you went.)")
+        else:
+            owed = ("(Relay: Josh was unavailable / gave no answer — continue "
+                    "without his input.)")
+        note_text = f"{name}'s question went unanswered — continuing."
         with guard:
             state["ask_pending"] = None
-            state["pending"][i].append(
-                "(Relay: Josh was unavailable / gave no answer — continue "
-                "without his input.)" if not continuous_on(state) else
-                "(Relay: nobody answered within the wait this Keep Improving "
-                "run allows, so it moved on. Decide it yourself and say which "
-                "way you went.)")
-            io.emit("status", {"text": f"{name}'s question went unanswered — "
-                                       f"continuing."})
+            state["pending"][i].append(owed)
+            io.emit("status", {"text": note_text})
+            # PERSISTED, like `announce_lost_ask` — its twin, which records a
+            # question lost to a crash. This one records a question nobody
+            # answered, and only that one could ever be read live: the note
+            # the seat is owed lives in `pending` (meta, invisible), so
+            # without this row a scheduled run Josh opens in the morning
+            # shows a reply ending in [[ASK]] and nothing whatever about what
+            # became of it. Wave 4's own rule, one event over — a run that
+            # silently did nothing is indistinguishable from one that ran.
+            # Found by the live scheduled run, not by reading.
+            state["store"].system(note_text, round=state.get("rnd", 0))
             state["store"].save(state)
         return
     answer = answer.strip()

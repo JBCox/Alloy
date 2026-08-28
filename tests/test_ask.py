@@ -3,7 +3,9 @@
 Run:  python tests/test_ask.py
 """
 
+import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -267,6 +269,242 @@ class AskLoopTests(unittest.TestCase):
         re_state = rehydrate(meta)
         self.assertFalse(re_state["ask"])
         self.assertIsNone(re_state["ask_pending"])
+
+
+class UnattendedAskTests(unittest.TestCase):
+    """A run nobody is watching must not be held open by a question.
+
+    Wave 4 shipped scheduled rooms and stated this as a note in #schedModal:
+    "the run waits for an answer -- only Keep Improving runs give an
+    unanswered question a deadline". True, and the wedge. `relay.ask_abort`
+    returned the caller's abort UNCHANGED outside continuous mode, so a 01:00
+    room (or a webhook start from a script) whose seat ended a reply with
+    [[ASK]] blocked its barrier until Josh pressed Stop in the morning -- and
+    every later brake, the accumulated clock and the spend cap and the
+    watchdog, is checked AT that barrier.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ai-chat-test-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # ---- the deadline -----------------------------------------------------
+    def test_an_attended_chat_still_waits_as_long_as_josh_needs(self):
+        """The point of [[ASK]]. An ordinary chat gets the caller's abort
+        back BY IDENTITY, so there is no deadline object to expire."""
+        mine = lambda: False
+        for state in ({}, {"continuous": None}, {"_unattended": False},
+                      {"continuous": {"on": False}, "_unattended": 0}):
+            self.assertIs(relay.ask_abort(state, mine), mine, state)
+            self.assertIsNone(relay.ask_abort(state), state)
+
+    def test_an_unattended_chat_gets_a_deadline_without_continuous_mode(self):
+        mine = lambda: False
+        state = {"continuous": None, "_unattended": True}
+        composed = relay.ask_abort(state, mine)
+        self.assertIsNot(composed, mine, "no deadline was composed")
+        self.assertFalse(composed(), "it expired immediately")
+        # the caller's own abort still wins at once
+        self.assertTrue(relay.ask_abort(state, lambda: True)())
+
+    def _deadline(self, state):
+        """How many seconds this state's composed abort actually waits.
+
+        A fake clock rather than ASK_WAIT_MAX wrangling: the first version of
+        this asserted "expires when the constant is 0, does not when it is
+        huge", which BOTH arms satisfy, so it could not see the arms being
+        swapped -- a test that cannot see its own subject. Measuring the wait
+        can. `relay.time` is swapped (not the stdlib module) and restored, and
+        nothing else in this suite runs a thread.
+        """
+        real = relay.time
+
+        class Clock:
+            now = 1000.0
+
+            def __getattr__(self, key):
+                return getattr(real, key)
+
+            def monotonic(self):
+                return self.now
+
+        clock = Clock()
+        relay.time = clock
+        try:
+            abort = relay.ask_abort(state)
+            self.assertTrue(callable(abort), "no deadline was composed")
+            low, high = 0, 24 * 60 * 60
+            while high - low > 1:      # bisect the instant it flips
+                mid = (low + high) // 2
+                clock.now = 1000.0 + mid
+                if abort():
+                    high = mid
+                else:
+                    low = mid
+            return high
+        finally:
+            relay.time = real
+
+    def test_the_unattended_deadline_is_the_engines_own_constant(self):
+        self.assertEqual(self._deadline({"_unattended": True}),
+                         relay.ASK_WAIT_MAX)
+
+    def test_a_scheduled_keep_improving_room_keeps_the_tighter_cap(self):
+        """Both unanswerable at once, and the continuous arm must win: a wait
+        that outlasted the check-in interval would silence the very watchdog
+        watching the run."""
+        self.assertEqual(
+            self._deadline({"continuous": {"on": True,
+                                           "checkin": {"minutes": 5}},
+                            "_unattended": True}),
+            5 * 60, "min(ASK_WAIT_MAX, checkin) is not being taken")
+        # ...and a check-in LONGER than the constant does not extend it
+        self.assertEqual(
+            self._deadline({"continuous": {"on": True,
+                                           "checkin": {"minutes": 600}},
+                            "_unattended": True}),
+            relay.ASK_WAIT_MAX)
+
+    # ---- the key itself ---------------------------------------------------
+    def test_unattended_reads_one_private_bool_and_nothing_else(self):
+        self.assertFalse(relay.unattended({}))
+        self.assertFalse(relay.unattended({"_unattended": None}))
+        self.assertTrue(relay.unattended({"_unattended": True}))
+        self.assertTrue(relay.unattended({"_unattended": 1}))
+
+    def test_the_engine_only_ever_reads_the_key(self):
+        """The app owns this fact (it is `Run.background`). If relay ever
+        started WRITING it, authority over "is anybody watching" would be
+        split between two modules that cannot see each other."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "relay.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        # An ASSIGNMENT, not a mention: the docstring above names the key
+        # too, and a substring match that cannot tell a statement from a
+        # sentence about it is the wrap-token bug (and test_confinement_parity
+        # matching relay's name inside a promise never to import it).
+        #
+        # Both binders and both quote styles. The first version matched a
+        # literal `=` only, and an adversarial pass injected five write
+        # spellings past it -- the important one being `"_unattended": True`
+        # inside a state dict LITERAL, which is how relay builds every other
+        # state key (`"ask": not args.no_ask` in main()), so it is the most
+        # likely future edit and a colon is not an equals.
+        writes = re.findall(r"""^.*_unattended['"]?\]?\s*[:=][^=].*$""",
+                            src, re.M)
+        self.assertEqual(writes, [], writes)
+        mutated = re.findall(r"^.*(?:setdefault|update|pop)\([^)]*_unattended"
+                             r".*$", src, re.M)
+        self.assertEqual(mutated, [], mutated)
+        reads = [ln.strip() for ln in src.splitlines()
+                 if re.search(r"""\.get\(['"]_unattended['"]\)""", ln)]
+        self.assertEqual(len(reads), 1, reads)
+
+    def test_the_key_is_never_persisted(self):
+        """Private like `_usage_io` and `_cont_mark`: SessionStore.save
+        whitelists what it writes, so a resumed chat is attended by
+        construction -- the thing resuming it is Josh."""
+        state = build_state(self.tmp, [["a1"], ["b1"]])
+        state["_unattended"] = True
+        state["store"].save(state)
+        meta = saved_meta(state)
+        self.assertNotIn("_unattended", meta)
+        self.assertNotIn("_unattended", json.dumps(meta))
+        self.assertFalse(relay.unattended(rehydrate(meta)))
+
+    def test_the_cli_never_sets_it(self):
+        """The CLI has no Run and is attended by definition. build_state
+        mirrors main()'s construction, so the key is simply absent."""
+        state = build_state(self.tmp, [["a1"], ["b1"]])
+        self.assertNotIn("_unattended", state)
+        self.assertFalse(relay.unattended(state))
+        mine = lambda: False
+        self.assertIs(relay.ask_abort(state, mine), mine)
+
+    # ---- what the seat is told -------------------------------------------
+    def _unanswered_note(self, **extra):
+        state = build_state(self.tmp, [["a1"], ["b1"]])
+        state["ask"] = True
+        state.update(extra)
+        io = AskIO()               # scripted: answers None at once
+        relay.handle_ask_directive(
+            state, 0, "Done." + chr(10) + "[[ASK: which way? | left | right]]",
+            io)
+        self.assertIsNone(state["ask_pending"])
+        self.assertEqual([r for r in jsonl_rows(state)
+                          if r["speaker"] == "josh"], [],
+                         "an answer was forged")
+        return state["pending"][0][-1]
+
+    def test_three_arms_not_two(self):
+        """The continuous arm names Keep Improving OUT LOUD, so a scheduled
+        round-capped run falling into it would be told it is something it is
+        not; the attended arm ("Josh was unavailable") is equally wrong for a
+        run he never opened."""
+        attended = self._unanswered_note()
+        self.assertIn("Josh was unavailable", attended)
+
+        background = self._unanswered_note(_unattended=True)
+        self.assertIn("started in the background", background)
+        self.assertNotIn("Keep Improving", background)
+        self.assertNotIn("Josh was unavailable", background)
+
+        cont = self._unanswered_note(
+            continuous={"on": True, "checkin": {"minutes": 30}},
+            _unattended=True)
+        self.assertIn("Keep Improving", cont)
+
+    def test_every_arm_tells_the_seat_to_decide_and_none_forges_an_answer(self):
+        for extra in ({}, {"_unattended": True},
+                      {"continuous": {"on": True}}):
+            note = self._unanswered_note(**extra)
+            self.assertTrue(note.startswith("(Relay:"), note)
+            self.assertNotIn("Josh (human) answers", note)
+
+    def test_the_unanswered_question_leaves_a_row_josh_can_read_later(self):
+        """`announce_lost_ask` has always persisted its twin notice — a
+        question lost to a crash. This is the question NOBODY ANSWERED, and
+        for an unattended run it is the only durable record there is: the
+        note the SEAT is owed lives in `pending`, which is meta, which Josh
+        never reads. Without the row, a scheduled run opened in the morning
+        shows a reply ending in [[ASK]] and nothing about what became of it.
+        Found by the live run, not by reading.
+        """
+        state = build_state(self.tmp, [["a1"], ["b1"]])
+        state["ask"] = True
+        state["_unattended"] = True
+        relay.handle_ask_directive(
+            state, 0, "Done." + chr(10) + "[[ASK: which? | a | b]]", AskIO())
+        rows = jsonl_rows(state)
+        said = [r for r in rows if r["speaker"] == "system"
+                and "went unanswered" in r["text"]]
+        self.assertEqual(len(said), 1, rows)
+        self.assertEqual(said[0]["origin"], "relay")
+        self.assertIn("Fake 1", said[0]["text"])
+        # ...and it is still not an answer
+        self.assertEqual([r for r in rows if r["speaker"] == "josh"], [])
+
+    def test_a_real_unattended_run_moves_on_instead_of_wedging(self):
+        """Through the REAL loop: the wait expires, the requester is told,
+        and the conversation keeps going."""
+        state = build_state(
+            self.tmp,
+            [["Which one? [[ASK: pick | red | blue]]", "a2"], ["b1", "b2"]],
+            turns=2)
+        state["ask"] = True
+        state["_unattended"] = True
+        io = AskIO()
+        run_rounds(state, io)
+        self.assertEqual(len(io.asked), 1)
+        self.assertTrue(any("started in the background" in pr
+                            for pr in state["agents"][0].prompts),
+                        state["agents"][0].prompts)
+        self.assertEqual([r for r in jsonl_rows(state)
+                          if r["speaker"] == "josh"], [])
+        # ...and the run really did carry on rather than stopping there
+        self.assertGreaterEqual(state["turn"], 3)
 
 
 class AskPreambleTests(unittest.TestCase):

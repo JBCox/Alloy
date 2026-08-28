@@ -126,7 +126,7 @@ def grant_sentences(grants):
     return [GRANT_TEXT[g] for g in (grants or ()) if g in GRANT_TEXT]
 
 
-def unattended_notes(axes):
+def unattended_notes(axes, ask_wait_s=None):
     """Controls that mean nothing when nobody is watching, said out loud.
 
     Not grants: these are the opposite — controls that quietly do NOTHING (or
@@ -134,10 +134,12 @@ def unattended_notes(axes):
     leaving it as an absence is the rule browser_mcp's WITHHELD list was
     written to, one surface over.
 
-    The [[ASK]] one is measured, not guessed: `relay.ask_abort` gives an
-    unanswered question a deadline in CONTINUOUS mode only, so a scheduled
-    round-capped run whose seat asks Josh something waits until he presses
-    Stop.
+    `ask_wait_s` is relay.ASK_WAIT_MAX, PASSED IN by the caller for the same
+    reason `grants_for` takes already-normalized axes: this module imports
+    nothing from relay, and a hardcoded ten minutes here would be a second
+    copy of a constant free to drift from the one the engine actually
+    enforces. Omitted, the note simply does not name a duration — an
+    unnamed wait beats a wrong number.
     """
     axes = axes if isinstance(axes, dict) else {}
     notes = []
@@ -165,10 +167,27 @@ def unattended_notes(axes):
     if axes.get("continuous") and axes.get("checkin_action") == "permission":
         notes.append("Check-ins are set to Ask permission, which makes the "
                      "run WAIT at every check-in until you answer.")
-    if not axes.get("continuous"):
-        notes.append("If a seat ends a reply with a question for you, the run "
-                     "waits for an answer — only Keep Improving runs give an "
-                     "unanswered question a deadline.")
+    # Unconditional, and it used to be the opposite: this note once said a
+    # round-capped scheduled run "waits for an answer", which was true and
+    # was the wedge — `relay.ask_abort` gave a deadline in continuous mode
+    # only, so a 01:00 room whose seat asked a question sat there until Josh
+    # pressed Stop in the morning. `relay.unattended` closed it; the note now
+    # describes what happens rather than what is missing.
+    wait = ""
+    try:
+        seconds = int(ask_wait_s or 0)
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds >= 60:
+        # ceiling, not floor: this is an "at most" claim, and 90 seconds
+        # described as "at most 1 minute" is the one rounding that makes it
+        # false. Plural agrees, because a control that says "1 minutes"
+        # reads as a string somebody forgot to finish.
+        minutes = -(-seconds // 60)
+        wait = " at most %d minute%s" % (minutes, "" if minutes == 1 else "s")
+    notes.append("If a seat ends a reply with a question for you, nobody will "
+                 "be there to answer it. The run waits%s and then carries on "
+                 "without your input — it never invents an answer." % wait)
     return notes
 
 
