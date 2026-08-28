@@ -2020,6 +2020,27 @@
   .mode-opt .mode-main { flex: 1; min-width: 0; }
   .mode-opt b { display: block; font-size: 12px; font-weight: 600; }
   .mode-opt .mode-desc { display: block; color: var(--muted); font-size: 10.5px; margin-top: 2px; line-height: 1.3; }
+  /* Token-weight badge. Longhands only -- the `font:` shorthand silently
+     drops the WHOLE declaration when a slot holds a keyword or a var with a
+     keyword fallback, which is how a rule reads fine and does nothing. */
+  /* The title row is flex, which blockifies `b` regardless of `.mode-opt b`'s
+     display:block above -- so no override is needed here, and one written
+     "defensively" would be a rule that provably does nothing. */
+  .mode-opt .mode-title { display: flex; align-items: baseline; gap: 6px; }
+  .mode-opt .cost-badge {
+    flex: none; font-size: 8.5px; font-weight: 600; letter-spacing: .04em;
+    text-transform: uppercase; padding: 1px 5px; border-radius: 6px;
+    line-height: 1.5; border: 1px solid currentColor; opacity: .8;
+  }
+  .mode-opt .cost-badge:empty { display: none; }
+  .mode-opt .cost-light { color: #7FA87F; }
+  .mode-opt .cost-moderate { color: var(--alloy); }
+  .mode-opt .cost-heavy { color: var(--danger); }
+  .mode-opt .cost-why {
+    display: block; color: var(--muted); font-size: 9.5px; margin-top: 2px;
+    line-height: 1.3; opacity: .75; font-style: italic;
+  }
+  .mode-opt .cost-why:empty { display: none; }
   /* EVERY composer icon button belongs in this list — same rule as the
      sidebar's, and for the same reason: one left out renders as a raw browser
      default (Arial, white, square, 2px black border) next to its styled
@@ -5922,6 +5943,58 @@ const PRESET_MIN_SEATS = Object.freeze({
 // preset itself carries no rule; a KNOWN preset always wins, and the modes
 // with rules are never reachable under a preset that has none.
 const MODE_TO_PRESET = Object.freeze({free: "live_room", battle: "arena"});
+// ------------------------------------------------------- cost weight ----
+// MIRROR of relay.cost_weight()/cost_reason(). Only the recipe-derived half:
+// the picker paints before a conversation exists, so it has no budget and no
+// call counts -- those stay Python-side. tests/test_cost_weight.py feeds ONE
+// table to both halves and asserts identical output, which is the only thing
+// that stops these drifting (the confinement-parity rule).
+//
+// Why derived at all: `routing` already says whether a reply is relayed to
+// every peer verbatim, and commit_reply's fan-out is what makes a broadcast
+// room quadratic in seats. A hand-kept heavy/light label per mode would go
+// stale the moment a mode's axes were re-tuned -- the syncProviderPicker trap.
+const RELAY_READS = Object.freeze({isolated: 0, addressed: 0.5, broadcast: null});
+const BAND_MODERATE = 1.25, BAND_HEAVY = 1.75;
+function costReason(routing, workflow, seats) {
+  const n = Math.max(1, seats | 0), peers = n - 1;
+  if (n < 2) return "One seat: nothing is relayed between agents.";
+  if (workflow === "panel")
+    return "Drafts and critiques stay private; only the final synthesis reads all "
+      + n + " of them.";
+  if (routing === "isolated")
+    return "Seats work in isolation - only a short settled summary crosses between them.";
+  if (routing === "addressed")
+    return "Seats reach each other through capped digests rather than full replies.";
+  return "Every reply is read in full by " + peers + " other seat"
+    + (peers === 1 ? "" : "s") + ".";
+}
+function costWeight(recipe, seats) {
+  const n = Math.max(1, seats | 0);
+  const routing = (recipe && recipe.routing) || "broadcast";
+  const workflow = (recipe && recipe.workflow) || "conversation";
+  let reads;
+  // Panel overstates itself: draft and critique commit fan_out=false, so only
+  // one phase of three actually relays. Reading the axis literally would call
+  // the phase-isolated mode as heavy as open debate.
+  if (workflow === "panel") reads = (n - 1) / 3;
+  else {
+    const t = RELAY_READS[routing];
+    reads = (t === null || t === undefined) ? (n - 1) : t;
+    if (routing === "addressed" && n < 2) reads = 0;
+  }
+  const multiplier = 1 + reads;
+  const band = multiplier >= BAND_HEAVY ? "heavy"
+    : multiplier >= BAND_MODERATE ? "moderate" : "light";
+  return {multiplier: Math.round(multiplier * 100) / 100, band: band,
+          relay_reads: Math.round(reads * 100) / 100,
+          why: costReason(routing, workflow, n), estimated: true};
+}
+// The badge for one mode ROW, which knows its preset but not the live recipe.
+function costForPreset(preset, seats) {
+  return costWeight(PRESET_RECIPES[preset], seats);
+}
+const BAND_LABEL = Object.freeze({light: "Light", moderate: "Moderate", heavy: "Heavy"});
 function presetSeatRefusal(preset, n) {
   // The fallback is for "custom" ONLY -- a recipe with no preset of its own.
   // Keying it on "has no rule" instead made every rule-free preset inherit
@@ -6008,7 +6081,10 @@ function renderModePick() {
     b.setAttribute("aria-selected", String(on));
     b.innerHTML = '<span class="mode-check">' + (on ? "✓" : "") + '</span>' +
       '<span class="mode-ico">' + m.icon + '</span>' +
-      '<span class="mode-main"><b></b><span class="mode-desc"></span></span>';
+      '<span class="mode-main"><span class="mode-title"><b></b>' +
+      '<span class="cost-badge"></span></span>' +
+      '<span class="mode-desc"></span>' +
+      '<span class="cost-why"></span></span>';
     b.querySelector("b").textContent = (solo && m.soloName) || m.name;
     // A mode this roster cannot run says so IN PLACE OF its pitch, and stops
     // being clickable -- an unavailable row that still reads like an offer is
@@ -6016,6 +6092,22 @@ function renderModePick() {
     const why = presetSeatRefusal(m.v, n);
     b.querySelector(".mode-desc").textContent =
       why || (solo && m.soloDesc) || m.desc;
+    // Token weight, DERIVED from this preset's own axes (never a hand-kept
+    // label -- see costWeight). An unavailable row shows none: quoting the
+    // price of something you cannot pick is noise.
+    const badge = b.querySelector(".cost-badge");
+    const whyLine = b.querySelector(".cost-why");
+    if (!why) {
+      const c = costForPreset(m.v, n);
+      badge.textContent = BAND_LABEL[c.band];
+      badge.className = "cost-badge cost-" + c.band;
+      badge.title = "Estimated from this mode's routing, not measured. "
+        + "Relative prompt cost per turn: x" + c.multiplier + ". " + c.why;
+      // The mechanism sentence only earns its line when it VARIES. Solo makes
+      // every row identical ("nothing is relayed"), and six copies of one true
+      // sentence is noise, not information.
+      if (n > 1) whyLine.textContent = c.why;
+    }
     if (why) {
       b.disabled = true;
       b.classList.add("mode-off");

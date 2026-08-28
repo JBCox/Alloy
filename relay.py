@@ -454,6 +454,122 @@ def estimate_calls(recipe, seats):
     return {"seat_calls": seat_calls, "side_calls": side_calls,
             "total_calls": seat_calls + side_calls, "estimated": True}
 
+
+# ---------------------------------------------------------- cost weight ----
+# What a mode COSTS, derived from the recipe rather than labelled by hand.
+#
+# `estimate_calls` above counts CALLS, and calls are the wrong unit: a panel
+# synthesis call and a solo continuation call differ by the entire transcript.
+# What actually drives spend here is fan-out -- `commit_reply` appends the
+# FULL verbatim reply to every recipient's backlog, so at N broadcasting
+# seats each reply is paid for once as output and N-1 times as input, and it
+# then sits in each peer's resumed thread being re-read (cached) for the rest
+# of the run. That is quadratic in seats, and it is invisible in a call count.
+#
+# The multiplier is therefore the honest headline, and it falls straight out
+# of the `routing` axis that normalize_orchestration already computes. No
+# hand-kept heavy/light table per mode: that is the syncProviderPicker trap
+# (a hand-written list drifts silently the moment a mode's axes change), and
+# it would go stale exactly when a mode was re-tuned.
+#
+# NEVER presented as measured telemetry -- same contract as estimate_calls.
+# `stats.py` holds what the run ACTUALLY cost; this is what the shape of the
+# recipe implies before a single token is spent.
+
+# Peers who read each reply, per routing axis. Deliberately a table rather
+# than branches so the JS mirror can be diffed against it by eye.
+#   isolated  - workstream radio silence: only the settled summary crosses,
+#               so a worker never pays to read another worker.
+#   addressed - live rooms synchronize through relay digests, which are
+#               summarized and capped (DIGEST_SOURCE_CHARS), so the cost is
+#               roughly one shared half-reply regardless of seat count.
+#   broadcast - every peer receives the whole reply, verbatim.
+RELAY_READS = {"isolated": 0.0, "addressed": 0.5, "broadcast": None}
+# A side call is real spend but a small one: helper_spec routes the relay's
+# own work (title, moderator pick, plan, digest) to a cheap model by default,
+# so counting one at parity with a seat turn would drown the signal.
+SIDE_CALL_WEIGHT = 0.15
+# Bands on the MULTIPLIER, not on the absolute total -- a 60-turn isolated run
+# spends more than a 3-turn broadcast one, and saying so would just re-report
+# the round count Josh already set. What the badge answers is "does this
+# recipe make every seat pay for every other seat".
+BAND_MODERATE = 1.25
+BAND_HEAVY = 1.75
+
+
+def cost_weight(recipe, seats, budget=None):
+    """How token-heavy a recipe is, derived from its own axes.
+
+    Returns {multiplier, band, relay_reads, seat_calls, side_calls, weight,
+    why, estimated} -- `why` being the one sentence that names the MECHANISM,
+    because "Heavy" tells Josh nothing he can act on while "every reply is
+    read by 2 other seats" tells him to drop a seat or switch to isolated
+    routing. `estimated` is always True and callers must render it as such.
+
+    ui/index.html mirrors this as costWeight(); tests/test_cost_weight.py
+    feeds ONE table to both and asserts identical output, which is what stops
+    the two drifting (the confinement-parity rule, one module over).
+    """
+    n = max(1, int(seats or 1))
+    policy = normalize_orchestration(recipe)
+    routing = policy.get("routing") or "broadcast"
+    workflow = policy.get("workflow") or "conversation"
+    calls = estimate_calls(recipe, n)
+    # Panel is the one place the axis overstates the cost. Its drafts and
+    # critiques commit with fan_out=False -- rows are logged, peers are not
+    # charged to read them -- and only the synthesis carries the collected
+    # packet. So its routing says broadcast while exactly one phase of three
+    # behaves that way. Reading the axis literally here would tell Josh the
+    # cheap phase-isolated mode is as heavy as open debate.
+    if workflow == "panel":
+        reads = (n - 1) / 3.0
+    else:
+        table = RELAY_READS.get(routing)
+        reads = (n - 1) * 1.0 if table is None else table
+        # A digest costs about the same whether two seats or five are being
+        # summarized, but it cannot cost anything at all with no peers.
+        if routing == "addressed" and n < 2:
+            reads = 0.0
+    multiplier = 1.0 + reads
+    weight = calls["seat_calls"] * multiplier +         calls["side_calls"] * SIDE_CALL_WEIGHT
+    if multiplier >= BAND_HEAVY:
+        band = "heavy"
+    elif multiplier >= BAND_MODERATE:
+        band = "moderate"
+    else:
+        band = "light"
+    return {"multiplier": round(multiplier, 2), "band": band,
+            "relay_reads": round(reads, 2),
+            "seat_calls": calls["seat_calls"],
+            "side_calls": calls["side_calls"],
+            "weight": round(weight, 2),
+            "why": cost_reason(routing, workflow, n),
+            "estimated": True}
+
+
+def cost_reason(routing, workflow, seats):
+    """The mechanism sentence under a cost badge.
+
+    Says what happens, never how bad it is: a band is a judgement and this is
+    the fact the judgement was made from. Solo gets its own wording in every
+    branch because "read by 0 other seats" is a sentence about an absence."""
+    n = max(1, int(seats or 1))
+    peers = n - 1
+    if n < 2:
+        return "One seat: nothing is relayed between agents."
+    if workflow == "panel":
+        return ("Drafts and critiques stay private; only the final synthesis "
+                f"reads all {n} of them.")
+    if routing == "isolated":
+        return ("Seats work in isolation - only a short settled summary "
+                "crosses between them.")
+    if routing == "addressed":
+        return ("Seats reach each other through capped digests rather than "
+                "full replies.")
+    return (f"Every reply is read in full by {peers} other "
+            f"seat{'' if peers == 1 else 's'}.")
+
+
 # "Until done": no round cap — the conversation ends via [[WRAP]], a moderator
 # DONE, /stop, or this hard turn ceiling (the spend backstop; generous but
 # bounded). Orthogonal to mode.
