@@ -770,7 +770,9 @@
     width: 20px; height: 20px; border-radius: 50%; cursor: pointer;
     border: 1px solid rgba(255,255,255,.25); padding: 0;
   }
-  #addSeatRow { display: flex; gap: 6px; margin-bottom: 10px; }
+  #addSeatRow { display: flex; gap: 6px; margin-bottom: 6px; }
+  #defaultStageRow { display: flex; margin-bottom: 10px; }
+  #defaultStageRow .btn-sm { flex: 1; }
   #addSeatRow select {
     flex: 1; background: var(--surface2); color: var(--text);
     border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px;
@@ -2338,6 +2340,10 @@
         <option value="ox">Ox</option>
       </select>
       <button class="btn-sm" id="addSeatBtn" title="Add another participant card">+ Add seat</button>
+    </div>
+    <div id="defaultStageRow">
+      <button class="btn-sm" id="saveDefaultBtn"
+              title="Save the current seats — providers, models and thinking levels — as what every new window starts with">Set as default</button>
     </div>
 
     <div class="rail-sub">Room staff</div>
@@ -10470,6 +10476,70 @@ function addOption(sel, value, label) {
   sel.appendChild(o);
 }
 
+/* ---------- the default stage ----------
+   What a NEW WINDOW boots with. The factory answer is ONE Claude seat — Alloy
+   as a plain harness for a single agent (the solo machinery adapts every mode
+   and preset to it) — and "Set as default" under the add-seat row overwrites
+   that with the current roster: providers, models and thinking levels, saved
+   to localStorage like the sound cue and working-folder preferences (same
+   best-effort posture; a WebView2 that drops storage just boots the factory
+   stage). Enabled seats only — an unticked seat is one Josh said he did not
+   want. Labels and roles are deliberately NOT captured: the control's promise
+   stays small enough to state in its tooltip. */
+const DEFAULT_STAGE_KEY = "defaultStage";
+const DEFAULT_STAGE_PROVIDERS = ["claude", "gpt", "gemini", "ox"];
+const FACTORY_STAGE = [{provider: "claude", model: "", effort: ""}];
+function loadDefaultStage() {
+  let v = null;
+  try { v = JSON.parse(localStorage.getItem(DEFAULT_STAGE_KEY) || "null"); }
+  catch (e) { return null; }
+  if (!Array.isArray(v) || !v.length || v.length > 8) return null;
+  if (!v.every(p => p && typeof p === "object" &&
+                DEFAULT_STAGE_PROVIDERS.includes(p.provider))) return null;
+  return v.map(p => ({provider: p.provider,
+                      model: typeof p.model === "string" ? p.model : "",
+                      effort: typeof p.effort === "string" ? p.effort : ""}));
+}
+function saveDefaultStage() {
+  const roster = seats
+    .filter(s => s.el.querySelector(".switch").checked)
+    .map(s => { const c = cfgFor(s);
+                return {provider: c.provider, model: c.model, effort: c.effort}; });
+  const btn = $("saveDefaultBtn");
+  if (!roster.length) {          // nothing enabled = nothing to promise
+    btn.textContent = "No seats to save";
+    setTimeout(() => { btn.textContent = "Set as default"; }, 2500);
+    return;
+  }
+  try { localStorage.setItem(DEFAULT_STAGE_KEY, JSON.stringify(roster)); }
+  catch (e) {}
+  btn.textContent = "Saved — new windows start with these seats";
+  setTimeout(() => { btn.textContent = "Set as default"; }, 2500);
+}
+$("saveDefaultBtn").onclick = saveDefaultStage;
+function applyDefaultSeat(seat, p) {
+  // A DEFAULT is a preference, not a record: a model or level this install no
+  // longer offers falls back to the provider default silently — unlike
+  // applySavedSeat, which resurrects retired ids because a reopened chat must
+  // show what it actually ran on.
+  if (!p.model) return;
+  const mSel = seat.el.querySelector(".model"), eSel = seat.el.querySelector(".effort");
+  if (seat.provider === "gemini") {
+    // agy slugs carry the level: <family>-<level>
+    const fam = geminiFamilies.find(f => p.model.startsWith(f.base + "-"));
+    if (!fam) return;
+    mSel.value = fam.base;
+    fillGeminiLevels(eSel, fam.base, p.model.slice(fam.base.length + 1));
+    return;
+  }
+  if (![...mSel.options].some(o => o.value === p.model)) return;
+  mSel.value = p.model;
+  if (seat.provider === "gpt") fillGptLevels(eSel, mSel.value, p.effort);
+  if (seat.provider === "ox") fillOxLevels(eSel, mSel.value, p.effort);
+  if (p.effort && [...eSel.options].some(o => o.value === p.effort))
+    eSel.value = p.effort;
+}
+
 function resetStage() {
   // `running` is per-CHAT state and this stage now shows no chat at all, so it
   // has to be forgotten here with everything else. Leaving it true is what made
@@ -11043,7 +11113,13 @@ function fillGptLevels(eSel, modelId, def) {
 // listener, every model/thinking menu permanently blank (2026-08-21).
 syncPermissionNote();
 syncRoundsCtl();          // the box is an input now: nothing else paints it
-addSeat("claude"); addSeat("gpt"); addSeat("gemini");
+// The boot roster comes from the saved default stage (the "Set as default"
+// button), falling back to the factory answer: ONE Claude seat. Models and
+// thinking levels cannot be applied yet — the pickers are empty until
+// get_config arrives — so the parsed stage is kept and applied in the
+// pywebviewready handler, right after fillSeat populates them.
+const bootStage = loadDefaultStage() || FACTORY_STAGE;
+bootStage.forEach(p => addSeat(p.provider));
 applyPreset("open_discussion");
 
 /* ---------- Keep Improving: bindings ----------
@@ -11132,6 +11208,12 @@ window.addEventListener("pywebviewready", async () => {
   gptModels = uiCfg.gpt_models;
   geminiFamilies = uiCfg.gemini_families;
   seats.forEach(fillSeat);
+  // The seats on stage right now are exactly the boot roster (restoreTabs /
+  // resumeAfterRestart run later in this handler), so the saved default's
+  // models and thinking levels land on the cards they were saved from.
+  bootStage.forEach((p, i) => {
+    if (seats[i] && seats[i].provider === p.provider) applyDefaultSeat(seats[i], p);
+  });
   fillModerator("claude");
   paintSound();                       // remember the cue choice engine-side
   pywebview.api.set_sound(soundOn);

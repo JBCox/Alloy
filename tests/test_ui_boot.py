@@ -450,6 +450,19 @@ process.on('unhandledRejection', e => {
 const listeners = Object.create(null);
 const docListeners = Object.create(null);
 const store = Object.create(null);
+// The FACTORY boot is one Claude seat now (Alloy as a solo harness); every
+// probe below was written against the historical three-seat roster, so seed
+// the saved default stage the product reads at boot -- which also drives the
+// default-stage restore path for real instead of leaving it untested.
+if (process.env.ALLOY_SAVED_STAGE) {
+  store['defaultStage'] = process.env.ALLOY_SAVED_STAGE;
+} else if (!process.env.ALLOY_FACTORY_BOOT) {
+  store['defaultStage'] = JSON.stringify([
+    {provider: 'claude', model: '', effort: ''},
+    {provider: 'gpt', model: '', effort: ''},
+    {provider: 'gemini', model: '', effort: ''},
+  ]);
+}
 
 const api = new Proxy({}, {
   get(_, name) {
@@ -696,6 +709,15 @@ if (topLevelError) {
   const deepText = el => ((el.textContent || '') + ' ' + (el._html || '') + ' ' +
     (el.children || []).map(deepText).join(' ')).trim();
   const more = {};
+  // The roster the BOOT itself produced -- captured before any probe touches
+  // the stage, because the solo probe tears seats down and a restore at the
+  // end would mask what boot actually built (the default-stage tests read
+  // this, not report()'s end-of-run snapshot).
+  more.bootSeats = document.querySelectorAll('.seat').map(s => ({
+    provider: (s.dataset && s.dataset.provider) || '',
+    model: (s.querySelector('.model') || {}).value || null,
+    effort: (s.querySelector('.effort') || {}).value || null,
+  }));
   // Boot now REOPENS and RESUMES an interrupted chat, so the evidence must be
   // read before anything else touches the stage — and the remaining probes
   // need the unseated draft they have always assumed, hence newChat().
@@ -1689,6 +1711,27 @@ if (topLevelError) {
     more.refusal.plainAddsNone =
       [...byId['feed'].querySelectorAll('.refusal-pill')].length === before;
   } catch (e) { more.refusalError = (e && e.stack) || String(e); }
+
+  // ---- the default stage: factory fallback + Set as default ----------------
+  // Before the solo teardown below: saveDefaultStage captures the LIVE stage,
+  // and this is the last moment it is still the seeded three-seat roster.
+  try {
+    more.defstage = {};
+    // the boot above consumed the seeded default; with it gone, the loader
+    // must answer null so the FACTORY solo-Claude stage takes over
+    delete store['defaultStage'];
+    more.defstage.noSaved = ctx.loadDefaultStage();
+    more.defstage.factory = vm.runInContext('FACTORY_STAGE', ctx);
+    store['defaultStage'] = JSON.stringify([{provider: 'evil'}]);
+    more.defstage.garbage = ctx.loadDefaultStage();
+    store['defaultStage'] = 'not json';
+    more.defstage.junk = ctx.loadDefaultStage();
+    // the button's whole job: the stage on screen becomes the stored default
+    document.querySelectorAll('.seat .switch').forEach(sw => { sw.checked = true; });
+    ctx.saveDefaultStage();
+    more.defstage.saved = JSON.parse(store['defaultStage'] || 'null');
+    more.defstage.btnText = byId['saveDefaultBtn'] ? byId['saveDefaultBtn'].textContent : null;
+  } catch (e) { more.defstage = {error: String((e && e.stack) || e)}; }
 
   // ---- ONE seat: Alloy as a harness for a single agent ---------------------
   // Deliberately the LAST probe: it removes seat cards, and every earlier
@@ -2966,6 +3009,7 @@ if (topLevelError) {
 
   // Put the boot roster back: report() reads the LIVE DOM, so leaving the
   // stage solo would hand every other test in this file a one-seat page.
+  // (bootSeats above is the record of what boot itself built.)
   try { ctx.addSeat('gpt'); ctx.addSeat('gemini'); } catch (e) {}
 
   report({bootRan: fns.length > 0, bootError, more});
@@ -2973,13 +3017,14 @@ if (topLevelError) {
 """
 
 
-def boot(html_path, workdir):
+def boot(html_path, workdir, extra_env=None):
     """Run the UI script headlessly; return the harness's JSON report."""
     with open(os.path.join(workdir, "dom.js"), "w", encoding="utf-8") as f:
         f.write(DOM_JS)
     with open(os.path.join(workdir, "boot.js"), "w", encoding="utf-8") as f:
         f.write(BOOT_JS)
     env = dict(os.environ, STUB_CONFIG=json.dumps(STUB_CONFIG))
+    env.update(extra_env or {})
     out = subprocess.run(
         [NODE, os.path.join(workdir, "boot.js"), html_path],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -3116,6 +3161,84 @@ class SoloStageUiTests(unittest.TestCase):
         normalize wipes the badges that say what the app moved for you."""
         self.assertTrue(self.solo["badgeBefore"])
         self.assertEqual(self.solo["badgeAfterRoster"], self.solo["badgeBefore"])
+
+
+@unittest.skipUnless(NODE, "node not installed")
+class DefaultStageUiTests(unittest.TestCase):
+    """The boot roster: factory solo Claude, overridable by "Set as default".
+
+    The harness seeds a three-seat saved default so every historical probe
+    keeps its roster assumptions -- which means the seeded run here exercises
+    the RESTORE path, and a second, unseeded boot proves the factory stage."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.report = boot(UI, cls._tmp.name)
+        cls.d = cls.report.get("defstage") or {}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_probe_ran_clean(self):
+        self.assertIsNone(self.d.get("error"), self.d.get("error"))
+
+    def test_no_saved_default_means_factory_takes_over(self):
+        self.assertIsNone(self.d["noSaved"])
+        self.assertEqual(self.d["factory"],
+                         [{"provider": "claude", "model": "", "effort": ""}])
+
+    def test_garbage_in_storage_is_refused_never_half_applied(self):
+        # an unknown provider and non-JSON both answer null -- the factory
+        # stage takes over rather than a partially-believed roster
+        self.assertIsNone(self.d["garbage"])
+        self.assertIsNone(self.d["junk"])
+
+    def test_set_as_default_captures_the_live_stage(self):
+        saved = self.d["saved"]
+        self.assertEqual([s["provider"] for s in saved],
+                         ["claude", "gpt", "gemini"])
+        by = {s["provider"]: s for s in saved}
+        # models and levels ride along -- this IS the default-model setting
+        self.assertEqual(by["claude"]["model"], "claude-opus-5")
+        self.assertEqual(by["gpt"]["model"], "gpt-5.6-sol")
+        # gemini stores the agy slug (family-level), the shape cfgFor sends
+        # and applyDefaultSeat reads back
+        self.assertTrue(by["gemini"]["model"].startswith("gemini-3.7-flash-"),
+                        by["gemini"]["model"])
+        self.assertEqual(by["gemini"]["effort"], "")
+        # the button says what just happened rather than clicking silently
+        self.assertIn("Saved", self.d.get("btnText") or "")
+
+    def test_the_factory_boot_really_is_one_claude_seat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rep = boot(UI, tmp, extra_env={"ALLOY_FACTORY_BOOT": "1"})
+        self.assertIsNone(rep["topLevelError"])
+        self.assertIsNone(rep["bootError"])
+        self.assertEqual([s["provider"] for s in rep["bootSeats"]], ["claude"])
+        # the solo stage boots with populated pickers on the provider default
+        self.assertEqual(rep["bootSeats"][0]["model"], "claude-opus-5")
+
+    def test_a_saved_default_model_lands_on_the_booted_card(self):
+        """The default-MODEL half of the setting: what "Set as default"
+        stored is what a new window's picker shows."""
+        seed = json.dumps([
+            {"provider": "claude", "model": "claude-haiku-4-5", "effort": "low"},
+            {"provider": "claude", "model": "claude-ancient", "effort": "max"},
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            rep = boot(UI, tmp, extra_env={"ALLOY_SAVED_STAGE": seed})
+        self.assertIsNone(rep["bootError"])
+        seats = rep["bootSeats"]
+        self.assertEqual([s["provider"] for s in seats], ["claude", "claude"])
+        self.assertEqual(seats[0]["model"], "claude-haiku-4-5")
+        self.assertEqual(seats[0]["effort"], "low")
+        # a model this install no longer offers is a preference that fell
+        # through to the provider default -- never a resurrected option
+        # (applySavedSeat's rule is for reopened chats, not defaults)
+        self.assertEqual(seats[1]["model"], "claude-opus-5")
+        self.assertEqual(seats[1]["effort"], "high")
 
 
 @unittest.skipUnless(NODE, "node not installed")
