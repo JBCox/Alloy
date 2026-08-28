@@ -38,6 +38,7 @@ import uuid
 # call site already binds a local variable called `outcome`)
 import memory as memory_store
 from outcome import write_outcome
+import plan_limits
 import retro
 import workstreams
 # The browser proxy is also a standalone server run as its own process, but
@@ -1443,6 +1444,14 @@ class Agent:
         # whole run, agy publishes no stream at all). A LEVEL, never a sum:
         # it is stamped on the row and never accumulated.
         self.last_context = None
+        # Anthropic PLAN-quota readings seen on this turn's stream (see
+        # plan_limits.py). A LIST because one turn can report several windows,
+        # and empty for every adapter but claude. Deliberately NOT modelled on
+        # last_context despite the resemblance: that is a fact about this seat
+        # and rides the row, while this is a fact about the ACCOUNT — the same
+        # number for every seat in every open chat — so it never touches a
+        # message row and never reaches meta.
+        self.last_limits = []
         # Cumulative-counter bookkeeping for adapters whose CLI reports the
         # whole THREAD's totals rather than this turn's (codex; see
         # usage_delta). Stays None for every adapter that already reports
@@ -1866,6 +1875,12 @@ class Agent:
         self._turn_verdict = None
         self.last_usage = None
         self.last_context = None
+        # Reset like last_context: this holds what THIS turn reported, so a
+        # turn reporting nothing cannot republish the last one's numbers. The
+        # durable account snapshot lives outside the agent (state and the
+        # app's process-level store) and is MERGED, so silence here means
+        # "nothing new", never "the quota went away".
+        self.last_limits = []
         if (self.permission == "ask" and not self.plan_mode
                 and not self.tool_approval_hook and self.on_approval):
             try:
@@ -1888,18 +1903,27 @@ class Agent:
         env = clean_env()
         env.update(self.extra_env() or {})
         self.before_run()
-        on_line = None
-        if on_activity is not None:
-            def on_line(line):
+        # ALWAYS wired, even with no narration sink. It used to be built only
+        # `if on_activity is not None`, which quietly made the adapter parse
+        # its own stream only when somebody happened to be watching — fine
+        # while activity() did nothing but narrate, and wrong the moment it
+        # also captured the account's plan quota (measured 2026-08-28: a real
+        # turn set last_context but last_limits stayed empty). Whether a front
+        # end is NARRATING is a front-end question; what an adapter reads off
+        # its own stdout is not. Costs nothing in production, where run_rounds
+        # always attaches a sink.
+        def on_line(line):
+            try:
+                acts = self.activity(line) or ()
+            except Exception:
+                return
+            if on_activity is None:
+                return
+            for act in acts:
                 try:
-                    acts = self.activity(line) or ()
+                    on_activity(act)
                 except Exception:
-                    return
-                for act in acts:
-                    try:
-                        on_activity(act)
-                    except Exception:
-                        pass
+                    pass
         # Cancelled while this seat was queued behind another (parallel/free)
         # or between fan-out and dispatch: never start the child at all.
         if self.cancelled():
@@ -2814,6 +2838,23 @@ class ClaudeAgent(Agent):
             n = evt.get("estimated_tokens")
             if isinstance(n, int) and n > 0:
                 return [{"kind": "progress", "text": f"thinking… {n:,} tokens"}]
+            return ()
+        if evt.get("type") == "rate_limit_event":
+            # The account's PLAN quota (plan_limits.py). Measured 2026-08-28:
+            # every turn carries one of these once a limit passes the CLI's own
+            # warning threshold, and Alloy had never read the line — a grep for
+            # "rate_limit" across the whole repo returned nothing.
+            #
+            # Captured as a SIDE EFFECT and narrated as NOTHING. It is account
+            # state, not a step this seat took: putting it in the activity log
+            # would spend ACTIVITY_MAX budget on a fact that is identical for
+            # every seat and every chat, and would read as work in a list of
+            # work (the same rule that keeps `progress` unpersisted and parks
+            # the todo strip outside the step count). Mutating per-turn state
+            # from here is how self._tool_names already works.
+            reading = plan_limits.parse_event(evt)
+            if reading:
+                self.last_limits.append(reading)
             return ()
         if evt.get("type") == "user":
             # Tool RESULTS. Verified live 2026-08-26: `user` events carry
@@ -6536,6 +6577,77 @@ def write_event_hooks(hooks, path=None):
     return data
 
 
+PLAN_BRAKE_FILE = "plan-brake.json"
+
+
+def _plan_brake_path(path=None):
+    """Joined at CALL time from SESSIONS_DIR — the write_tabs lesson: a module
+    constant captured at import survives a test's redirect and writes into
+    Josh's real sessions folder."""
+    return path or os.path.join(SESSIONS_DIR, PLAN_BRAKE_FILE)
+
+
+def read_plan_brake(path=None):
+    """{"version": 1, "threshold": fraction|None}, always well-formed.
+
+    Never raises; a corrupt or missing file means NO BRAKE, which is exactly
+    the behaviour that existed before the brake. `None` and 0 are the same
+    answer here and both mean "do not brake" — normalize_threshold refuses to
+    turn junk into 0.0, which would refuse every unattended run forever.
+    """
+    try:
+        with open(_plan_brake_path(path), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {"version": 1, "threshold": None}
+    raw = data.get("threshold") if isinstance(data, dict) else None
+    return {"version": 1, "threshold": plan_limits.normalize_threshold(raw)}
+
+
+def write_plan_brake(threshold, path=None):
+    """Atomically persist the unattended plan-quota brake; returns it back.
+
+    Takes a percent (80) or a fraction (0.8) — the UI shows one and the CLI
+    payload carries the other, and a setting that means 80x the quota if you
+    typed the wrong unit is not a setting. Anything unparseable is stored as
+    "no brake" rather than rejected, because this control's OFF state is a
+    legitimate, common choice and a modal that refuses to save is worse than
+    one that saves the off state and says so.
+    """
+    value = plan_limits.normalize_threshold(threshold)
+    data = {"version": 1, "threshold": value}
+    target = _plan_brake_path(path)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    # UNIQUE tmp name (pid + thread), not a fixed one: this is a single global
+    # file, so two writers sharing a scratch path truncate each other's and
+    # both rename it into place (retro.write_playbook's bug). And the replace
+    # RETRIES, for _atomic_write's documented reason — on Windows a concurrent
+    # reader without FILE_SHARE_DELETE blocks the rename with a transient
+    # PermissionError. Measured: 5 threads reading and writing this file
+    # raised 4 of them before the retry was added.
+    tmp = f"{target}.tmp-{os.getpid()}-{threading.get_ident()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        for _ in range(8):
+            try:
+                os.replace(tmp, target)
+                break
+            except PermissionError:
+                time.sleep(0.05)
+        else:
+            os.replace(tmp, target)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    return data
+
+
 # --------------------------------------------------------------- rooms -----
 # Saved room templates: a named snapshot of exactly what the stage builds for
 # a launch — seats, models, efforts, roles, the orchestration recipe, limits
@@ -8851,6 +8963,83 @@ def usage_snapshot(state):
     }
 
 
+def record_plan_limits(state, agent):
+    """Fold one agent's plan-quota readings into the run's account snapshot.
+
+    `state["_plan_limits"]` is PRIVATE, like `_usage_io` and `_unattended`:
+    SessionStore.save whitelists fields, so it never reaches disk — which is
+    the point, because this is an ACCOUNT fact and writing it into a session's
+    meta would record it as something that was true of that conversation. The
+    durable copy lives in the app's process-level store, fed by the event.
+
+    Best-effort by the same contract as activity narration and record_usage:
+    telemetry never fails a turn.
+    """
+    readings = getattr(agent, "last_limits", None)
+    if not readings:
+        return
+    snap = state.get("_plan_limits") or {}
+    for reading in readings:
+        snap = plan_limits.merge(snap, reading)
+    state["_plan_limits"] = snap
+    io = state.get("_usage_io")
+    if io is not None:
+        try:
+            io.emit("plan_limits", {"limits": snap})
+        except Exception:
+            pass
+
+
+def probe_plan_limits(timeout=60):
+    """One cheap CLI call whose only purpose is to read the account's quota.
+
+    Used before an UNATTENDED run, where the stored snapshot may be hours old.
+    A stale reading is a sound basis for REFUSING (inside a window utilization
+    only climbs, so an old number is a lower bound) but not for ALLOWING, so
+    the brake takes a fresh one when it can.
+
+    Returns a snapshot dict — possibly EMPTY, which is a real answer meaning
+    "nothing was reported", not "the quota is zero". Silence is the normal
+    case: the CLI reports a limit only once it passes its own warning
+    threshold, so no news really is good news here, and that is exactly why
+    the brake can be cheap. Never raises.
+    """
+    snap = {}
+    try:
+        argv = resolve_cmd(["claude", "-p", "ok",
+                            "--model", "claude-haiku-4-5",
+                            "--output-format", "stream-json", "--verbose"])
+        # encoding + errors are NOT optional here, and not style. `text=True`
+        # alone decodes with the ANSI codepage (cp1252 on this machine), and a
+        # real stream carries bytes it cannot map — measured: byte 0x90 raised
+        # UnicodeDecodeError on the FIRST live run. The `except` below then
+        # swallowed it and returned {}, so the brake failed open every time
+        # while every token-free test stayed green. Same ANSI-codepage trap
+        # speaker.py routes around with base64.
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout,
+            stdin=subprocess.DEVNULL, env=clean_env(),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        for line in (proc.stdout or "").splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                evt = json.loads(line)
+            except ValueError:
+                continue
+            reading = plan_limits.parse_event(evt)
+            if reading:
+                snap = plan_limits.merge(snap, reading)
+    except Exception:
+        # A broken probe is NOT a refusal — see brake_verdict's fail-open
+        # note. An empty snapshot and a failed probe are deliberately the same
+        # answer to the caller, because neither one is a measurement.
+        return {}
+    return snap
+
+
 def _addressed_recipients(state, i, reply, io):
     """Return (intended audience, actual recipient indices, refused,
     narrowing_failed) for one reply.
@@ -9461,6 +9650,13 @@ def commit_reply(state, i, reply, consumed, io, activity=None,
     state["turn"] = state.get("turn", 0) + 1
     record_usage(state, getattr(agent, "last_usage", None),
                  seat_key=state["slot_ids"][i], kind="seat")
+    # Beside record_usage, not inside it: usage is a SPEND that accumulates
+    # per seat, this is an account LEVEL that is merged and belongs to nobody
+    # in particular. Seat turns are the path that matters; the stateless side
+    # calls (supervisor, moderator, digest) also stream these events and their
+    # readings are dropped, which costs only freshness — the brake takes its
+    # own reading rather than trusting this one's age.
+    record_plan_limits(state, agent)
     state["store"].save(state)
     return row
 

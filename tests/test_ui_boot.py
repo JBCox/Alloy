@@ -482,6 +482,11 @@ let reactionsReply = {};     // what get_reactions hands a reopened chat
 // undefined = leave the real inline editor alone; anything else is what
 // openNoteEditor resolves to (null = cancelled)
 let noteEditorAnswer = undefined;
+// 2026-08-28: what get_plan_limits hands back; the probe swaps it. Starts as
+// the honest "nothing reported", which is what a fresh install really sees.
+let planLimitsReply = {limits: {}, threshold: null, worst: null,
+                       summary: '', floor: null, note: []};
+const brakeCalls = [];       // what set_plan_brake was asked to persist
 let playbookReply = null;    // set to {error} to drive the refusal path
 let interjectReply = null;   // set to {error} to drive the refusal path
 const dockCalls = [];        // W2.1: what the queue dock asked the bridge to do
@@ -508,6 +513,10 @@ function apiReply(name, args) {
       reactCalls.push([args[0], args[1], args[3] === undefined ? null : args[3]]);
       return {ok: true};
     case 'get_reactions': return reactionsReply;
+    case 'get_plan_limits': return planLimitsReply;
+    case 'set_plan_brake':
+      brakeCalls.push(args[0]);
+      return planLimitsReply;
     case 'get_playbook': return {ok: true};
     case 'get_memory': memCalls.push([name, args[0]]); return memReply;
     case 'save_memory':
@@ -1527,6 +1536,48 @@ if (topLevelError) {
     p.otherChatNotPainted = rows() === 0;
     ctx.hideAllTyping();
   } catch (e) { more.workingError = (e && e.stack) || String(e); }
+
+  // ---- account PLAN quota strip (2026-08-28) -----------------------------
+  // Driven through the REAL `plan_limits` event and the REAL bridge call, not
+  // by setting planState directly: Wave 4's lesson is that a probe asserting a
+  // JS VARIABLE proves nothing about the path a payload actually takes.
+  try {
+    const q = more.plan = {};
+    const READING = {kind: 'seven_day', title: 'Weekly limit',
+                     utilization: 0.79, resets_at: 1788044400,
+                     reported_above: 0.75};
+    // byId + deepText, not textContent: this stub keeps a flat node list and
+    // a parent's textContent is not derived from its children.
+    const strip = () => byId['planStrip'];
+    // The api is a Proxy whose `get` trap ignores the target, so assigning a
+    // method onto it does nothing. Swap the REPLY the dispatcher returns.
+    const stub = (payload) => { planLimitsReply = payload; };
+    // Nothing reported -> the strip says NOTHING. An empty bar would read as
+    // "plenty left", the one lie this feature exists to prevent.
+    stub({limits: {}, threshold: null, worst: null, summary: '',
+          floor: null, note: ['No plan usage reported yet.']});
+    ctx.uiEvent({event: 'plan_limits', payload: {limits: {}}});
+    await new Promise(r => setTimeout(r, 0));
+    q.silentWhenNothingReported = !strip().className.includes('show');
+
+    stub({limits: {seven_day: READING}, threshold: 0.9, worst: READING,
+          summary: 'Weekly limit at 79%, resets in 1 day', floor: 0.75,
+          note: ['Plan usage now: Weekly limit at 79%.']});
+    ctx.uiEvent({event: 'plan_limits',
+                 payload: {limits: {seven_day: READING}}});
+    await new Promise(r => setTimeout(r, 0));
+    q.text = deepText(strip());
+    q.cls = strip().className;
+
+    const HOT = Object.assign({}, READING, {utilization: 0.97});
+    stub({limits: {seven_day: HOT}, threshold: 0.9, worst: HOT,
+          summary: 'Weekly limit at 97%, resets in 1 day', floor: 0.75,
+          note: []});
+    ctx.uiEvent({event: 'plan_limits', payload: {limits: {seven_day: HOT}}});
+    await new Promise(r => setTimeout(r, 0));
+    q.hotCls = strip().className;
+    q.hotText = deepText(strip());
+  } catch (e) { more.planError = (e && e.stack) || String(e); }
 
   // ---- richer live narration (2026-08-26) --------------------------------
   // The seat log used to be a grey wall of file names: no commentary, no
@@ -3251,6 +3302,37 @@ class UiBootTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls._tmp.cleanup()
+
+    # ---- account PLAN quota strip (2026-08-28) -------------------------
+    def _plan(self):
+        self.assertIsNone(self.report.get("planError"))
+        return self.report["plan"]
+
+    def test_nothing_reported_paints_no_quota_strip_at_all(self):
+        """A limit nobody reported is not 0%. An empty bar would read as
+        'plenty left', the one lie this feature exists to prevent."""
+        self.assertTrue(self._plan()["silentWhenNothingReported"])
+
+    def test_a_real_plan_limits_event_paints_the_number_and_the_reset(self):
+        p = self._plan()
+        self.assertIn("79%", p["text"])
+        self.assertIn("Weekly limit", p["text"])
+        self.assertIn("resets in 1 day", p["text"])
+        self.assertIn("show", p["cls"])
+
+    def test_the_strip_names_the_brake_it_will_be_judged_by(self):
+        self.assertIn("unattended brake 90%", self._plan()["text"])
+
+    def test_the_strip_warns_then_goes_red_as_the_quota_climbs(self):
+        """The tint rules are written AFTER the base rule on purpose:
+        `.msg-usage.ctx-tight` was authored beside the seat CSS, lost on
+        source order to a descendant selector, and the red pill silently
+        never turned red. Same shape, so it is pinned."""
+        p = self._plan()
+        self.assertIn("warn", p["cls"])
+        self.assertNotIn("tight", p["cls"])
+        self.assertIn("tight", p["hotCls"])
+        self.assertIn("97%", p["hotText"])
 
     # ---- the relay's own "I am working" indicator ----------------------
     def _working(self):

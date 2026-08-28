@@ -28,6 +28,7 @@ import export as export_mod
 import fork as fork_mod
 import memory as memory_mod
 import outcome
+import plan_limits
 import relay
 import retro as retro_mod
 import schedule as schedule_mod
@@ -687,6 +688,20 @@ class _AppIO(LoopIO):
                         "what": payload.get("what"),
                         "detail": payload.get("detail"),
                         "started": payload.get("started") or time.time()}
+        elif event == "plan_limits":
+            # ACCOUNT state, so it is lifted out of the run and into the one
+            # process-level store before it is forwarded. Merged, never
+            # replaced: a turn reports only the windows that crossed a
+            # threshold, so a lone seven_day reading must leave an earlier
+            # five_hour one standing (plan_limits.merge's rule).
+            incoming = payload.get("limits")
+            if isinstance(incoming, dict):
+                with self._api._limits_lock:
+                    snap = dict(self._api._plan_limits)
+                    for reading in incoming.values():
+                        snap = plan_limits.merge(snap, reading)
+                    self._api._plan_limits = snap
+                    payload["limits"] = snap
         self._api.emit(event, payload)
 
     def drain_human(self):
@@ -786,6 +801,13 @@ class Api:
         # set_event_hooks; underscore-prefixed like everything else here.
         self._hooks_lock = threading.Lock()
         self._hooks_cache = None
+        # The account's Anthropic PLAN quota (plan_limits.py). PROCESS-level,
+        # not per-run and never per-chat: it is the same number for every seat
+        # in every open conversation, so a per-run copy would be four copies
+        # of one fact drifting apart. Fed by whichever run last observed a
+        # reading; read by the chrome pill and by the unattended brake.
+        self._limits_lock = threading.Lock()
+        self._plan_limits = {}
         # Production-only opt-in for side calls that cost real CLI turns
         # (currently the one-shot auto-title). main() flips this; tests
         # instantiating Api directly stay token-free by construction.
@@ -1731,6 +1753,74 @@ class Api:
             fired.append((claimed["id"], ok, text))
         return fired
 
+    def _plan_brake_verdict(self, probe=True):
+        """May an unattended run start against the account's plan quota?
+
+        ONE decision function, called by the timer and by Run-now alike — a
+        second path around a safety control is how the control acquires a way
+        around itself. What differs is only the freshness of the measurement,
+        and for a documented reason: `probe` shells out, and Run-now arrives on
+        the pywebview BRIDGE THREAD, where a subprocess deadlocks the window
+        (the oldest rule in this file). So Run-now decides on the stored
+        snapshot. That is sound in the direction that matters — inside a quota
+        window utilization only climbs, so a stored reading is a LOWER BOUND
+        and refusing on it can never be spurious — and the case it weakens
+        (allowing on a stale reading) is the one where Josh is sitting there
+        having just pressed the button.
+
+        No brake configured means no probe at all: a run must never spend a CLI
+        call to check a limit nobody set.
+        """
+        try:
+            threshold = relay.read_plan_brake()["threshold"]
+        except Exception:
+            threshold = None
+        if threshold is None:
+            return True, "No plan-limit brake is set."
+        with self._limits_lock:
+            snap = dict(self._plan_limits)
+        if probe:
+            try:
+                for reading in (relay.probe_plan_limits() or {}).values():
+                    snap = plan_limits.merge(snap, reading)
+            except Exception:
+                pass
+            with self._limits_lock:
+                self._plan_limits = dict(snap)
+        return plan_limits.brake_verdict(snap, threshold)
+
+    def get_plan_limits(self):
+        """The account quota snapshot + the brake setting, for the UI.
+
+        Bridge-thread synchronous like get_skills: a dict read plus one small
+        JSON file, and deliberately NO probe — see _plan_brake_verdict.
+        """
+        with self._limits_lock:
+            snap = dict(self._plan_limits)
+        try:
+            threshold = relay.read_plan_brake()["threshold"]
+        except Exception:
+            threshold = None
+        return {
+            "limits": snap,
+            "threshold": threshold,
+            # Worst live limit and the wording, computed HERE so the pill, the
+            # schedule modal and the Keep Improving modal cannot each invent a
+            # different sentence for one number.
+            "worst": plan_limits.worst(snap),
+            "summary": plan_limits.summary(snap),
+            "floor": plan_limits.enforceable_floor(snap),
+            "note": plan_limits.brake_note(snap, threshold),
+        }
+
+    def set_plan_brake(self, threshold):
+        """Persist the unattended brake. Bounded file I/O, bridge-thread safe."""
+        try:
+            relay.write_plan_brake(threshold)
+        except Exception as exc:
+            return {"error": str(exc)}
+        return self.get_plan_limits()
+
     def _launch_schedule(self, rec, manual=False):
         """Turn one schedule into a running conversation. (ok, sentence).
 
@@ -1760,6 +1850,13 @@ class Api:
             # an unattended room at an unpredictable hour.
             return False, ("Skipped — another conversation was still "
                            "running.")
+        allow, why = self._plan_brake_verdict(probe=not manual)
+        if not allow:
+            # Checked HERE, not at save time, for the same reason the
+            # acknowledgement is: a threshold ticked in March cannot speak for
+            # a quota in August. Deliberately AFTER the busy check — a run
+            # that would have been skipped anyway must not spend a probe.
+            return False, why
         start = dict(cfg)
         start["opener"] = rec["prompt"]
         start["turns"] = rec["turns"]

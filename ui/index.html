@@ -1307,13 +1307,33 @@
     padding: 0; font: inherit; text-decoration: underline;
   }
   /* the live strip while a Keep Improving run is going */
-  #contStrip, #budgetStrip {
+  #contStrip, #budgetStrip, #planStrip {
     display: none; align-items: center; gap: 10px; padding: 5px 12px;
-    font: 11.5px "Cascadia Mono", Consolas, monospace; color: var(--muted);
+    font-family: "Cascadia Mono", Consolas, monospace;
+    font-size: 11.5px; color: var(--muted);
     border-bottom: 1px solid var(--line); background: var(--surface2);
   }
-  #contStrip.show, #budgetStrip.show { display: flex; }
-  #contStrip b, #budgetStrip b { color: var(--alloy); font-weight: 600; }
+  #contStrip.show, #budgetStrip.show, #planStrip.show { display: flex; }
+  #contStrip b, #budgetStrip b, #planStrip b {
+    color: var(--alloy); font-weight: 600;
+  }
+  /* A quota bar, on the same rule as the seat context bar it echoes. */
+  #planStrip .plan-bar {
+    width: 96px; height: 4px; border-radius: 3px; overflow: hidden;
+    background: var(--line); flex: none;
+  }
+  #planStrip .plan-fill { height: 100%; background: var(--alloy); }
+  /* Written AFTER the base rule and at equal-or-higher specificity on
+     purpose: `.msg-usage.ctx-tight` was authored up with the seat CSS, lost
+     on source order to `.msg-head .msg-usage`, and the red pill silently
+     never turned red. Same shape, so the same care. */
+  #planStrip.warn b, #planStrip.warn .plan-text { color: #e0a33c; }
+  #planStrip.warn .plan-fill { background: #e0a33c; }
+  #planStrip.tight b, #planStrip.tight .plan-text {
+    color: var(--danger, #e06c5c);
+  }
+  #planStrip.tight .plan-fill { background: var(--danger, #e06c5c); }
+  #planStrip .plan-brake { margin-left: auto; opacity: .8; }
   #contBanner {
     display: none; gap: 10px; align-items: flex-start; margin: 8px 0;
     padding: 9px 11px; border-radius: 8px; font-size: 12.5px; line-height: 1.45;
@@ -2395,6 +2415,11 @@
       </select>
     </div>
     <div id="budgetStrip" role="status" aria-label="Live budget"></div>
+    <!-- Account PLAN quota. Its own strip, never folded into #budgetStrip:
+         that one is this CHAT's spend and this is the whole account's, and
+         one row mixing the two invites reading the quota as something this
+         conversation caused. -->
+    <div id="planStrip" role="status" aria-label="Plan usage"></div>
     <div id="contStrip" role="status" aria-label="Keep Improving progress"></div>
     <div class="feed-wrap">
       <div id="contBanner" role="status"></div>
@@ -2851,6 +2876,19 @@
         <label id="schedAckLbl"><input type="checkbox" id="schedAck">
           <span id="schedAckText"></span></label>
       </div>
+      <!-- The plan-quota brake. OUTSIDE #schedGrants, which hides itself for
+           an innocuous room — the brake applies to every unattended fire, not
+           only risky ones, and a control inside a container that hides itself
+           is invisible exactly when it matters (#queueNote's lesson). -->
+      <div class="sched-field" id="schedBrakeRow">
+        <label for="schedBrake">Refuse unattended runs above</label>
+        <!-- text, never type="number": WebView2 draws duplicate spinners and
+             reports "" for partial input, which makes clamp-on-blur lie
+             (the #rVal lesson). -->
+        <input type="text" id="schedBrake" class="mono" spellcheck="false"
+               inputmode="numeric" placeholder="off (e.g. 90)">
+      </div>
+      <div class="kbd-note" id="schedBrakeNote"></div>
       <div class="kbd-note"><span id="schedNote"></span></div>
       <div id="schedBtns">
         <button id="schedSave">Save schedule</button>
@@ -2951,6 +2989,11 @@
       and when they finish a job the manager invents the next one and starts again.
       Nobody reviews the work between rounds unless you set the check-in to ask you.
       Permissions in force: <span id="contPerm"></span>.
+      <!-- Plan quota. On a flat-rate plan the binding constraint on a run with
+           no round cap is the QUOTA, not the money, so the spend cap below
+           cannot see it — which is exactly why this sentence is here and not
+           left to the budget strip. -->
+      <div id="contPlan"></div>
     </div>
 
     <label class="cont-label" for="contMinutes">Check in every</label>
@@ -5540,6 +5583,12 @@ window.uiEvent = packet => {
     strip.classList.toggle("show", !!strip.textContent);
   } else if (event === "usage") {
     budgetApply(payload);
+  } else if (event === "plan_limits") {
+    // Deliberately NOT gated on "is this the chat on screen": the account's
+    // quota is the same fact whichever conversation observed it, and dropping
+    // a background run's reading would leave the strip stale exactly during
+    // the unattended runs it exists to warn about.
+    applyPlanLimits(payload);
   } else if (event === "checkin") {
     showContBanner(payload.text || "The scheduled check-in ran.");
   } else if (event === "scheduled") {
@@ -5801,6 +5850,13 @@ function paintContModal() {
   const perm = $("permissionMode");
   $("contPerm").textContent =
     perm.options[perm.selectedIndex] ? perm.options[perm.selectedIndex].text : "";
+  // The account's quota, stated where the other unattended limits are stated.
+  // Silent when nothing has been reported: "no reading" is not "0%", and a
+  // reassuring blank here would be the worst possible lie in this modal.
+  const planBox = $("contPlan");
+  if (planBox) planBox.textContent = planState.summary
+    ? "Plan usage now: " + planState.summary + "."
+    : "";
   readContModal();
 }
 function openContinuous(fromCard) {
@@ -5812,6 +5868,8 @@ function openContinuous(fromCard) {
   // The gate command and the dirty flag need a subprocess, which cannot run on
   // the bridge thread — ask now, paint when the answer arrives.
   try { pywebview.api.continuous_probe(customFolder || ""); } catch (e) {}
+  // Refresh then repaint: the modal must not quote a quota from this morning.
+  refreshPlanLimits().then(paintContModal);
   paintContModal();
   $("contModal").classList.add("show");
 }
@@ -5979,6 +6037,83 @@ function budgetRestore(usage) {
             bySeat: usage.by_seat || {},
             tokens: usage.total_tokens || 0};
   budgetPaint();
+}
+
+/* ---- account PLAN quota (plan_limits.py) --------------------------------
+   Account-level, not per-chat: one module-level snapshot, repainted from
+   whichever run last observed a reading, and never cleared by opening or
+   switching a conversation. `planState.limits` empty means NOTHING WAS
+   REPORTED, which is not 0% — the strip stays hidden rather than drawing an
+   empty bar that would read as "plenty left". */
+let planState = {limits: {}, threshold: null, worst: null, summary: "",
+                 floor: null, note: []};
+const PLAN_WARN = 0.75, PLAN_TIGHT = 0.9;
+function planPct(u) {
+  // Mirrors plan_limits.pct: round toward the scary side, so a number shown
+  // as 79% is never the one a 79% brake just refused.
+  if (typeof u !== "number" || !isFinite(u)) return null;
+  return Math.ceil(u * 100 - 1e-9) + "%";
+}
+function planStripText(st) {
+  st = st || {};
+  const w = st.worst;
+  if (!w || typeof w.utilization !== "number") return "";
+  const bits = [(w.title || "Plan limit") + " " + planPct(w.utilization)];
+  if (w.overage) bits.push("using overage");
+  if (st.summary && st.summary.indexOf("resets") >= 0) {
+    const m = /resets ([^,\-]+)/.exec(st.summary);
+    if (m) bits.push("resets " + m[1].trim());
+  }
+  return bits.join(" · ");
+}
+function planPaint() {
+  const el = $("planStrip");
+  if (!el) return;
+  const text = planStripText(planState);
+  if (!text) {                       // nothing reported — say nothing
+    el.replaceChildren();
+    el.classList.remove("show", "warn", "tight");
+    el.removeAttribute("title");
+    return;
+  }
+  const w = planState.worst || {};
+  const share = typeof w.utilization === "number" ? w.utilization : 0;
+  el.replaceChildren();
+  const bar = document.createElement("div");
+  bar.className = "plan-bar";
+  const fill = document.createElement("div");
+  fill.className = "plan-fill";
+  fill.style.width = Math.max(0, Math.min(100, share * 100)) + "%";
+  bar.appendChild(fill);
+  const label = document.createElement("b");
+  label.textContent = text;
+  el.appendChild(bar);
+  el.appendChild(label);
+  if (planState.threshold != null) {
+    const brake = document.createElement("span");
+    brake.className = "plan-brake plan-text";
+    brake.textContent = "unattended brake " + planPct(planState.threshold);
+    el.appendChild(brake);
+  }
+  el.title = (planState.note || []).join("\n")
+    || "Anthropic plan usage for this account.";
+  el.classList.toggle("warn", share >= PLAN_WARN && share < PLAN_TIGHT);
+  el.classList.toggle("tight", share >= PLAN_TIGHT || !!w.overage);
+  el.classList.add("show");
+}
+// A live reading. The engine sends the whole merged snapshot, but `worst` and
+// the wording are computed python-side so the strip, the schedule modal and
+// the Keep Improving modal cannot each invent a different sentence for one
+// number — so a bare event refreshes from the bridge rather than re-deriving.
+function applyPlanLimits(p) {
+  if (p && p.limits && typeof p.limits === "object") planState.limits = p.limits;
+  refreshPlanLimits();
+}
+async function refreshPlanLimits() {
+  try {
+    const got = await pywebview.api.get_plan_limits();
+    if (got && !got.error) { planState = got; planPaint(); }
+  } catch (e) { /* a readout must never break the app */ }
 }
 function showContBanner(text) {
   const box = $("contBanner");
@@ -11022,8 +11157,32 @@ async function loadSched() {
 async function openSched() {
   schedBuildDays();
   $("schedModal").classList.add("show");
+  await refreshPlanLimits();
+  paintSchedBrake();
   await loadSched();
   if (!schedEditId) schedClear();
+}
+// The brake is ONE account-wide setting, not a per-schedule field: it lives in
+// this modal because this is where unattended runs are configured, and it
+// saves on change rather than with the schedule so nothing implies otherwise.
+function paintSchedBrake() {
+  const box = $("schedBrake");
+  if (!box) return;
+  if (document.activeElement !== box)
+    box.value = planState.threshold != null
+      ? String(Math.round(planState.threshold * 100)) : "";
+  const note = $("schedBrakeNote");
+  if (note) note.textContent = (planState.note || []).join(" ");
+}
+async function commitSchedBrake() {
+  const raw = ($("schedBrake").value || "").trim();
+  try {
+    // "" means OFF — a legitimate, common choice, so it is saved rather than
+    // refused. python normalizes; junk becomes off, never a 0% brake.
+    const got = await pywebview.api.set_plan_brake(raw === "" ? null : raw);
+    if (got && !got.error) { planState = got; planPaint(); }
+  } catch (e) { /* never break the modal over a setting */ }
+  paintSchedBrake();
 }
 
 async function saveSched() {
@@ -11131,6 +11290,9 @@ applyPreset("open_discussion");
   $(id).onchange = readContModal;
   $(id).onblur = readContModal;
 });
+// Plan-quota brake: commit on blur/change, like every other text setting here.
+$("schedBrake").onchange = commitSchedBrake;
+$("schedBrake").onblur = commitSchedBrake;
 ["contSpendOn", "contHoursOn", "contWatchdogStop", "contCommit",
  "contAllowDirty"].forEach(id => { $(id).onchange = readContModal; });
 // a limit input answers for itself only once its checkbox arms it — until
@@ -11205,6 +11367,9 @@ window.addEventListener("pywebviewready", async () => {
   uiCfg = await pywebview.api.get_config();
   applyDictationConfig(uiCfg.dictation);
   applySpeakerConfig(uiCfg.speaker);
+  // Account quota: a plain read, no probe, no CLI call. Fire-and-forget so a
+  // slow disk cannot delay the first paint of the app.
+  refreshPlanLimits();
   gptModels = uiCfg.gpt_models;
   geminiFamilies = uiCfg.gemini_families;
   seats.forEach(fillSeat);
