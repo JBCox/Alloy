@@ -325,9 +325,10 @@ says about that same folder:
   blank rather than showing 0 — an untracked file and a binary file both
   genuinely have no line count, and "+0" would be a claim.
 - **Recent commits** lists the last 30 that touched this folder, newest
-  first. A commit the wave gate made — Alloy's own checkpoint of a green
-  wave — is marked **⛭**, so an overnight run's checkpoints stand apart from
-  your own; clicking one shows that commit's patch, scoped to this folder.
+  first. Alloy's own commits are marked so an overnight run's history stands
+  apart from yours: **⛭** a wave-gate checkpoint, **↺** a restore, **◆** work
+  saved before a restore. Clicking a row shows that commit's patch, scoped to
+  this folder.
 - When there is nothing to show it says **which** nothing: not a repository,
   a folder that has been deleted, git not installed, or git refusing to open
   the repo — in which case git's own explanation is passed through, because
@@ -336,9 +337,52 @@ says about that same folder:
   `sessions/`) is told that git ignores the folder rather than that it is
   "clean".
 
-Everything here is read-only: Alloy never commits, stages or reverts from
-this tab, and a patch too big for the pane is cut on a line boundary and
-says so.
+Reading is all this tab does by itself — a patch too big for the pane is cut
+on a line boundary and says so — with one deliberate exception, below.
+
+## Putting the folder back
+
+Every green wave is already a commit, so the half that was missing was the
+way back. Each row under **Recent commits** carries a **⟲** button: it opens
+a card in the pane naming every file that would change, and only then offers
+the button that does it.
+
+A restore **never moves the branch and never deletes a commit**. It makes up
+to two new ones:
+
+1. If the folder has uncommitted work, that is committed first as
+   **alloy saved: …**. This matters because the case you actually want a
+   restore for — an overnight run that went red — is exactly the case where
+   the last wave's work was never committed. Refusing on a dirty tree would
+   refuse in the only scenario that counts, and `git stash` would put the
+   work somewhere this app cannot show you.
+2. Then the folder's tracked files are made to match the checkpoint, and that
+   is committed as **alloy restore: …**.
+
+So the way back out of a restore is the same button: restore to the
+**alloy saved** commit and the work is on disk again. (The card says which
+commit that is, because the last *committed* state is precisely the one that
+does not hold it.)
+
+What a restore does not touch, and the card says so before you press it:
+files git ignores, anything outside the working folder — including a parent
+repository's other files and its staged changes — and any other branch.
+
+It refuses, by name, when: a conversation is running in that folder or in a
+folder containing it (stop it first — restoring under a seat mid-turn
+overwrites its work); the folder already matches that commit; git has no name
+and email configured to commit with; the repository moved while the card was
+open; the folder is one git ignores; it holds a submodule, whose files a
+restore can only point at rather than put back; a merge is in progress with
+unresolved conflicts; or the checkpoint is **older than the working folder
+itself**, where a restore would delete the folder out from under the app.
+Every one of those is re-checked at the moment you press the button, never
+trusted from the card.
+
+And when git says it worked but did not — it only *warns* when something else
+on the machine is holding a file open, so the exit code is a lie — the result
+is checked rather than believed: nothing is committed, the folder is reported
+as part-way, and the files still not back are named.
 
 ## How it ends
 

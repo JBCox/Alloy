@@ -17,6 +17,10 @@ assets that already exist and currently have no surface.
 The biggest gap today: after an overnight Keep Improving run, Josh has commits
 and a transcript, and **no in-app way to see what actually changed.**
 
+*(#1 shipped 2026-08-29 as the Changes tab; #2 shipped 2026-09-05 — see
+CLAUDE.md § Checkpoint and rewind. #12, #13, #15, #16, #20, #26 and #27
+shipped earlier. Grep the code before building anything else from this list.)*
+
 1. **Diff lane** — a right-rail tab beside Files showing `git diff` per wave
    (and per commit `gate_commit` made), file tree plus hunks, provider-colored
    by which seat's workstream claimed the file. Hooks: `_git` / `_gate_run`

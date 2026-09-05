@@ -155,19 +155,19 @@ class OverviewTests(RepoBase):
         branch = relay.git_overview(self.ws)["branch"]
         self.assertTrue(branch.startswith("detached @ "), branch)
 
-    def test_commits_newest_first_with_gate_flag(self):
+    def test_commits_newest_first_with_gate_mark(self):
         self.seed()
         commits = relay.git_overview(self.ws)["commits"]
         self.assertEqual(commits[0]["subject"], "alloy: first wave")
-        self.assertTrue(commits[0]["gate"])
+        self.assertEqual(commits[0]["mark"], "gate")
         self.assertIsInstance(commits[0]["when"], int)
         self.assertRegex(commits[0]["sha"], r"^[0-9a-f]{4,40}$")
 
-    def test_non_gate_commit_is_not_flagged(self):
+    def test_somebody_elses_commit_carries_no_mark(self):
         write(self.ws, "a.txt", "one\n")
         self.commit("plain human commit")
         commits = relay.git_overview(self.ws)["commits"]
-        self.assertFalse(commits[0]["gate"])
+        self.assertEqual(commits[0]["mark"], "")
 
     def test_unborn_head_is_a_repo_with_no_commits(self):
         # rev-parse HEAD exits 128 here exactly like a non-repo (measured);

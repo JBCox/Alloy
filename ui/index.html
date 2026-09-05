@@ -1851,7 +1851,43 @@
   /* diff colors are the APP's chrome, never a provider's — a hunk is not a seat */
   .cadd { color: #7CBE8C; }
   .cdel { color: var(--danger); }
-  .chg-row .cgate { flex: 0 0 auto; color: var(--alloy); font-size: 10px; }
+  /* One mark per commit, not a flag per kind: gate ⛭, restore ↺, saved ◆ */
+  .chg-row .cmark { flex: 0 0 auto; color: var(--alloy); font-size: 10px; }
+  /* Dim rather than hidden. A control nobody can find is a control that does
+     nothing, and .copy-btn already taught this page that opacity:0 hides a
+     button exactly when it matters (2026-08-27). */
+  .chg-row .crst { flex: 0 0 auto; background: none; border: 0; padding: 0 2px;
+    color: var(--muted); font-size: 11px; line-height: 1; cursor: pointer;
+    opacity: .45; }
+  .chg-row:hover .crst { opacity: 1; }
+  .chg-row .crst:hover, .chg-row .crst:focus-visible { color: var(--alloy); }
+  /* ---------- the restore card (rendered into #codeBody) ---------- */
+  /* The card is PROSE inside a monospace pane, so it takes the page's own
+     font back explicitly. Found by driving the real window: #codeBody is
+     monospace and everything here inherited it, including the heading and
+     the two sentences of safety wording — the node harness has no cascade
+     and reported the markup as perfect. */
+  .rst { padding: 10px 12px; font-size: 12.5px; line-height: 1.5;
+    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+  .rst h4 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--text); }
+  .rst .rst-sub { color: var(--muted); margin-bottom: 8px; }
+  .rst .rst-sect { margin: 10px 0 3px; color: var(--muted); font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: .06em; }
+  /* Only the PATH is monospace: the verb beside it is a word, and putting
+     the shorthand on the row would have made "revert" a code sample. */
+  .rst .rst-file { display: flex; gap: 8px; align-items: baseline;
+    font-size: 11.5px; padding: 1px 0; }
+  .rst .rst-verb { flex: 0 0 74px; color: var(--muted); font-size: 10.5px; }
+  .rst .rst-name { flex: 1; min-width: 0; overflow-wrap: anywhere;
+    font: 11.5px "Cascadia Mono", Consolas, monospace; }
+  .rst .rst-note { color: var(--muted); margin-top: 10px; }
+  .rst .rst-warn { color: var(--danger); margin-top: 8px; }
+  .rst .rst-ok { color: #7CBE8C; }
+  .rst-go { margin-top: 12px; padding: 6px 12px; border-radius: 9px;
+    border: 1px solid var(--danger); background: transparent;
+    color: var(--danger); font-size: 12.5px; cursor: pointer; }
+  .rst-go:hover:not(:disabled) { background: rgba(199,91,91,.12); }
+  .rst-go:disabled { opacity: .5; cursor: default; }
   #codeBody .cl.dadd { background: rgba(124,190,140,.10); color: #A9D9B4; }
   #codeBody .cl.ddel { background: rgba(199,91,91,.10); color: #DFA0A0; }
   #codeBody .cl.dhunk { color: #8AA6D9; }
@@ -5391,6 +5427,14 @@ window.uiEvent = packet => {
   // still respects the gate — a background chat's work is not this
   // transcript's business.
   if (event === "working" && payload.done) hideWorking(payload.id);
+  // Same rule, same reason: `diffBusy` is a one-in-flight latch, and the
+  // answer that clears it is routed to a CHAT. Switch chats while a get_diff
+  // is out and the answer is dropped by the gate below, the latch is never
+  // released, and the Changes tab is dead — no refresh, no post-restore
+  // update — for the rest of the session. Clearing a latch nobody set is a
+  // no-op, which is what makes this safe above the routing; the RENDER and
+  // the retry stay inside the gate, where they belong.
+  if (event === "diff") diffBusy = false;
   // A chat this window did not start from the visible stage stamps every
   // event `background`. Before it has an id there is not even a rail row to
   // update, so its setup failures are dropped here rather than painted onto
@@ -5624,7 +5668,7 @@ window.uiEvent = packet => {
     // answer than the one already on screen is dropped too: these are worker
     // threads with no ordering, and a stale snapshot repainted as current is
     // the one thing this panel must never do.
-    diffBusy = false;
+    // (diffBusy was released above the routing gate — see uiEvent's preamble)
     const seq = payload.seq;
     if (seq === undefined || seq === null || seq >= diffShown) {
       if (seq !== undefined && seq !== null) diffShown = seq;
@@ -5634,10 +5678,20 @@ window.uiEvent = packet => {
   } else if (event === "file_diff") {
     // Two clicks in a row race on worker threads: the payload echoes the
     // request key, and an answer for a request no longer displayed is dropped.
-    if (diffMode &&
+    if (diffMode && !diffMode.restore &&
         (payload.path || null) === (diffMode.path || null) &&
         (payload.sha || null) === (diffMode.sha || null))
       renderDiffText(payload);
+  } else if (event === "restore_preview") {
+    // Same race, same rule: an answer for a commit the pane is no longer
+    // asking about is dropped rather than painted over the current card.
+    if (diffMode && diffMode.restore === payload.request_sha)
+      renderRestore(payload);
+  } else if (event === "restored") {
+    // Deliberately NOT gated on the pane (only on the chat, by the routing
+    // above): the folder on disk really did change, so both rail lanes are
+    // stale even if the card was closed while the restore ran.
+    renderRestored(payload);
   } else if (event === "continuous_probe") {
     // The modal asked; this is the answer. Only fill a gate command the user
     // has not typed over — a detection must never overwrite a real choice.
@@ -9584,6 +9638,49 @@ const DIFF_REASONS = {
   error: "Could not read this folder.",
 };
 
+// Alloy's own commits, named. One entry per engine `mark` value — a commit is
+// one kind of thing, so this is a lookup and not three booleans.
+const COMMIT_MARKS = {
+  gate: ["⛭", "Checkpointed by the wave gate"],
+  restore: ["↺", "Made by a restore"],
+  saved: ["◆", "Uncommitted work saved before a restore"],
+};
+
+// Why a restore cannot happen, in words. Same convention as DIFF_REASONS:
+// the engine answers with a reason precisely so this can be a true sentence.
+const RESTORE_REASONS = {
+  ignored: "git ignores this folder, so there is nothing here it can restore.",
+  bad_sha: "That commit is not in this repository any more.",
+  unborn: "This repository has no commits yet.",
+  no_folder: "That checkpoint is older than this working folder — restoring " +
+             "to it would delete the folder itself.",
+  no_identity: "git has no name and email to commit with. Set them with " +
+               "git config user.name and user.email, then try again.",
+  same: "The working folder already matches that commit.",
+  busy: "A conversation is running in this working folder. Stop it first — " +
+        "restoring while seats are writing would overwrite their work mid-turn.",
+  starting: "A conversation is still starting up. Try again in a moment — " +
+            "until it has a working folder there is no way to tell whether " +
+            "it is this one.",
+  moved: "This folder changed while the card was open. Reopen it to see " +
+         "what a restore would do now.",
+  conflict: "This folder has a merge in progress with unresolved conflicts. " +
+            "Finish or abort the merge first — saving the work first would " +
+            "stage the conflict markers and throw the merge away. Conflicted:",
+  submodule: "This folder contains a submodule, and a restore can only move " +
+             "the pointer, not the other repository's files — so it could " +
+             "not put the folder back. Submodule:",
+  // The files really moved for these two: the sentences say so, and
+  // renderRestored refreshes the rail lanes for them like a success.
+  partial: "git could not replace every file — something on this machine is " +
+           "probably holding one open. Nothing was committed, so the folder " +
+           "is part-way there. Still not restored:",
+  save_failed: "Your uncommitted work could not be saved, so the folder was " +
+               "left as it is (git may have staged the files while trying).",
+  restore_failed: "git could not restore the files.",
+  commit_failed: "The files were restored, but the commit recording it failed.",
+};
+
 function railTabSet(which) {
   railTab = which;
   $("ftFiles").classList.toggle("on", which === "files");
@@ -9711,12 +9808,21 @@ function renderChanges(p, errText) {
       const sub = document.createElement("span");
       sub.className = "cpath"; sub.textContent = c.subject;
       row.appendChild(sha); row.appendChild(sub);
-      if (c.gate) {
+      const m = COMMIT_MARKS[c.mark];
+      if (m) {
         const g = document.createElement("span");
-        g.className = "cgate"; g.textContent = "⛭";
-        g.title = "Checkpointed by the wave gate";
+        g.className = "cmark"; g.textContent = m[0];
+        g.title = m[1];
         row.appendChild(g);
       }
+      const rb = document.createElement("button");
+      rb.className = "crst"; rb.textContent = "⟲";
+      rb.title = "Restore the working folder to this commit";
+      rb.setAttribute("aria-label", "Restore the working folder to " + c.sha);
+      // stopPropagation or the same click reaches the row and opens the diff
+      // underneath the card we just asked for (the rail's `«` lesson)
+      rb.onclick = e => { e.stopPropagation(); openRestore(c.sha); };
+      row.appendChild(rb);
       row.onclick = () => openDiff({ sha: c.sha });
       list.appendChild(row);
     });
@@ -9799,6 +9905,214 @@ function renderDiffText(p) {
     n.textContent = "Diff truncated — the whole patch is bigger than this pane holds.";
     body.appendChild(n);
   }
+}
+
+/* ---------- restore (checkpoint and rewind) ---------- */
+// Clicking ⟲ on a commit opens a CARD in the same pane the diffs use — this
+// is another reading of the folder, in alloy chrome, not a seat's. The card
+// is the confirmation: it names every file, both commits a restore makes, and
+// how to undo it, and only then offers the button. Bridge: restore_preview /
+// restore_workspace, answering as the 'restore_preview' and 'restored' events.
+function openRestore(sha) {
+  diffMode = { restore: sha };   // the pane is OURS now, not a diff's
+  diffSelKey = "s:" + sha;
+  paintDiffSel();
+  codeFile = null; codeProv = null; codeLines = null; codeText = null;
+  $("fileRail").classList.add("code-open");
+  $("codePane").style.setProperty("--who", "var(--alloy)");
+  const title = "restore to " + sha;
+  $("codeTitle").textContent = title;
+  $("codeTitle").title = title;
+  const body = $("codeBody");
+  body.innerHTML = "";
+  const n = document.createElement("div");
+  n.className = "code-note"; n.textContent = "Working out what would change…";
+  body.appendChild(n);
+  if (!window.pywebview) return;
+  pywebview.api.restore_preview(sha, activeId)
+    .then(r => { if (r?.error) restoreNote(r.error); })
+    .catch(() => {});
+}
+
+// Returns whether it actually painted: the pane may have moved on to a diff
+// or a live file, and a caller answering a pressed button needs to know that
+// its sentence went nowhere.
+function restoreNote(text) {
+  const body = $("codeBody");
+  if (!body || !diffMode || !diffMode.restore) return false;
+  body.innerHTML = "";
+  const n = document.createElement("div");
+  n.className = "code-note";
+  n.textContent = text;
+  body.appendChild(n);
+  return true;
+}
+
+// Both rail lanes read the folder, so both are stale the moment it changes.
+// resetEditing() is deliberately NOT called beside imgCache.clear() here,
+// unlike every other site: that pairing exists for a workspace BOUNDARY
+// change, and closing the code pane would delete the very card this result
+// was just rendered into. The boundary has not moved — only its contents.
+function restoreRailRefresh() {
+  if (railTab === "changes") refreshDiff();
+  scheduleFilesRefresh(0);
+  imgCache.clear();
+}
+
+function restoreFileList(card, title, rows, verbOf, truncated, total) {
+  const s = document.createElement("div");
+  s.className = "rst-sect"; s.textContent = title;
+  card.appendChild(s);
+  rows.forEach(f => {
+    const r = document.createElement("div");
+    r.className = "rst-file";
+    const v = document.createElement("span");
+    v.className = "rst-verb"; v.textContent = verbOf(f);
+    const p = document.createElement("span");
+    p.className = "rst-name"; p.textContent = f.path;
+    r.appendChild(v); r.appendChild(p);
+    card.appendChild(r);
+  });
+  if (truncated) {
+    const n = document.createElement("div");
+    n.className = "rst-note";
+    n.textContent = "…and " + (total - rows.length) + " more.";
+    card.appendChild(n);
+  }
+}
+
+function renderRestore(p) {
+  const body = $("codeBody");
+  if (!body || !diffMode || !diffMode.restore) return;
+  if (!p.ok) {
+    let text = RESTORE_REASONS[p.reason] || DIFF_REASONS[p.reason] ||
+               "This folder cannot be restored.";
+    if (p.detail && p.reason !== "same" && p.reason !== "busy")
+      text += " " + p.detail;
+    restoreNote(text);
+    return;
+  }
+  body.innerHTML = "";
+  const card = document.createElement("div");
+  card.className = "rst";
+  const h = document.createElement("h4");
+  h.textContent = "Restore this folder to " + p.sha;
+  card.appendChild(h);
+  const sub = document.createElement("div");
+  sub.className = "rst-sub";
+  sub.textContent = (p.subject || "(no subject)") +
+    (p.when ? " · " + new Date(p.when * 1000).toLocaleString() : "") +
+    (p.behind ? " · " + p.behind + " commit" + (p.behind === 1 ? "" : "s") +
+                " of work in this folder since then" : "");
+  card.appendChild(sub);
+
+  if (p.save_total)
+    restoreFileList(card,
+      "First, your uncommitted work is saved as a commit",
+      p.save, f => f.status === "??" ? "new" : f.status,
+      p.save_truncated, p.save_total);
+  restoreFileList(card,
+    "Then " + p.total + " file" + (p.total === 1 ? "" : "s") + " change",
+    p.changes, f => f.verb, p.truncated, p.total);
+
+  const note = document.createElement("div");
+  note.className = "rst-note";
+  // The whole safety story in the sentences it actually takes. Nothing here
+  // rewrites history, so the way back is the button he is already using —
+  // but WHICH commit is the way back depends on whether there is uncommitted
+  // work. p.head is the last COMMITTED state, i.e. the one commit that does
+  // NOT hold that work, so naming it in both branches would point Josh at the
+  // one recovery that throws away what the save step exists to keep. The save
+  // commit has no sha yet at preview time, so it is named by its mark.
+  note.textContent =
+    "Nothing is deleted from history: this adds " +
+    (p.save_total
+      ? "two new commits and leaves the branch where it is. The way back to " +
+        "the folder exactly as it is now is the “alloy saved” commit this " +
+        "makes — restoring to " + p.head + " would give you the last commit " +
+        "instead, without the uncommitted work."
+      : "one new commit and leaves the branch where it is, so restoring to " +
+        p.head + " puts it back.") +
+    " Files git ignores are not touched, and nothing outside this working " +
+    "folder is either.";
+  card.appendChild(note);
+  if (!p.ancestor) {
+    const w = document.createElement("div");
+    w.className = "rst-warn";
+    w.textContent = "That commit is not an ancestor of this branch — it is " +
+      "from a different line of history.";
+    card.appendChild(w);
+  }
+  if (p.detached) {
+    const w = document.createElement("div");
+    w.className = "rst-warn";
+    w.textContent = "HEAD is detached, so the commits this makes will not be " +
+      "on any branch — checking a branch out afterwards would leave them " +
+      "unreferenced.";
+    card.appendChild(w);
+  }
+  const go = document.createElement("button");
+  go.className = "rst-go";
+  go.textContent = "Restore these files";
+  go.onclick = () => doRestore(go, p);
+  card.appendChild(go);
+  body.appendChild(card);
+}
+
+function doRestore(btn, p) {
+  btn.disabled = true;
+  btn.textContent = "Restoring…";
+  if (!window.pywebview) return;
+  // `head` is what the card was computed against: the engine refuses if the
+  // repository moved while it was open, rather than acting on stale numbers.
+  pywebview.api.restore_workspace(p.sha, p.head, activeId)
+    .then(r => { if (r?.error) restoreNote(r.error); })
+    .catch(() => {});
+}
+
+function renderRestored(p) {
+  // "The folder moved" is the trigger for the rail refresh and for the
+  // fallback message below, NOT "it worked": `commit_failed` and `partial`
+  // both rewrite files and then fail, and gating on p.ok left both lanes
+  // showing the folder as it was before.
+  const moved = !!(p.ok || p.files_restored);
+  if (!p.ok) {
+    let text = RESTORE_REASONS[p.reason] || DIFF_REASONS[p.reason] ||
+               "The restore did not happen.";
+    if (p.left && p.left.length) text += " " + p.left.join(", ") + ".";
+    else if (p.detail && p.reason !== "busy" && p.reason !== "starting")
+      text += " " + p.detail;
+    if (p.saved)
+      text += " Your uncommitted work was saved as commit " + p.saved +
+              " and is still there.";
+    // A pressed button always gets an answer. restoreNote paints only while
+    // the card is still up, so a refusal that arrives after Josh clicked a
+    // file row would otherwise vanish with nothing on screen ever saying the
+    // restore did not happen.
+    if (!restoreNote(text)) addMsg("system", "relay", text, "");
+    if (moved) restoreRailRefresh();
+    return;
+  }
+  const body = $("codeBody");
+  if (body && diffMode && diffMode.restore) {
+    body.innerHTML = "";
+    const card = document.createElement("div");
+    card.className = "rst";
+    const h = document.createElement("h4");
+    h.className = "rst-ok";
+    h.textContent = "Restored to " + p.sha;
+    card.appendChild(h);
+    const d = document.createElement("div");
+    d.textContent = p.files + " file" + (p.files === 1 ? "" : "s") +
+      " changed, committed as " + p.commit +
+      (p.saved ? ". Your " + p.saved_files + " uncommitted file" +
+                 (p.saved_files === 1 ? " was" : "s were") +
+                 " saved first as commit " + p.saved +
+                 " — restore to that one to get them back." : ".");
+    card.appendChild(d);
+    body.appendChild(card);
+  }
+  restoreRailRefresh();   // the folder on disk just changed
 }
 
 $("ftFiles").onclick = () => railTabSet("files");

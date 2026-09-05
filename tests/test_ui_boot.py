@@ -617,6 +617,8 @@ function apiReply(name, args) {
     case 'list_workspace_files': return [];
     case 'get_diff':
     case 'get_file_diff':
+    case 'restore_preview':
+    case 'restore_workspace':
       diffCalls.push([name].concat(args)); return diffReply;
     case 'list_runs': return {runs: []};
     case 'folder_exists': return false;
@@ -3096,9 +3098,9 @@ if (topLevelError) {
       ],
       commits: [
         {sha: 'abc1234', when: 1788042441, subject: 'alloy: first wave',
-         gate: true},
+         mark: 'gate'},
         {sha: 'def5678', when: 1788042000, subject: 'human commit',
-         gate: false},
+         mark: ''},
       ]}});
     const rows = byId['changesList'].children
       .filter(c => (c.className || '').indexOf('chg-row') >= 0);
@@ -3107,7 +3109,10 @@ if (topLevelError) {
     p.firstRowText = deepText(rows[0]);
     p.untrackedRowText = deepText(rows[1]);   // must carry no "+0"/"−0"
     p.gateMarks = rows.filter(r => (r.children || []).some(
-      c => (c.className || '').indexOf('cgate') >= 0)).length;
+      c => (c.className || '').indexOf('cmark') >= 0 &&
+           c.textContent === '⛭')).length;
+    p.restoreButtons = rows.filter(r => (r.children || []).some(
+      c => (c.className || '').indexOf('crst') >= 0)).length;
     // (c) clicking a file row opens the pane and asks for that file's diff
     const before2 = diffCalls.length;
     rows[0].onclick();
@@ -3173,6 +3178,163 @@ if (topLevelError) {
     p.filesBack = !byId['fileList'].hidden;
     ctx.closeCode();
   } catch (e) { more.changesError = (e && e.stack) || String(e); }
+
+  // ---- restore (checkpoint and rewind): the ⟲ button, the card, the
+  // stale-answer drop, and what the refusals actually say ----
+  try {
+    const p = more.restore = {};
+    await ctx.newChat();
+    ctx.railTabSet('changes');
+    ctx.uiEvent({event: 'diff', payload: {
+      git: true, branch: 'alloybr', prefix: 'ws', ignored: false, dirty: [],
+      commits: [
+        {sha: 'aaa1111', when: 1788042441, subject: 'alloy restore: x (bbb)',
+         mark: 'restore'},
+        {sha: 'bbb2222', when: 1788042000, subject: 'alloy: wave one',
+         mark: 'gate'},
+      ]}});
+    const rows = vm.runInContext(
+      "Array.from(document.querySelectorAll('#changesList .chg-row'))", ctx);
+    p.markGlyphs = rows.map(r => (r.children || [])
+      .filter(c => (c.className || '').indexOf('cmark') >= 0)
+      .map(c => c.textContent).join(''));
+    // (a) ⟲ asks for a preview and does NOT also open the diff underneath
+    const before = diffCalls.length;
+    const btn = (rows[1].children || []).find(
+      c => (c.className || '').indexOf('crst') >= 0);
+    let bubbled = false;
+    btn.onclick({stopPropagation() { bubbled = true; }});
+    p.stopped = bubbled;
+    p.askedPreview = diffCalls.slice(before).map(c => c[0]);
+    p.paneOpen = byId['fileRail'].classList.contains('code-open');
+    // (b) an answer for a DIFFERENT commit must not paint this card
+    ctx.uiEvent({event: 'restore_preview', payload: {
+      ok: true, request_sha: 'zzz9999', sha: 'zzz9999', subject: 'other',
+      head: 'hhh', changes: [{path: 'nope.txt', verb: 'remove'}], total: 1,
+      save: [], save_total: 0, ancestor: true}});
+    p.staleIgnored = deepText(byId['codeBody']).indexOf('nope.txt') < 0;
+    // (c) the real card: both file lists, the undo sentence, and the button
+    ctx.uiEvent({event: 'restore_preview', payload: {
+      ok: true, request_sha: 'bbb2222', sha: 'bbb2222',
+      subject: 'alloy: wave one', when: 1788042000, head: 'aaa1111',
+      prefix: 'ws', behind: 2, ancestor: true, detached: false,
+      changes: [{path: 'a.txt', verb: 'revert', add: 1, del: 1},
+                {path: 'new.txt', verb: 'remove', add: null, del: null}],
+      truncated: false, total: 2,
+      save: [{path: 'a.txt', status: 'M'}, {path: 'new.txt', status: '??'}],
+      save_truncated: false, save_total: 2}});
+    p.cardText = deepText(byId['codeBody']);
+    // (c2) the SAME card with a clean tree: one commit, and now p.head really
+    // is the way back — the two branches must not share a sentence
+    ctx.openRestore('bbb2222');
+    ctx.uiEvent({event: 'restore_preview', payload: {
+      ok: true, request_sha: 'bbb2222', sha: 'bbb2222',
+      subject: 'alloy: wave one', head: 'aaa1111', prefix: 'ws',
+      ancestor: true, detached: false,
+      changes: [{path: 'a.txt', verb: 'revert', add: 1, del: 1}],
+      truncated: false, total: 1, save: [], save_truncated: false,
+      save_total: 0}});
+    p.cleanCardText = deepText(byId['codeBody']);
+    // back to the two-commit card for the rest of the probe
+    ctx.openRestore('bbb2222');
+    ctx.uiEvent({event: 'restore_preview', payload: {
+      ok: true, request_sha: 'bbb2222', sha: 'bbb2222',
+      subject: 'alloy: wave one', when: 1788042000, head: 'aaa1111',
+      prefix: 'ws', behind: 2, ancestor: true, detached: false,
+      changes: [{path: 'a.txt', verb: 'revert', add: 1, del: 1},
+                {path: 'new.txt', verb: 'remove', add: null, del: null}],
+      truncated: false, total: 2,
+      save: [{path: 'a.txt', status: 'M'}, {path: 'new.txt', status: '??'}],
+      save_truncated: false, save_total: 2}});
+    const go = vm.runInContext(
+      "document.querySelectorAll('#codeBody .rst-go')", ctx);
+    p.hasButton = go.length === 1;
+    // (d) the button hands the engine the head the card was computed against
+    const before2 = diffCalls.length;
+    go[0].onclick();
+    p.restoreCall = diffCalls.slice(before2)[0] || 'not called';
+    p.buttonDisabled = !!go[0].disabled;
+    // (e) success repaints the card and refreshes both rail lanes
+    const before3 = diffCalls.length;
+    ctx.uiEvent({event: 'restored', payload: {
+      ok: true, request_sha: 'bbb2222', sha: 'bbb2222',
+      subject: 'alloy: wave one', saved: 'sss3333', saved_files: 2,
+      commit: 'ccc4444', files: 2}});
+    p.doneText = deepText(byId['codeBody']);
+    p.refreshed = diffCalls.slice(before3).map(c => c[0]);
+    // answer it, the way the bridge always does — the one-in-flight latch is
+    // released by the `diff` event and a probe that never feeds one back
+    // would leave every later refresh swallowed
+    ctx.uiEvent({event: 'diff', payload: {
+      git: true, branch: 'alloybr', prefix: 'ws', ignored: false,
+      dirty: [], commits: []}});
+    // (f) every refusal gets its own sentence — and a failed commit must
+    // still say the files moved
+    p.refusalTexts = {};
+    for (const reason of ['busy', 'starting', 'same', 'no_folder',
+                          'no_identity', 'moved', 'ignored', 'conflict',
+                          'submodule']) {
+      ctx.openRestore('bbb2222');
+      ctx.uiEvent({event: 'restore_preview',
+                   payload: {ok: false, reason, request_sha: 'bbb2222',
+                             detail: 'DETAIL'}});
+      p.refusalTexts[reason] = deepText(byId['codeBody']);
+    }
+    // (g) a failure that MOVED the files must refresh the rail like a success
+    ctx.openRestore('bbb2222');
+    const before4 = diffCalls.length;
+    ctx.uiEvent({event: 'restored', payload: {
+      ok: false, reason: 'commit_failed', request_sha: 'bbb2222',
+      detail: 'hook says no', saved: 'sss3333', files_restored: true}});
+    p.commitFailedText = deepText(byId['codeBody']);
+    p.failedRefreshed = diffCalls.slice(before4).map(c => c[0]);
+    // (h) a half-applied restore names what is still not back
+    ctx.openRestore('bbb2222');
+    ctx.uiEvent({event: 'restored', payload: {
+      ok: false, reason: 'partial', request_sha: 'bbb2222',
+      // the detail deliberately does NOT name the file: otherwise the
+      // assertion below cannot tell `p.left` from git's own sentence, and
+      // dropping the left-rendering leaves the test green (measured)
+      detail: 'warning: unable to unlink a file',
+      left: ['locked.txt'], files_restored: true}});
+    p.partialText = deepText(byId['codeBody']);
+    // (i) a refusal that lands after the pane moved on is SAID somewhere:
+    // the button was pressed, so silence is not an answer
+    ctx.openRestore('bbb2222');
+    ctx.openCode('b.txt', 'claude');          // the pane is no longer ours
+    const feedBefore = byId['feed'].children.length;
+    ctx.uiEvent({event: 'restored', payload: {
+      ok: false, reason: 'busy', request_sha: 'bbb2222', detail: 'other'}});
+    p.droppedFellBackToFeed = byId['feed'].children.length > feedBefore;
+    // (j) a diff answer stamped for ANOTHER chat must still release the
+    // one-in-flight latch, or the Changes tab is dead for the session
+    ctx.railTabSet('changes');               // routes to get_diff and latches
+    const before5 = diffCalls.length;
+    ctx.refreshDiff();                       // swallowed while it is latched
+    p.latchTook = diffCalls.length === before5;
+    ctx.uiEvent({event: 'diff', chat_id: 'some-other-chat', payload: {
+      chat_id: 'some-other-chat', git: true, branch: 'x', prefix: '',
+      ignored: false, dirty: [], commits: []}});
+    const before6 = diffCalls.length;
+    ctx.refreshDiff();
+    p.latchReleased = diffCalls.length > before6;
+    ctx.uiEvent({event: 'diff', payload: {
+      git: true, branch: 'alloybr', prefix: '', ignored: false,
+      dirty: [], commits: []}});
+    // (k) a late file_diff must not paint over an open restore card
+    ctx.openRestore('bbb2222');
+    ctx.uiEvent({event: 'restore_preview', payload: {
+      ok: true, request_sha: 'bbb2222', sha: 'bbb2222', subject: 's',
+      head: 'aaa1111', changes: [{path: 'a.txt', verb: 'revert'}], total: 1,
+      truncated: false, save: [], save_truncated: false, save_total: 0,
+      ancestor: true}});
+    ctx.uiEvent({event: 'file_diff', payload: {
+      path: null, sha: null, truncated: false,
+      diff: 'diff --git a/x b/x\n+CLOBBER\n'}});
+    p.cardSurvived = deepText(byId['codeBody']).indexOf('CLOBBER') < 0;
+    ctx.railTabSet('files');
+    ctx.closeCode();
+  } catch (e) { more.restoreError = (e && e.stack) || String(e); }
 
   // ---- slash-command autocomplete: engine vocabulary, filtering,
   // completion, and the send-not-eaten rule ----
@@ -5000,6 +5162,128 @@ class UiBootTests(unittest.TestCase):
         fire on every edit burst — an older snapshot repainted as current is
         the one thing this panel must never do."""
         self.assertTrue(self._changes()["staleOverviewIgnored"])
+
+    def test_every_commit_row_offers_a_restore(self):
+        self.assertEqual(self._changes()["restoreButtons"], 2,
+                         "both commit rows, and neither dirty-file row")
+
+    # ---- restore: checkpoint and rewind (2026-09-05) -------------------
+    def _restore(self):
+        self.assertIsNone(self.report.get("restoreError"))
+        return self.report["restore"]
+
+    def test_each_alloy_commit_wears_its_own_mark(self):
+        """One mark per commit, from the engine's `mark` — a restore must not
+        wear the gate's ⛭ and claim to be a verified checkpoint."""
+        self.assertEqual(self._restore()["markGlyphs"], ["↺", "⛭"])
+
+    def test_the_restore_button_asks_for_a_preview_without_opening_the_diff(self):
+        p = self._restore()
+        self.assertTrue(p["stopped"], "the click must not reach the row too")
+        self.assertEqual(p["askedPreview"], ["restore_preview"])
+        self.assertTrue(p["paneOpen"])
+
+    def test_a_preview_for_another_commit_is_dropped(self):
+        self.assertTrue(self._restore()["staleIgnored"])
+
+    def test_the_card_names_both_commits_every_file_and_the_way_back(self):
+        p = self._restore()
+        t = p["cardText"]
+        self.assertTrue(p["hasButton"])
+        self.assertIn("uncommitted work is saved as a commit", t)
+        self.assertIn("new.txt", t)
+        self.assertIn("remove", t)
+        self.assertIn("two new commits", t)
+        self.assertIn("ignores are not touched", t)
+        self.assertIn("2 commits of work in this folder since then", t)
+
+    def test_the_way_back_names_the_commit_that_holds_the_work(self):
+        """p.head is the last COMMITTED state — the one commit that does NOT
+        contain the uncommitted work the save step exists to keep. Naming it
+        in both branches points Josh at the one recovery that throws that
+        work away."""
+        p = self._restore()
+        saved, clean = p["cardText"], p["cleanCardText"]
+        self.assertIn("“alloy saved” commit this makes", saved)
+        self.assertNotIn("restoring to aaa1111 puts it back", saved)
+        self.assertIn("without the uncommitted work", saved)
+        # with a clean tree there is nothing to save, so head IS the way back
+        self.assertIn("one new commit", clean)
+        self.assertIn("restoring to aaa1111 puts it back", clean)
+        self.assertNotIn("alloy saved", clean)
+
+    def test_the_button_hands_over_the_head_the_card_was_built_on(self):
+        """The engine refuses when HEAD moved; it can only do that if the UI
+        sends what it read."""
+        p = self._restore()
+        self.assertEqual(p["restoreCall"],
+                         ["restore_workspace", "bbb2222", "aaa1111", None])
+        self.assertTrue(p["buttonDisabled"], "no double submit")
+
+    def test_success_says_where_the_saved_work_went_and_refreshes_the_rail(self):
+        p = self._restore()
+        self.assertIn("Restored to bbb2222", p["doneText"])
+        self.assertIn("committed as ccc4444", p["doneText"])
+        self.assertIn("restore to that one to get them back", p["doneText"])
+        self.assertIn("get_diff", p["refreshed"],
+                      "the folder on disk changed — the lanes are stale")
+
+    def test_every_refusal_gets_its_own_sentence(self):
+        t = self._restore()["refusalTexts"]
+        self.assertIn("A conversation is running", t["busy"])
+        self.assertNotIn("DETAIL", t["busy"],
+                         "a chat id is not a sentence for Josh")
+        self.assertIn("already matches", t["same"])
+        self.assertIn("delete the folder itself", t["no_folder"])
+        self.assertIn("git config user.name", t["no_identity"])
+        self.assertIn("changed while the card was open", t["moved"])
+        self.assertIn("git ignores this folder", t["ignored"])
+        self.assertIn("merge in progress", t["conflict"])
+        self.assertIn("submodule", t["submodule"])
+
+    def test_a_starting_chat_is_not_described_as_being_in_this_folder(self):
+        """The engine does not know where a chat that has no workspace yet is
+        going, so the busy sentence would be a measured-sounding claim nobody
+        measured."""
+        t = self._restore()["refusalTexts"]["starting"]
+        self.assertIn("still starting up", t)
+        self.assertNotIn("in this working folder", t)
+
+    def test_a_failed_commit_still_says_the_files_moved(self):
+        p = self._restore()
+        t = p["commitFailedText"]
+        self.assertIn("files were restored", t)
+        self.assertIn("hook says no", t)
+        self.assertIn("saved as commit sss3333", t)
+        self.assertIn("get_diff", p["failedRefreshed"],
+                      "the folder moved, so the rail is as stale as it would "
+                      "be after a success")
+
+    def test_a_half_applied_restore_names_what_is_still_not_back(self):
+        t = self._restore()["partialText"]
+        self.assertIn("could not replace every file", t)
+        self.assertIn("Nothing was committed", t)
+        self.assertIn("locked.txt", t,
+                      "the file name can only have come from p.left")
+
+    def test_a_diff_answer_for_another_chat_still_releases_the_latch(self):
+        """`diffBusy` is a one-in-flight latch and the answer that clears it
+        is routed to a CHAT: switch chats while a get_diff is out and the
+        Changes tab is dead — no refresh, no post-restore update — for the
+        rest of the session."""
+        p = self._restore()
+        self.assertTrue(p["latchTook"],
+                        "the probe must have the latch held to prove anything")
+        self.assertTrue(p["latchReleased"])
+
+    def test_a_late_file_diff_does_not_paint_over_the_restore_card(self):
+        self.assertTrue(self._restore()["cardSurvived"])
+
+    def test_an_answer_that_arrives_after_the_pane_moved_on_is_still_said(self):
+        """A pressed button always gets an answer: restoreNote paints only
+        while the card is up, and silence would leave the restore looking as
+        though it had happened."""
+        self.assertTrue(self._restore()["droppedFellBackToFeed"])
 
     # ---- slash-command autocomplete (2026-08-29) -----------------------
     def _slash(self):

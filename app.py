@@ -772,6 +772,15 @@ class Api:
         # runs; the LOCK is what had to become per-run (see Run.ask_lock).
         self._ask_waiters = {}         # qid -> Queue awaiting answer_question
         self._roles_lock = threading.Lock()
+        # One restore at a time in this window, whatever folder it names. The
+        # per-card button disables itself, but clicking ⟲ again mints a fresh
+        # enabled one, so the disable is per-BUTTON and the corruption is
+        # per-FOLDER: two workers interleaving `add`/`commit`/`restore` on one
+        # index produce commits neither of them describes. Serializing every
+        # restore is the cheap correct answer (each is well under a second of
+        # git), and the second one re-runs its whole preview inside the lock,
+        # so it sees the state the first one left and answers `same`/`moved`.
+        self._restore_lock = threading.Lock()
         # Dictation: one microphone and one composer, so this is app-wide
         # rather than per-run. Underscore-prefixed like everything else here —
         # public attrs on the js_api object deadlock the pywebview bridge walk.
@@ -2149,6 +2158,181 @@ class Api:
             self._emit_for(run, "file_diff", payload)
         threading.Thread(target=work, daemon=True).start()
         return {"ok": True}
+
+    # ------------------------------------------------------------ restore --
+    # Checkpoint and rewind (feature-ideas #2). The engine half is
+    # relay.git_restore_preview / git_restore; these two are its bridge, in
+    # the same shape as get_diff (git is a subprocess, so a worker thread,
+    # and the answer arrives as a chat-stamped event).
+
+    @staticmethod
+    def _overlaps(a, b):
+        """Do these two working folders share files?
+
+        Either one containing the other counts: restoring a project folder
+        while a seat is writing in a subfolder of it rewrites files under
+        that seat's feet just as surely as if the two were the same folder.
+        """
+        # The truthiness guard is confine_to_workspace's, for its reason:
+        # os.path.realpath("") is the CURRENT DIRECTORY, so two absent
+        # workspaces would "overlap" and block every restore in the window.
+        if not a or not b or not isinstance(a, str) or not isinstance(b, str):
+            return False
+        try:
+            ra = os.path.normcase(os.path.realpath(a))
+            rb = os.path.normcase(os.path.realpath(b))
+            return os.path.commonpath([ra, rb]) in (ra, rb)
+        except (OSError, ValueError, TypeError):
+            return False        # different drives, junk input — not a match
+
+    def _restore_blocked(self, ws):
+        """Why this folder must not be rewritten right now, or None.
+
+        It is NOT enough to check the chat the button was clicked in — two
+        chats can be pointed at one project, and the one that gets corrupted
+        is the OTHER one. `fork_session` refuses while its own run is live for
+        the same reason; this axis has to look wider, because the folder is
+        shared and the conversation is not.
+
+        A live run that has no workspace YET is a chat still starting, and it
+        blocks: its folder is unknowable for the second or two before
+        `_conversation` writes it, and a missed conflict overwrites files
+        while a refusal costs a retry. It is reported as its OWN reason,
+        never as the folder claim — the engine does not know where that chat
+        is going, and "a conversation is running in this working folder"
+        would be a measured-sounding sentence nobody measured.
+
+        WHAT THIS DOES NOT CLOSE, stated rather than implied: a chat could
+        start in the window between this check and the git work below it.
+        Nothing here can prevent that, and it is not a corruption path in
+        practice — `_conversation` resolves attachments, takes the gate's git
+        snapshot, builds the brief and launches a CLI child before any seat
+        writes a file, which is seconds, while the git work this gates is
+        well under one. A cross-component lock over conversation startup
+        would be a larger bug surface than the window it closes.
+        """
+        for run in self._runs.live():
+            other = (run.state or {}).get("workspace")
+            if not other:
+                return "starting"
+            if self._overlaps(ws, other):
+                return run.id or "another chat"
+        return None
+
+    @staticmethod
+    def _busy_payload(busy):
+        """The refusal a blocked restore answers with — `starting` and `busy`
+        are different sentences because they are different facts."""
+        return {"ok": False,
+                "reason": "starting" if busy == "starting" else "busy",
+                "detail": "" if busy == "starting" else busy}
+
+    def restore_preview(self, sha=None, chat_id=None):
+        """What restoring this chat's working folder to <sha> would do.
+
+        Answers as a `restore_preview` event carrying the engine's own
+        {"ok": False, "reason"} vocabulary, plus `busy` — which is checked
+        HERE and not in relay, because "a conversation is running" is a fact
+        about this window and not about the folder.
+        """
+        run, ws = self._diff_run(chat_id)
+        if run is None or not ws:
+            return {"error": "No workspace for this chat."}
+
+        def work():
+            busy = self._restore_blocked(ws)
+            if busy:
+                payload = self._busy_payload(busy)
+            else:
+                try:
+                    payload = relay.git_restore_preview(ws, sha)
+                except Exception as e:      # the engine never raises; belt
+                    payload = {"ok": False, "reason": "error",
+                               "detail": relay.error_excerpt(e)}
+            payload["request_sha"] = sha
+            self._emit_for(run, "restore_preview", payload)
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True}
+
+    def restore_workspace(self, sha=None, head=None, chat_id=None):
+        """Perform the restore. Answers as a `restored` event.
+
+        Both gates are re-checked at THIS moment rather than trusted from the
+        card: `busy` here, and every engine blocker inside `git_restore`,
+        which re-runs the whole preview. `head` is the sha the card was
+        computed against — if HEAD has moved, the numbers Josh read describe
+        a repository that is no longer there.
+        """
+        run, ws = self._diff_run(chat_id)
+        if run is None or not ws:
+            return {"error": "No workspace for this chat."}
+
+        def work():
+            with self._restore_lock:
+                busy = self._restore_blocked(ws)
+                if busy:
+                    payload = self._busy_payload(busy)
+                else:
+                    try:
+                        payload = relay.git_restore(ws, sha, head=head)
+                    except Exception as e:
+                        payload = {"ok": False, "reason": "error",
+                                   "detail": relay.error_excerpt(e)}
+            payload["request_sha"] = sha
+            # The transcript row is owed whenever the FOLDER moved, not only
+            # when the run succeeded: `commit_failed` and `partial` both leave
+            # the seats looking at different files, and a chat that cannot
+            # explain its own discontinuity is the thing SessionStore.system
+            # exists to prevent.
+            if payload.get("ok") or payload.get("files_restored"):
+                self._note_restore(run, payload)
+            self._emit_for(run, "restored", payload)
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True}
+
+    def _note_restore(self, run, result):
+        """Write the restore into the conversation's own transcript.
+
+        Exactly what SessionStore.system exists for: a discontinuity the chat
+        has to go on explaining once it is reopened. The seats' idea of the
+        working folder just changed underneath them, and with no row saying
+        so a resumed chat reads as though the files had always been this way.
+        Best-effort — a view-only chat still gets its restore, it just has
+        nowhere to write it down.
+        """
+        state = run.state or {}
+        store = state.get("store")
+        if not store:
+            return
+        target = "%s (%s)" % (result.get("sha") or "?",
+                              result.get("subject") or "no subject")
+        if result.get("ok"):
+            files = result.get("files") or 0
+            note = ("Josh restored the working folder to %s — %d file%s changed"
+                    % (target, files, "" if files == 1 else "s"))
+        elif result.get("reason") == "partial":
+            # A half-applied restore is the case the seats most need told:
+            # the folder moved, it does NOT match the checkpoint, and nothing
+            # was committed, so no later reader can reconstruct any of that.
+            note = ("Josh tried to restore the working folder to %s. git could "
+                    "not replace every file, so the folder is part-way there "
+                    "and nothing was committed" % target)
+            if result.get("left"):
+                note += " (still not restored: %s)" % ", ".join(result["left"])
+        else:
+            note = ("Josh restored the working folder's files to %s, but the "
+                    "commit recording it failed, so the change is uncommitted"
+                    % target)
+        if result.get("saved"):
+            saved = result.get("saved_files") or 0
+            note += ("; %d uncommitted file%s saved first as commit %s"
+                     % (saved, "" if saved == 1 else "s", result["saved"]))
+        try:
+            row = store.system(note + ".", round=state.get("rnd", 0))
+            self._emit_for(run, "message", row)
+            store.save(state)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ accounts --
     # get_auth_status is called on the js-bridge thread: it must stay

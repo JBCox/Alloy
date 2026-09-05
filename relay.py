@@ -11987,7 +11987,11 @@ def _under_prefix(path, prefix):
         return path
     if path == prefix:
         return None                 # the folder itself is not a file in it
-    return path[len(prefix) + 1:] if path.startswith(prefix + "/") else None
+    rel = path[len(prefix) + 1:] if path.startswith(prefix + "/") else None
+    # ...and neither is its own trailing-slash spelling. `?? ws/` is how git
+    # names a wholly-untracked directory, and it slices to "" here — a
+    # blank-named row in whichever list the caller is building.
+    return rel or None
 
 
 def git_overview(workspace):
@@ -11996,7 +12000,12 @@ def git_overview(workspace):
     {"git": False, "reason", "detail"} when there is no answer; otherwise
     {"git": True, "branch", "root", "prefix", "ignored",
      "dirty": [{path, status, add, del}], "commits": [{sha, when, subject,
-     gate}]}, with every path relative to the WORKSPACE. Never raises.
+     mark}]}, with every path relative to the WORKSPACE. Never raises.
+
+    `mark` names which of Alloy's OWN commits a row is ("gate" / "restore" /
+    "saved", "" for everybody else's) — one field rather than a boolean per
+    kind, so a commit cannot be two things at once and a new kind cannot be
+    added to the engine while the reader keeps drawing the old glyph.
 
     Branch comes from symbolic-ref (which answers even on an unborn HEAD,
     where rev-parse HEAD exits 128 exactly like a non-repo — measured); a
@@ -12055,7 +12064,7 @@ def git_overview(workspace):
                     when = None
                 commits.append({"sha": parts[0], "when": when,
                                 "subject": parts[2],
-                                "gate": parts[2].startswith(GATE_COMMIT_PREFIX)})
+                                "mark": _commit_mark(parts[2])})
         return {"git": True, "branch": branch, "root": root, "prefix": prefix,
                 "ignored": scope["ignored"], "dirty": dirty,
                 "commits": commits}
@@ -12152,6 +12161,368 @@ def git_file_diff(workspace, path=None, sha=None):
         return {"error": "not available"}
     except Exception:
         return {"error": "not available"}
+
+
+# --- restore: putting the working folder back to a checkpoint -------------
+# feature-ideas #2. Every green wave is already a commit (gate_commit), so the
+# half that was missing is the way back. Three rules decide the whole shape,
+# and each was MEASURED against real git rather than assumed (2026-09-05):
+#
+# 1. IT NEVER MOVES HEAD AND NEVER DELETES A COMMIT. A restore is a FORWARD
+#    commit that makes the folder's content match an old one. `reset --hard`
+#    would be wrong twice over: it rewrites the branch, and in the ordinary
+#    nested case — a working folder INSIDE a bigger repo, which is every
+#    default chat — it would revert the parent repo's other files too.
+#    Everything here is scoped by the workspace's own prefix, exactly like
+#    git_overview, and a partial commit (`commit -- <prefix>`) leaves staged
+#    changes outside the folder untouched (measured).
+# 2. UNCOMMITTED WORK IS SAVED FIRST, AS ITS OWN COMMIT. "Refuse on a dirty
+#    tree" was the obvious design and it is useless: the scenario this exists
+#    for is an overnight run that went red, and a red gate is exactly the
+#    state where the last wave's work is UNCOMMITTED. A stash would preserve
+#    it too — but Alloy has no terminal, and a stash is invisible in the
+#    Changes tab, recoverable only by typing `git stash pop` somewhere else.
+#    The commit this makes appears one row above the restore, and the same
+#    button brings it back.
+# 3. IT REFUSES TO DELETE THE WORKING FOLDER ITSELF. Measured: restoring a
+#    nested workspace to a commit that PREDATES it removes every file under
+#    the prefix and then the now-empty directories, so the working folder
+#    vanishes from disk while Alloy is still pointing at it.
+#
+# A fourth rule lives in the preview: `git diff` DOES NOT SEE UNTRACKED FILES
+# (measured), and untracked files are precisely what step 2 commits and step 3
+# then deletes — so a preview built from the diff alone omits the files most
+# likely to be the ones Josh cares about. The `??` rows are merged in.
+#
+# What a restore does NOT touch, and the card says so: ignored files (they are
+# not in git, so nothing here can restore or remove them), anything outside
+# the working folder, and any other branch.
+
+RESTORE_COMMIT_PREFIX = "alloy restore: "   # the commit a restore makes
+SAVE_COMMIT_PREFIX = "alloy saved: "        # ...and the one that precedes it
+RESTORE_FILES_MAX = 300     # files a preview lists per section (announced)
+
+# sha -> worktree is the direction git diff answers in; a RESTORE applies the
+# inverse, so "A" (added since the checkpoint) is a file the restore removes.
+_RESTORE_VERBS = {"M": "revert", "T": "revert", "A": "remove", "D": "bring back"}
+
+# porcelain v1's unmerged status codes — the paths a restore must not touch
+_UNMERGED = ("DD", "AU", "UD", "UA", "DU", "AA", "UU")
+
+
+def _commit_mark(subject):
+    """Which of Alloy's OWN commits this is: "gate" | "restore" | "saved" | "".
+
+    The three prefixes are chosen so that none of them is a prefix of another,
+    which is what makes this a lookup and not an ordered chain. An earlier
+    draft spelled the restore commit "alloy: restore ..." — and that DOES
+    start with GATE_COMMIT_PREFIX, so every restore would have worn the wave
+    gate's mark and claimed in the UI to be a verified checkpoint. The test
+    pins the PROPERTY (no prefix contains another), not this order.
+    """
+    s = subject or ""
+    for mark, prefix in (("gate", GATE_COMMIT_PREFIX),
+                         ("restore", RESTORE_COMMIT_PREFIX),
+                         ("saved", SAVE_COMMIT_PREFIX)):
+        if s.startswith(prefix):
+            return mark
+    return ""
+
+
+def _git_note(done):
+    """git's own last word about a failure, bounded. Its stderr is merged into
+    stdout by _git, and the useful sentence ("fatal: ...", a hook's refusal) is
+    the last non-empty line — the tail that usually names the fix."""
+    lines = [ln.strip() for ln in (done.stdout or "").splitlines() if ln.strip()]
+    return lines[-1][:300] if lines else ""
+
+
+def _short_head(root):
+    """HEAD's short sha, or None. Used to report what a commit produced."""
+    try:
+        done = _git(["rev-parse", "--short", "HEAD"], root)
+    except Exception:
+        return None
+    if done.returncode != 0:
+        return None
+    out = (done.stdout or "").strip().splitlines()
+    return out[-1].strip() if out else None
+
+
+def _restore_spec(prefix):
+    """The pathspec every restore call is scoped by. `.` rather than an absent
+    pathspec when the workspace IS the repo root, so all five commands here
+    (status, diff, add, commit, restore) read one way."""
+    return ["--", prefix or "."]
+
+
+def git_restore_preview(workspace, sha):
+    """Exactly what restoring this working folder to <sha> would do.
+
+    {"ok": True, ...} describes the two commits it would make and every file
+    each one touches; {"ok": False, "reason", "detail"} names the one thing
+    stopping it. Never raises.
+
+    The reasons are the vocabulary the UI writes sentences from: git_scope's
+    own (no_repo / gone / no_git / timeout / refused / error) pass through
+    unchanged, plus `ignored` (git is not watching this folder, so there is
+    nothing here it could restore), `bad_sha`, `unborn`, `no_folder` (rule 3
+    above), `no_identity` — git cannot commit at all, checked BEFORE anything
+    is touched, because `git var GIT_COMMITTER_IDENT` fails in exactly the
+    conditions `git commit` fails in (measured) and finding out afterwards
+    would leave the folder restored and uncommitted — and `same`.
+    """
+    scope = git_scope(workspace)
+    if not scope.get("git"):
+        return {"ok": False, "reason": scope.get("reason") or "error",
+                "detail": scope.get("detail") or ""}
+    if scope.get("ignored"):
+        return {"ok": False, "reason": "ignored", "detail": ""}
+    root, prefix = scope["root"], scope["prefix"]
+    if not isinstance(sha, str) or not _SHA_RE.match(sha or ""):
+        return {"ok": False, "reason": "bad_sha", "detail": ""}
+    spec = _restore_spec(prefix)
+    try:
+        if _git(["rev-parse", "--verify", "--quiet",
+                 sha + "^{commit}"], root).returncode != 0:
+            return {"ok": False, "reason": "bad_sha", "detail": ""}
+        head = _git(["rev-parse", "--short", "HEAD"], root)
+        head_sha = ((head.stdout or "").strip().splitlines() or [""])[-1].strip()
+        if head.returncode != 0 or not head_sha:
+            return {"ok": False, "reason": "unborn", "detail": ""}
+        if prefix:
+            # <rev>:<path> is rev syntax, not a pathspec (so no --literal-
+            # pathspecs here and no magic to fence); `prefix` is derived from
+            # two realpaths and is never handed in by a caller.
+            if _git(["cat-file", "-e", sha + ":" + prefix], root).returncode != 0:
+                return {"ok": False, "reason": "no_folder", "detail": ""}
+        ident = _git(["var", "GIT_COMMITTER_IDENT"], root)
+        if ident.returncode != 0:
+            return {"ok": False, "reason": "no_identity",
+                    "detail": _git_note(ident)}
+        short, subject, when = sha, "", None
+        info = _git(["show", "-s", "--format=%h%x09%ct%x09%s", sha], root)
+        for line in (info.stdout or "").splitlines():
+            parts = line.split("\t", 2)
+            if len(parts) == 3 and _SHA_RE.match(parts[0]):
+                short, subject = parts[0], parts[2]
+                try:
+                    when = int(parts[1])
+                except ValueError:
+                    when = None
+                break
+
+        # A gitlink under the prefix is refused rather than described. A
+        # restore rewrites the POINTER and cannot move another repository's
+        # checkout, so the folder would not match the checkpoint afterwards
+        # and "revert" would be a promise nothing here can keep;
+        # `--recurse-submodules` is not the fix either, since it discards work
+        # inside a repo this function does not own. (Mode 160000, measured.)
+        stage = _git(_LITERAL + ["ls-files", "--stage"] + spec, root)
+        if stage.returncode == 0:
+            for line in (stage.stdout or "").splitlines():
+                if line.startswith("160000 "):
+                    return {"ok": False, "reason": "submodule",
+                            "detail": _unquote_git_path(
+                                line.split("\t", 1)[-1].strip())}
+
+        # Everything the folder is holding that no commit has: the save
+        # commit's contents, and — for the untracked half — the files the
+        # change list below cannot see for itself.
+        #
+        # -uall because `git add -A` stages untracked files INDIVIDUALLY while
+        # git's default mode collapses a wholly-untracked directory into one
+        # `?? dir/` row (measured). git_overview can live with the collapsed
+        # spelling because it is a listing; this list is a promise about how
+        # many files an action will commit and then delete, so it has to count
+        # what git is actually going to touch.
+        save, untracked, unmerged = [], set(), []
+        st = _git(_LITERAL + ["status", "--porcelain", "-uall"] + spec, root)
+        if st.returncode != 0:
+            return {"ok": False, "reason": "refused", "detail": _git_note(st)}
+        for line in (st.stdout or "").splitlines():
+            if len(line) < 4 or line[2] != " ":
+                continue            # merged stderr noise is not a status row
+            code, path = line[:2], line[3:]
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1]
+            rel = _under_prefix(_unquote_git_path(path), prefix)
+            if rel is None:
+                continue
+            if code in _UNMERGED:
+                unmerged.append(rel)
+            save.append({"path": rel, "status": code.strip() or "??"})
+            if code == "??":
+                untracked.add(rel)
+        # A conflicted path is the one thing here that CANNOT be saved first,
+        # and the damage is done by the save rather than by the restore:
+        # `git add -A` resolves the conflict by staging the marker text and
+        # throws away stages 1/2/3, and the partial commit that follows then
+        # refuses outright ("fatal: cannot do a partial commit during a
+        # merge") — so the run reports save_failed while `git ls-files -u` is
+        # already empty and `git mergetool` has nothing left to work with.
+        # Both halves measured, 2026-09-05.
+        if unmerged:
+            return {"ok": False, "reason": "conflict",
+                    "detail": ", ".join(sorted(unmerged)[:5])}
+
+        # --no-renames on purpose: a rename reads as D+A, which is exactly the
+        # pair of things the restore performs (measured — with detection on,
+        # one R100 row hides both halves).
+        counts = {}
+        num = _git(_LITERAL + ["diff", "--numstat", "--no-renames", sha]
+                   + spec, root)
+        if num.returncode == 0:
+            counts = _numstat_counts(num.stdout)
+        changes, seen = [], set()
+        ns = _git(_LITERAL + ["diff", "--name-status", "--no-renames", sha]
+                  + spec, root)
+        if ns.returncode != 0:
+            return {"ok": False, "reason": "refused", "detail": _git_note(ns)}
+        for line in (ns.stdout or "").splitlines():
+            parts = line.split("\t")
+            if len(parts) != 2 or parts[0][:1] not in _RESTORE_VERBS:
+                continue            # merged stderr noise, and the statuses
+                                    # (unmerged, unknown) nothing here claims
+            path = _unquote_git_path(parts[1])
+            rel = _under_prefix(path, prefix)
+            if rel is None or rel in seen:
+                continue
+            add, dele = counts.get(path, (None, None))
+            seen.add(rel)
+            # The counts arrive in the DIFF's direction and a restore is its
+            # inverse, so they are swapped: what the folder gained since the
+            # checkpoint is what the restore takes away.
+            changes.append({"path": rel, "verb": _RESTORE_VERBS[parts[0][:1]],
+                            "add": dele, "del": add})
+        for rel in sorted(untracked):
+            if rel not in seen:
+                seen.add(rel)
+                changes.append({"path": rel, "verb": "remove",
+                                "add": None, "del": None})
+        if not changes:
+            return {"ok": False, "reason": "same", "detail": short}
+
+        ancestor = _git(["merge-base", "--is-ancestor", sha, "HEAD"],
+                        root).returncode == 0
+        behind = None
+        if ancestor:
+            # Only when it IS an ancestor: "3 commits since" is a sentence
+            # about a line of history, and a commit on another branch is not
+            # on this one.
+            cnt = _git(_LITERAL + ["rev-list", "--count", sha + "..HEAD"]
+                       + spec, root)
+            if cnt.returncode == 0:
+                try:
+                    behind = int((cnt.stdout or "").strip().splitlines()[-1])
+                except (ValueError, IndexError):
+                    behind = None
+        detached = _git(["symbolic-ref", "--short", "-q", "HEAD"],
+                        root).returncode != 0
+        return {"ok": True, "sha": short, "subject": subject, "when": when,
+                "head": head_sha, "root": root, "prefix": prefix,
+                "changes": changes[:RESTORE_FILES_MAX],
+                "truncated": len(changes) > RESTORE_FILES_MAX,
+                "total": len(changes),
+                "save": save[:RESTORE_FILES_MAX],
+                "save_truncated": len(save) > RESTORE_FILES_MAX,
+                "save_total": len(save),
+                "behind": behind, "ancestor": ancestor, "detached": detached}
+    except Exception as exc:
+        return {"ok": False, "reason": "error", "detail": error_excerpt(exc)}
+
+
+def git_restore(workspace, sha, head=None):
+    """Put the working folder back to <sha>, as up to two new commits.
+
+    Re-runs the WHOLE preview first and refuses on any blocker it names: the
+    card Josh approved was computed seconds ago on another thread, and
+    schedule.py's rule holds here too — an acknowledgement is re-checked at
+    the moment it is acted on, never trusted from when it was given. `head`
+    is the sha the card was computed against; if HEAD has moved since, the
+    numbers he read describe a repository that no longer exists (`moved`).
+
+    Order is what makes the failure modes survivable: the save commit happens
+    FIRST, so a refusal there leaves the folder exactly as it was, and by the
+    time anything is overwritten the work it would overwrite is in history.
+    The preview then runs a THIRD time, after the restore and before the
+    commit, because git's exit code does not answer whether the restore
+    happened (see below) — so this is not a cheap function, and it is not
+    meant to be: it is a deliberate, rare, destructive action.
+
+    The failure reasons are `save_failed` (nothing in the folder moved, though
+    git may have staged it while trying), `restore_failed`, `partial` (the
+    folder moved and does NOT match — nothing committed) and `commit_failed`
+    (the folder matches, but nothing recorded it). The last three carry
+    `files_restored`, which is what tells a caller the seats are now looking
+    at different files. Never raises.
+    """
+    prev = git_restore_preview(workspace, sha)
+    if not prev.get("ok"):
+        return prev
+    if head and head != prev["head"]:
+        return {"ok": False, "reason": "moved", "detail": prev["head"]}
+    root, prefix, short = prev["root"], prev["prefix"], prev["sha"]
+    spec = _restore_spec(prefix)
+    saved = None
+    try:
+        if prev["save_total"]:
+            # `add -A` is REQUIRED, not tidiness: a partial commit over a
+            # pathspec holding an untracked file exits 1 with "no changes
+            # added to commit" (measured), so the work this step exists to
+            # preserve is exactly the work it would drop without this line.
+            add = _git(_LITERAL + ["add", "-A"] + spec, root)
+            if add.returncode != 0:
+                return {"ok": False, "reason": "save_failed",
+                        "detail": _git_note(add)}
+            done = _git(_LITERAL + ["commit", "-m", SAVE_COMMIT_PREFIX +
+                                    "uncommitted work, before restoring to "
+                                    + short] + spec, root)
+            if done.returncode != 0:
+                return {"ok": False, "reason": "save_failed",
+                        "detail": _git_note(done)}
+            saved = _short_head(root)
+        res = _git(_LITERAL + ["restore", "--source=" + short, "--staged",
+                               "--worktree"] + spec, root)
+        if res.returncode != 0:
+            return {"ok": False, "reason": "restore_failed",
+                    "detail": _git_note(res), "saved": saved,
+                    "sha": short, "subject": prev["subject"]}
+        # RC 0 IS NOT PROOF IT HAPPENED. git only WARNS when it cannot unlink
+        # a worktree file — measured on Windows with the file held open by
+        # another process: rc 0, "warning: unable to unlink 'ws/x'", the index
+        # entry gone and the old content still on disk as an untracked file.
+        # Committing then re-adds it from the worktree, `status` reads CLEAN,
+        # and every surface afterwards states as measured fact that the folder
+        # was put back. The preview is the check, because it is already the
+        # one reader that can see an untracked leftover: after a complete
+        # restore it answers `same` (verified both ways).
+        left = git_restore_preview(workspace, short)
+        if left.get("reason") != "same":
+            return {"ok": False, "reason": "partial", "saved": saved,
+                    "sha": short, "subject": prev["subject"],
+                    "files_restored": True,
+                    "left": [c["path"] for c in (left.get("changes") or [])][:5],
+                    "detail": _git_note(res) or left.get("detail") or ""}
+        done = _git(_LITERAL + ["commit", "-m", RESTORE_COMMIT_PREFIX +
+                                (prev["subject"] or "(no subject)")[:60]
+                                + " (" + short + ")"] + spec, root)
+        if done.returncode != 0:
+            # The files ARE back; only the commit did not happen. Say both —
+            # a bare failure here would read as "nothing changed" while the
+            # folder on disk had already moved. The sha/subject/files ride
+            # along because the transcript note is written from THIS payload.
+            return {"ok": False, "reason": "commit_failed",
+                    "detail": _git_note(done), "saved": saved,
+                    "sha": short, "subject": prev["subject"],
+                    "files": prev["total"], "saved_files": prev["save_total"],
+                    "files_restored": True}
+        return {"ok": True, "sha": short, "subject": prev["subject"],
+                "saved": saved, "commit": _short_head(root),
+                "files": prev["total"], "saved_files": prev["save_total"]}
+    except Exception as exc:
+        return {"ok": False, "reason": "error", "detail": error_excerpt(exc),
+                "saved": saved}
 
 
 def gate_commit(state, message):
