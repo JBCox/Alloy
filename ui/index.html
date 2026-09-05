@@ -1823,6 +1823,55 @@
   }
   .code-note { padding: 8px 10px; color: var(--muted); font-size: 11.5px; }
 
+  /* ---------- changes tab (git diff lane) ---------- */
+  #fileTabs { display: flex; gap: 4px; margin-top: 6px; flex: 0 0 auto; }
+  #fileTabs .ft {
+    flex: 1; border: 1px solid var(--line); background: none; color: var(--muted);
+    border-radius: 8px; padding: 3px 0; font-size: 11.5px; cursor: pointer;
+  }
+  #fileTabs .ft.on { background: var(--surface2); color: var(--text); }
+  #changesList { flex: 1; overflow-y: auto; min-height: 0; margin-top: 4px; }
+  #changesList[hidden], #fileList[hidden] { display: none; }
+  .chg-head { padding: 6px 6px 2px; color: var(--muted); font-size: 11px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chg-sect { padding: 8px 6px 2px; color: var(--muted); font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: .06em; }
+  .chg-row {
+    display: flex; align-items: baseline; gap: 6px; border-radius: 8px;
+    padding: 4px 6px; cursor: pointer; font-size: 12px;
+  }
+  .chg-row:hover { background: var(--surface); }
+  .chg-row.on { background: var(--surface2); }
+  .chg-row .cst, .chg-row .cnum, .chg-row .csha {
+    flex: 0 0 auto; font: 10.5px "Cascadia Mono", Consolas, monospace;
+  }
+  .chg-row .csha { color: var(--muted); }
+  .chg-row .cpath { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; }
+  /* diff colors are the APP's chrome, never a provider's — a hunk is not a seat */
+  .cadd { color: #7CBE8C; }
+  .cdel { color: var(--danger); }
+  .chg-row .cgate { flex: 0 0 auto; color: var(--alloy); font-size: 10px; }
+  #codeBody .cl.dadd { background: rgba(124,190,140,.10); color: #A9D9B4; }
+  #codeBody .cl.ddel { background: rgba(199,91,91,.10); color: #DFA0A0; }
+  #codeBody .cl.dhunk { color: #8AA6D9; }
+  #codeBody .cl.dmeta { color: var(--muted); }
+
+  /* ---------- slash-command autocomplete ---------- */
+  #slashMenu {
+    flex-basis: 100%; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--surface); padding: 4px; max-height: 220px; overflow-y: auto;
+  }
+  #slashMenu[hidden] { display: none; }
+  .sl-row { display: flex; gap: 8px; align-items: baseline; padding: 4px 8px;
+    border-radius: 7px; cursor: pointer; font-size: 12.5px; }
+  .sl-row.on, .sl-row:hover { background: var(--surface2); }
+  .sl-row .sl-cmd { font: 12px "Cascadia Mono", Consolas, monospace;
+    color: var(--text); flex: 0 0 auto; }
+  .sl-row .sl-hint { color: var(--muted); font-size: 11.5px; flex: 1; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sl-row .sl-scope { color: var(--alloy); font-size: 10.5px; flex: 0 0 auto; }
+
   .typing { display: flex; flex-direction: column; align-items: stretch;
     gap: 4px; color: var(--muted); font-size: 13px; margin: 0 0 18px 2px; }
   .typing .trow { display: flex; align-items: center; gap: 9px; }
@@ -2492,6 +2541,7 @@
       <div id="queueNote" hidden></div>
       <div id="mentionHint" class="mention-hint" hidden></div>
       <div id="dropCue" class="mention-hint" hidden></div>
+      <div id="slashMenu" hidden role="listbox" aria-label="Command suggestions"></div>
       <div id="attRow" hidden></div>
       <button id="attachBtn" title="Attach files — saved into the working folder for the AIs to open"
               aria-label="Attach files">📎</button>
@@ -2692,7 +2742,12 @@
     <div class="rail-head">
       <button class="rail-collapse" id="filesCollapse" title="Hide files" aria-label="Hide files">»</button>
       <div class="rail-label">Files</div>
-      <button class="rail-collapse" id="filesRefresh" title="Refresh the file list" aria-label="Refresh the file list">↻</button>
+      <button class="rail-collapse" id="filesRefresh" title="Refresh this view" aria-label="Refresh this view">↻</button>
+    </div>
+    <div id="fileTabs" role="tablist" aria-label="File rail view">
+      <button id="ftFiles" class="ft on" role="tab" aria-selected="true">Files</button>
+      <button id="ftChanges" class="ft" role="tab" aria-selected="false"
+              title="What changed in the working folder — git diff and recent commits">Changes</button>
     </div>
     <div id="codePane">
       <div class="code-head">
@@ -2704,6 +2759,7 @@
       <div id="codeBody"></div>
     </div>
     <div id="fileList"></div>
+    <div id="changesList" hidden></div>
   </aside>
 </main>
 
@@ -5562,6 +5618,26 @@ window.uiEvent = packet => {
     }
   } else if (event === "role_applied") {
     roleApplied(payload);
+  } else if (event === "diff") {
+    // Answer to get_diff. Rendered only while the Changes tab is showing —
+    // the tab click refreshes, so a dropped answer costs nothing. An OLDER
+    // answer than the one already on screen is dropped too: these are worker
+    // threads with no ordering, and a stale snapshot repainted as current is
+    // the one thing this panel must never do.
+    diffBusy = false;
+    const seq = payload.seq;
+    if (seq === undefined || seq === null || seq >= diffShown) {
+      if (seq !== undefined && seq !== null) diffShown = seq;
+      if (railTab === "changes") renderChanges(payload);
+    }
+    if (diffAgain) { diffAgain = false; if (railTab === "changes") refreshDiff(); }
+  } else if (event === "file_diff") {
+    // Two clicks in a row race on worker threads: the payload echoes the
+    // request key, and an answer for a request no longer displayed is dropped.
+    if (diffMode &&
+        (payload.path || null) === (diffMode.path || null) &&
+        (payload.sha || null) === (diffMode.sha || null))
+      renderDiffText(payload);
   } else if (event === "continuous_probe") {
     // The modal asked; this is the answer. Only fill a gate command the user
     // has not typed over — a detection must never overwrite a real choice.
@@ -8469,7 +8545,137 @@ function sayDraftLoad() {
 function sayDraftSave(text) {
   try { localStorage.setItem("sayDraft", text || ""); } catch (e) {}
 }
-function clearSay() { $("say").value = ""; histIdx = -1; sayDraftSave(""); autoGrow(); }
+function clearSay() { $("say").value = ""; histIdx = -1; sayDraftSave(""); autoGrow(); slashPaint(); }
+
+/* ---------- slash-command autocomplete ---------- */
+// The vocabulary is relay.COMMANDS via get_config — the engine's own table,
+// never a hand-kept JS list (the HELP_TEXT drift rule). While the box is a
+// bare "/prefix" the menu lists matching commands; once an argument is being
+// typed it collapses to a one-line usage reminder. Scoped commands (Keep
+// Improving, Supervisor rooms) are SHOWN with their scope stated rather than
+// hidden — the engine knows the room's state and already refuses out loud.
+let SLASH_CMDS = [];             // filled from get_config at boot
+let slashSel = 0;                // highlighted index into slashShown
+let slashShown = [];             // the matches currently rendered
+let slashFor = null;             // the exact #say value those rows describe
+
+function slashState() {
+  const v = $("say").value;
+  if (!v.startsWith("/") || v.includes("\n")) return null;
+  const bare = v.match(/^\/([a-z]*)$/i);
+  if (bare) return { mode: "list", prefix: bare[1].toLowerCase() };
+  const args = v.match(/^\/([a-z]+)\s/i);
+  if (args) return { mode: "usage", name: args[1].toLowerCase() };
+  return null;
+}
+
+function slashPaint() {
+  const menu = $("slashMenu");
+  if (!menu) return;
+  const st = SLASH_CMDS.length ? slashState() : null;
+  slashFor = $("say").value;
+  if (!st) { menu.hidden = true; menu.replaceChildren(); slashShown = []; return; }
+  menu.replaceChildren();
+  if (st.mode === "usage") {
+    slashShown = [];
+    const c = SLASH_CMDS.find(c => c.name === st.name);
+    if (!c) { menu.hidden = true; return; }
+    const row = document.createElement("div");
+    row.className = "sl-row";
+    const cmd = document.createElement("span");
+    cmd.className = "sl-cmd";
+    cmd.textContent = "/" + c.name + (c.args ? " " + c.args : "");
+    const hint = document.createElement("span");
+    hint.className = "sl-hint"; hint.textContent = c.hint || "";
+    row.appendChild(cmd); row.appendChild(hint);
+    if (c.scope) {
+      const sc = document.createElement("span");
+      sc.className = "sl-scope"; sc.textContent = c.scope;
+      row.appendChild(sc);
+    }
+    menu.appendChild(row);
+    menu.hidden = false;
+    return;
+  }
+  slashShown = SLASH_CMDS.filter(c => c.name.startsWith(st.prefix));
+  if (!slashShown.length) { menu.hidden = true; return; }
+  if (slashSel >= slashShown.length) slashSel = 0;
+  slashShown.forEach((c, i) => {
+    const row = document.createElement("div");
+    row.className = "sl-row" + (i === slashSel ? " on" : "");
+    const cmd = document.createElement("span");
+    cmd.className = "sl-cmd";
+    cmd.textContent = "/" + c.name + (c.args ? " " + c.args : "");
+    const hint = document.createElement("span");
+    hint.className = "sl-hint"; hint.textContent = c.hint || "";
+    row.appendChild(cmd); row.appendChild(hint);
+    if (c.scope) {
+      const sc = document.createElement("span");
+      sc.className = "sl-scope"; sc.textContent = c.scope;
+      row.appendChild(sc);
+    }
+    // mousedown, not click: click would blur #say first and hide the menu
+    row.onmousedown = e => { e.preventDefault(); slashComplete(c); };
+    menu.appendChild(row);
+  });
+  menu.hidden = false;
+}
+
+function slashComplete(c) {
+  const say = $("say");
+  say.value = "/" + c.name + (c.args ? " " : "");
+  say.focus();
+  say.setSelectionRange(say.value.length, say.value.length);
+  slashSel = 0;
+  sayDraftSave(say.value);
+  autoGrow();
+  slashPaint();                  // an argful command shows its usage line now
+}
+
+function slashKey(e) {
+  // First look at #say's keydown. true = the menu owned the key, stop there.
+  const menu = $("slashMenu");
+  if (!menu) return false;
+  // Resync before deciding anything. Assigning #say.value fires no input
+  // event, so dictation (and any future programmatic write) can leave rows
+  // on screen describing text that is no longer in the box — and then Enter
+  // "completes" a command over what the user actually said, destroying it.
+  // Checking the value the rows were painted for closes the whole class,
+  // rather than the one caller that happened to be found.
+  if ($("say").value !== slashFor) slashPaint();
+  if (menu.hidden || !slashShown.length) return false;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    slashSel = (slashSel + (e.key === "ArrowDown" ? 1 : slashShown.length - 1))
+      % slashShown.length;
+    slashPaint();
+    return true;
+  }
+  if (e.key === "Tab" && !e.shiftKey) {
+    e.preventDefault();
+    slashComplete(slashShown[slashSel]);
+    return true;
+  }
+  if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    // Enter completes an unfinished name; a name already typed in full falls
+    // through to send — completing "/stop" over "/stop" would eat the send.
+    const c = slashShown[slashSel];
+    const v = $("say").value;
+    if (v !== "/" + c.name && v !== "/" + c.name + " ") {
+      e.preventDefault();
+      slashComplete(c);
+      return true;
+    }
+    return false;
+  }
+  if (e.key === "Escape") {
+    e.preventDefault();
+    menu.hidden = true;
+    slashShown = [];
+    return true;
+  }
+  return false;
+}
 
 /* ---------- attachments ---------- */
 // Files ride to Python as base64 and land in <workspace>\attachments\ — the
@@ -8707,6 +8913,9 @@ function insertDictation(text) {
   histIdx = -1;
   autoGrow();
   updateMentionHint();
+  sayDraftSave(el.value);
+  slashPaint();   // assigning .value fires no input event, so the slash menu
+                  // would keep the rows it painted for the pre-dictation text
 }
 function onDictation(p) {
   const st = p && p.state;
@@ -9051,8 +9260,17 @@ $("queueBtn").onclick = queueSay;
 $("jobsBtn").onclick = e => { e.stopPropagation(); toggleJobs(); };
 $("queueSendAll").onclick = sendAllQueued;
 $("say").addEventListener("input", () => { histIdx = -1; sayDraftSave($("say").value); autoGrow(); });
+$("say").addEventListener("input", slashPaint);
+$("say").addEventListener("focus", slashPaint);
+$("say").addEventListener("blur", () => {
+  // let a row's mousedown-complete land first; then hide the leftover menu
+  setTimeout(() => { const m = $("slashMenu"); if (m) m.hidden = true; }, 120);
+});
 addEventListener("resize", autoGrow);
 $("say").addEventListener("keydown", e => {
+  // The slash-autocomplete gets first look: while its menu is open it owns
+  // Enter/Tab/arrows/Escape, and says so by returning true.
+  if (slashKey(e)) return;
   // Ctrl+Enter queues instead of sending. Enter and Shift+Enter are unchanged:
   // a hold is something you ask for, never the new default, or a message typed
   // in a hurry would sit in a dock nobody looked at.
@@ -9120,6 +9338,7 @@ function scheduleFilesRefresh(ms = 1500) {
 }
 async function refreshFiles() {
   if (!window.pywebview) return;         // boot order: bridge not up yet
+  if (railTab === "changes") { refreshDiff(); return; }   // the visible tab owns ↻
   if (filesBusy) { scheduleFilesRefresh(); return; }
   filesBusy = true;
   let r;
@@ -9237,11 +9456,14 @@ function onEditActivity(path, provider) {
     }
   } else scheduleFilesRefresh(300);      // a NEW file: surface it fast
   const follow = $("codeFollowChk").checked;
-  if (codeFile === null || (follow && codeFile !== path)) openCode(path, provider);
+  // an open diff counts as "the pane is occupied": only follow steals it
+  if ((codeFile === null && !diffMode) || (follow && codeFile !== path))
+    openCode(path, provider);
   else if (codeFile === path) fetchCode();
 }
 
 function openCode(path, provider, absFallback) {
+  if (diffMode) { diffMode = null; diffSelKey = null; paintDiffSel(); }
   if (codeFile !== path) { codeLines = null; codeText = null; }
   codeFile = path;
   if (provider) codeProv = provider;
@@ -9318,6 +9540,7 @@ async function fetchCode(absFallback) {
 
 function closeCode() {
   codeFile = null; codeProv = null; codeLines = null; codeText = null;
+  if (diffMode) { diffMode = null; diffSelKey = null; paintDiffSel(); }
   $("fileRail").classList.remove("code-open");
   $("codeBody").innerHTML = "";
   if (codePoll) { clearInterval(codePoll); codePoll = null; }
@@ -9327,7 +9550,259 @@ function resetEditing() {         // workspace boundary changed (new/reopened ch
   editing.forEach(e => clearTimeout(e.timer));
   editing.clear();
   closeCode();
+  // the Changes tab caches nothing, but its rendered rows are the OLD
+  // workspace's — clear them with the boundary, like imgCache one line up
+  const cl = $("changesList");
+  if (cl) cl.replaceChildren();
 }
+
+/* ---------- changes tab (git diff lane) ---------- */
+// What changed in the working folder: branch, dirty files with counts,
+// recent commits (gate checkpoints marked ⛭), and a bounded per-file /
+// per-commit patch rendered into the code pane. Bridge: get_diff /
+// get_file_diff (recheck_auth shape — the answers arrive as the 'diff' and
+// 'file_diff' events, git being a subprocess the bridge thread cannot run).
+let railTab = "files";           // "files" | "changes"
+let diffMode = null;             // {path} | {sha} — what the pane is showing
+let diffSelKey = null;           // highlighted .chg-row
+let diffBusy = false;            // one get_diff in flight at a time
+let diffAgain = false;           // ...and one more wanted when it lands
+let diffSeq = 0, diffShown = -1; // request number vs the newest one rendered
+
+// Which failure this is, in words. The engine answers with a reason rather
+// than one flag precisely so this can be a true sentence: "Not a git
+// repository" is a measured fact about a folder git looked at, and it is
+// simply false for a machine with no git, a folder that has been deleted, or
+// a real repo git refused to open (dubious ownership, an unknown format) —
+// where git's own explanation usually names the fix.
+const DIFF_REASONS = {
+  no_repo: "Not a git repository.",
+  gone: "That working folder is not there any more.",
+  no_git: "git is not installed, or not on PATH — nothing to read here.",
+  timeout: "git did not answer in time.",
+  refused: "git could not open this folder.",
+  error: "Could not read this folder.",
+};
+
+function railTabSet(which) {
+  railTab = which;
+  $("ftFiles").classList.toggle("on", which === "files");
+  $("ftChanges").classList.toggle("on", which === "changes");
+  $("ftFiles").setAttribute("aria-selected", String(which === "files"));
+  $("ftChanges").setAttribute("aria-selected", String(which === "changes"));
+  $("fileList").hidden = which !== "files";
+  $("changesList").hidden = which !== "changes";
+  refreshFiles();                // routes to whichever fetch the tab needs
+}
+
+async function refreshDiff() {
+  if (!window.pywebview) return;
+  // One in flight at a time, exactly like filesBusy — and for a bigger
+  // reason: each call is four git subprocesses on their own worker thread,
+  // and edit bursts schedule a refresh every 300ms. Without this the calls
+  // stack without limit on any folder where git takes longer than the
+  // debounce. A request arriving while one is out is remembered, not dropped.
+  if (diffBusy) { diffAgain = true; return; }
+  diffBusy = true;
+  const seq = ++diffSeq;
+  if (!$("changesList").children.length) chgLoading();
+  try {
+    const r = await pywebview.api.get_diff(activeId, seq);
+    // a refusal answers inline (no event will come) — say it, don't spin
+    if (r?.error) { diffBusy = false; renderChanges(null, r.error); return; }
+  } catch (e) { diffBusy = false; return; }
+}
+
+function chgLoading() {
+  const list = $("changesList");
+  if (!list) return;
+  list.replaceChildren();
+  chgNote(list, "Reading git…");
+}
+
+function chgNote(list, text) {
+  const d = document.createElement("div");
+  d.className = "file-empty";
+  d.textContent = text;
+  list.appendChild(d);
+}
+
+function renderChanges(p, errText) {
+  const list = $("changesList");
+  if (!list) return;
+  list.replaceChildren();
+  if (errText) { chgNote(list, errText); return; }
+  if (!p) return;
+  if (!p.git) {
+    // name the failure, and pass on git's own sentence when it gave one —
+    // "detected dubious ownership" carries its own fix
+    let text = DIFF_REASONS[p.reason] || DIFF_REASONS.error;
+    if (p.detail) text += " " + p.detail;
+    chgNote(list, text);
+    return;
+  }
+  const dirty = p.dirty || [], commits = p.commits || [];
+  const head = document.createElement("div");
+  head.className = "chg-head";
+  head.textContent = (p.branch ? "on " + p.branch : "(no branch)") +
+    // "clean" is a claim about TRACKED files, so an ignored folder must not
+    // wear it — it would read as "nothing has changed here" one line above
+    // the note explaining that nothing here is watched at all.
+    (p.ignored ? ""
+      : dirty.length
+        ? ` · ${dirty.length} file${dirty.length === 1 ? "" : "s"} changed`
+        : " · clean");
+  // A working folder inside a bigger repo is reported for ITSELF, so say
+  // whose repo this branch belongs to rather than letting the name imply
+  // that the folder is the project.
+  if (p.prefix) head.textContent += " · " + p.prefix + " of this repo";
+  head.title = head.textContent;
+  list.appendChild(head);
+  if (p.ignored) {
+    // The default chat's shape: workspace inside Alloy's own checkout, under
+    // a gitignored sessions/. "clean" would be true and useless — git is not
+    // watching this folder at all, so nothing here will ever be listed.
+    chgNote(list, "git ignores this folder, so none of its files are " +
+                  "tracked — nothing here will show up as a change.");
+    return;
+  }
+  if (dirty.length) {
+    const s = document.createElement("div");
+    s.className = "chg-sect"; s.textContent = "Uncommitted";
+    list.appendChild(s);
+    dirty.forEach(f => {
+      const row = document.createElement("div");
+      row.className = "chg-row";
+      row.dataset.dkey = "p:" + f.path;
+      row.title = f.path;
+      const st = document.createElement("span");
+      st.className = "cst " + (f.status === "D" ? "cdel" : "cadd");
+      st.textContent = f.status;
+      const path = document.createElement("span");
+      path.className = "cpath"; path.textContent = f.path;
+      row.appendChild(st); row.appendChild(path);
+      // a count nobody reported stays blank, never 0 (untracked, binary)
+      if (f.add !== null && f.add !== undefined) {
+        const a = document.createElement("span");
+        a.className = "cnum cadd"; a.textContent = "+" + f.add;
+        row.appendChild(a);
+      }
+      if (f.del !== null && f.del !== undefined) {
+        const d2 = document.createElement("span");
+        d2.className = "cnum cdel"; d2.textContent = "−" + f.del;
+        row.appendChild(d2);
+      }
+      row.onclick = () => openDiff({ path: f.path });
+      list.appendChild(row);
+    });
+  }
+  if (commits.length) {
+    const s = document.createElement("div");
+    s.className = "chg-sect"; s.textContent = "Recent commits";
+    list.appendChild(s);
+    commits.forEach(c => {
+      const row = document.createElement("div");
+      row.className = "chg-row";
+      row.dataset.dkey = "s:" + c.sha;
+      row.title = c.subject +
+        (c.when ? " · " + new Date(c.when * 1000).toLocaleString() : "");
+      const sha = document.createElement("span");
+      sha.className = "csha"; sha.textContent = c.sha;
+      const sub = document.createElement("span");
+      sub.className = "cpath"; sub.textContent = c.subject;
+      row.appendChild(sha); row.appendChild(sub);
+      if (c.gate) {
+        const g = document.createElement("span");
+        g.className = "cgate"; g.textContent = "⛭";
+        g.title = "Checkpointed by the wave gate";
+        row.appendChild(g);
+      }
+      row.onclick = () => openDiff({ sha: c.sha });
+      list.appendChild(row);
+    });
+  }
+  if (!dirty.length && !commits.length)
+    chgNote(list, "No changes and no commits yet.");
+  paintDiffSel();
+}
+
+function paintDiffSel() {
+  document.querySelectorAll("#changesList .chg-row").forEach(r =>
+    r.classList.toggle("on", r.dataset.dkey === diffSelKey));
+}
+
+function openDiff(req) {
+  diffMode = req;
+  diffSelKey = req.path ? "p:" + req.path : "s:" + req.sha;
+  paintDiffSel();
+  codeFile = null;               // the pane shows OUR diff, not the live view
+  codeProv = null; codeLines = null; codeText = null;
+  $("fileRail").classList.add("code-open");
+  // alloy chrome: a diff is the app's reading of the folder, not a seat's
+  $("codePane").style.setProperty("--who", "var(--alloy)");
+  const title = req.path ? "diff · " + req.path : "commit " + req.sha;
+  $("codeTitle").textContent = title;
+  $("codeTitle").title = title;
+  const body = $("codeBody");
+  body.innerHTML = "";
+  const n = document.createElement("div");
+  n.className = "code-note"; n.textContent = "Loading diff…";
+  body.appendChild(n);
+  if (!window.pywebview) return;
+  pywebview.api.get_file_diff(req.path || null, req.sha || null, activeId)
+    .then(r => {
+      if (r?.error) renderDiffText({ error: r.error, path: req.path || null,
+                                     sha: req.sha || null });
+    })
+    .catch(() => {});
+}
+
+function renderDiffText(p) {
+  const body = $("codeBody");
+  if (!body || !diffMode) return;
+  body.innerHTML = "";
+  if (p.error) {
+    const n = document.createElement("div");
+    n.className = "code-note";
+    n.textContent = p.error === "not available" ? "Diff not available." : p.error;
+    body.appendChild(n);
+    return;
+  }
+  const text = p.diff || "";
+  if (!text.trim()) {
+    // "binary file" was in this sentence and is unreachable: a binary file
+    // produces "Binary files a/x and b/x differ", which renders. The engine
+    // says which nothing this is, and a request it could not resolve comes
+    // back as an error rather than as a claim about the file's contents.
+    const n = document.createElement("div");
+    n.className = "code-note";
+    n.textContent = p.empty === "unchanged"
+      ? "This file has no changes."
+      : "No diff to show.";
+    body.appendChild(n);
+    return;
+  }
+  text.split("\n").forEach(line => {
+    const d = document.createElement("div");
+    d.className = "cl";
+    if (/^(diff --git|index |new file|deleted file|rename |similarity |--- |\+\+\+ )/.test(line))
+      d.classList.add("dmeta");
+    else if (line.startsWith("@@")) d.classList.add("dhunk");
+    else if (line.startsWith("+")) d.classList.add("dadd");
+    else if (line.startsWith("-")) d.classList.add("ddel");
+    d.textContent = line;
+    body.appendChild(d);
+  });
+  if (p.truncated) {
+    const n = document.createElement("div");
+    n.className = "code-note";
+    n.textContent = "Diff truncated — the whole patch is bigger than this pane holds.";
+    body.appendChild(n);
+  }
+}
+
+$("ftFiles").onclick = () => railTabSet("files");
+$("ftChanges").onclick = () => railTabSet("changes");
 
 /* ---------- collapsible rails ---------- */
 // The « button in each rail's header collapses it to a slim strip; clicking
@@ -11367,6 +11842,9 @@ window.addEventListener("pywebviewready", async () => {
   uiCfg = await pywebview.api.get_config();
   applyDictationConfig(uiCfg.dictation);
   applySpeakerConfig(uiCfg.speaker);
+  // the slash autocomplete's vocabulary is the ENGINE's command table —
+  // never a JS copy, which is how a menu drifts from /help (relay.COMMANDS)
+  SLASH_CMDS = uiCfg.commands || [];
   // Account quota: a plain read, no probe, no CLI call. Fire-and-forget so a
   // slow disk cannot delay the first paint of the app.
   refreshPlanLimits();

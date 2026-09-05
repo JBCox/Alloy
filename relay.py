@@ -4700,6 +4700,37 @@ HELP_TEXT = ("Commands: /clear [seat] · /compact [seat] · /next <seat> · "
              "every seat. Roles are edited on the seat cards — Apply role "
              "change compacts that seat so it keeps its memory.")
 
+# The composer's slash autocomplete reads this table through get_config.
+# dispatch_command has no registry (it is an if/elif chain) and HELP_TEXT is
+# hand-written prose, so this table plus tests/test_commands.py IS the sync
+# mechanism: the suite asserts every name here appears in HELP_TEXT and in
+# dispatch_command's chain, and vice versa. "scope" is a hint for when a
+# command only means something in one kind of room — the menu SHOWS it with
+# the scope stated rather than hiding it, because the engine is the one that
+# knows the room's state and it already refuses out loud.
+COMMANDS = [
+    {"name": "clear",     "args": "[seat]", "hint": "fresh session for a seat (or every seat)"},
+    {"name": "compact",   "args": "[seat]", "hint": "seat self-summarizes, then restarts from the summary"},
+    {"name": "next",      "args": "<seat>", "hint": "hand the next turn to one seat"},
+    {"name": "stats",     "args": "",       "hint": "this conversation's spend and turns"},
+    {"name": "files",     "args": "[N]",    "hint": "list the working folder's newest files"},
+    {"name": "remember",  "args": "<note>", "hint": "save a note to this chat's memory scope"},
+    {"name": "forget",    "args": "<id>",   "hint": "remove a remembered note"},
+    {"name": "memory",    "args": "",       "hint": "show what memory holds for this scope"},
+    {"name": "retro",     "args": "",       "hint": "refresh the playbook from past sessions"},
+    {"name": "turns",     "args": "N",      "hint": "extend or shrink the round budget"},
+    {"name": "ceiling",   "args": "N",      "hint": "raise the turn ceiling",
+     "scope": "until-done chats"},
+    {"name": "checkin",   "args": "",       "hint": "run the watchdog check now",
+     "scope": "Keep Improving"},
+    {"name": "limits",    "args": "",       "hint": "state the run's limits",
+     "scope": "Keep Improving"},
+    {"name": "objective", "args": "<text>", "hint": "aim the manager at a new goal",
+     "scope": "Supervisor rooms"},
+    {"name": "stop",      "args": "",       "hint": "end the run at the next boundary"},
+    {"name": "help",      "args": "",       "hint": "list these commands"},
+]
+
 
 def match_seats(agents, arg):
     """Resolve a /clear-/compact target. '' -> every seat; a label ('claude 2')
@@ -11796,6 +11827,333 @@ def git_dirty(workspace):
     return bool((done.stdout or "").strip())
 
 
+# --- the Changes tab's readers -------------------------------------------
+# All of these answer honestly and never raise: a failure names WHICH failure
+# (a repo nobody could measure is not "not a repository"), and a count nobody
+# reported is None, never 0. Everything goes through _git, whose stderr is
+# MERGED into stdout — measured 2026-08-29: autocrlf's "warning: in the
+# working copy of ..." lines arrive in the same stream as the numstat rows and
+# the patch text, so parsers match strictly and patches drop leading noise
+# (_strip_to_patch).
+#
+# THE RULE THIS BLOCK TURNS ON: git resolves a repository by walking UP, and
+# `status --porcelain` / `diff --numstat` / `log` then answer for the WHOLE
+# repo with paths relative to its ROOT. Running them with cwd=workspace and
+# believing the answer describes the workspace is wrong wherever the working
+# folder is not itself the repo root — which is EVERY default chat, since
+# `sessions/<id>/workspace/` lives inside Alloy's own checkout. `git_scope` is
+# therefore the one resolver both readers start from, and every path crossing
+# this boundary is workspace-relative in the same sense `read_text` means it.
+
+DIFF_LIMIT = 200_000       # chars of patch text per request (announced)
+DIFF_COMMITS = 30          # commits the overview lists
+GATE_COMMIT_PREFIX = "alloy: "   # wave_gate's subject prefix — the one marker
+                                 # that says "Alloy checkpointed this wave"
+_SHA_RE = re.compile(r"^[0-9a-f]{4,40}$")
+
+# Every diff-lane call carries --literal-pathspecs. Without it a path is a
+# PATHSPEC, and its magic prefixes are resolved by git AFTER our confinement
+# has approved them as ordinary characters: measured 2026-08-29, a path of
+# ":(top)top.txt" (and ":/top.txt", and the bare exclusion ":!ws.txt") came
+# back with the full working-tree patch of a file OUTSIDE the workspace. A
+# blacklist of prefixes would be the wrong shape; this turns the whole grammar
+# off (re-measured with the flag: the same request returns nothing).
+_LITERAL = ["--literal-pathspecs"]
+
+
+def _unquote_git_path(path):
+    """Undo git's C-style path quoting (core.quotepath wraps non-ASCII)."""
+    if not (len(path) >= 2 and path[0] == '"' and path[-1] == '"'):
+        return path
+    body, out, i = path[1:-1], bytearray(), 0
+    esc = {"n": 10, "t": 9, '"': 34, "\\": 92, "r": 13}
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\" and i + 1 < len(body):
+            nxt = body[i + 1]
+            if nxt in esc:
+                out.append(esc[nxt]); i += 2; continue
+            if nxt.isdigit():           # octal byte, up to three digits
+                j = i + 1
+                while j < len(body) and j < i + 4 and body[j].isdigit():
+                    j += 1
+                try:
+                    out.append(int(body[i + 1:j], 8) & 0xFF)
+                    i = j
+                    continue
+                except ValueError:
+                    pass
+        out.extend(ch.encode("utf-8")); i += 1
+    try:
+        return out.decode("utf-8")
+    except UnicodeDecodeError:
+        return path
+
+
+def _numstat_counts(stdout):
+    """{path: (add, del)} from --numstat output; a binary file's '-' counts
+    become None. Lines that are not numstat rows (merged stderr) are skipped,
+    and a rename's `old => new` / `dir/{old => new}/f` spelling is resolved
+    to the NEW path so it joins with the status list."""
+    counts = {}
+    for line in (stdout or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        add_s, del_s, path = parts
+        if not re.match(r"^(\d+|-)$", add_s) or not re.match(r"^(\d+|-)$", del_s):
+            continue
+        if "{" in path and " => " in path and "}" in path:
+            pre, _, rest = path.partition("{")
+            arrow, _, post = rest.partition("}")
+            path = pre + arrow.split(" => ", 1)[1] + post
+        elif " => " in path:
+            path = path.split(" => ", 1)[1]
+        path = _unquote_git_path(path)
+        counts[path] = (None if add_s == "-" else int(add_s),
+                        None if del_s == "-" else int(del_s))
+    return counts
+
+
+def git_scope(workspace):
+    """Where this working folder sits in git terms. Never raises.
+
+    Answers either {"git": True, "root", "prefix", "ignored"} — where `prefix`
+    is the workspace's posix path relative to the repository ROOT ("" when the
+    workspace IS the root) — or {"git": False, "reason", "detail"}.
+
+    The reason matters as much as the flag. `git_dirty` one screen up already
+    distinguishes "not a repo" from "git is absent" by returning None for
+    both and saying so; a UI cannot repeat that trick, because it has to write
+    a SENTENCE. Collapsing "git is not installed", "that folder is gone" and
+    "git refused this repository (dubious ownership / unknown format)" into
+    "Not a git repository." states as measured fact something nobody measured
+    — and throws away git's own explanation, which _git already captured on
+    the merged stream and which usually names the fix.
+    """
+    if not workspace or not isinstance(workspace, str):
+        return {"git": False, "reason": "gone", "detail": ""}
+    try:
+        if not os.path.isdir(workspace):
+            return {"git": False, "reason": "gone", "detail": ""}
+        top = _git(_LITERAL + ["rev-parse", "--show-toplevel"], workspace)
+    except FileNotFoundError:
+        return {"git": False, "reason": "no_git", "detail": ""}
+    except subprocess.TimeoutExpired:
+        return {"git": False, "reason": "timeout", "detail": ""}
+    except Exception as exc:
+        return {"git": False, "reason": "error", "detail": error_excerpt(exc)}
+    out = (top.stdout or "").strip()
+    if top.returncode != 0 or not out:
+        low = out.lower()
+        if "not a git repository" in low:
+            return {"git": False, "reason": "no_repo", "detail": ""}
+        # dubious ownership, an unreadable format version, a broken .git —
+        # git said why, on the merged stream, so pass it on verbatim
+        return {"git": False, "reason": "refused",
+                "detail": out.splitlines()[-1].strip() if out else ""}
+    try:
+        root = os.path.realpath(out.splitlines()[-1].strip())
+        rel = os.path.relpath(os.path.realpath(workspace), root)
+        prefix = "" if rel == os.curdir else rel.replace(os.sep, "/")
+        if prefix.startswith(".."):      # realpath disagreed with git; refuse
+            return {"git": False, "reason": "no_repo", "detail": ""}
+        ignored = False
+        if prefix:
+            # A gitignored working folder is the DEFAULT chat's shape
+            # (sessions/ is ignored inside Alloy's own repo), and it is the
+            # one case where "clean" would be a lie of omission: git is not
+            # watching this folder at all.
+            # NOT _LITERAL: check-ignore is the one command here that rejects
+            # the flag outright — "pathspec magic not supported by this
+            # command: 'literal'", rc 128, measured 2026-08-29 — and rc 128
+            # is not rc 0, so passing it turned every ignored folder into an
+            # un-ignored one in silence. Safe without it: `prefix` is computed
+            # from two realpaths, never handed in by a caller, and this answer
+            # only picks a sentence.
+            chk = _git(["check-ignore", "--quiet", "--", prefix], root)
+            ignored = chk.returncode == 0
+        return {"git": True, "root": root, "prefix": prefix,
+                "ignored": ignored}
+    except Exception as exc:
+        return {"git": False, "reason": "error", "detail": error_excerpt(exc)}
+
+
+def _under_prefix(path, prefix):
+    """A repo-root-relative path as WORKSPACE-relative, or None when it lies
+    outside the working folder. Every path this module hands out means the
+    same thing `read_text` means by one."""
+    if not prefix:
+        return path
+    if path == prefix:
+        return None                 # the folder itself is not a file in it
+    return path[len(prefix) + 1:] if path.startswith(prefix + "/") else None
+
+
+def git_overview(workspace):
+    """The Changes tab's data, scoped to the working folder.
+
+    {"git": False, "reason", "detail"} when there is no answer; otherwise
+    {"git": True, "branch", "root", "prefix", "ignored",
+     "dirty": [{path, status, add, del}], "commits": [{sha, when, subject,
+     gate}]}, with every path relative to the WORKSPACE. Never raises.
+
+    Branch comes from symbolic-ref (which answers even on an unborn HEAD,
+    where rev-parse HEAD exits 128 exactly like a non-repo — measured); a
+    detached HEAD is labelled as such rather than passed off as a branch.
+    Everything else is scoped by the workspace's own prefix, so a folder
+    inside a bigger repo reports ITSELF and not its parent.
+    """
+    scope = git_scope(workspace)
+    if not scope.get("git"):
+        return scope
+    root, prefix = scope["root"], scope["prefix"]
+    spec = ["--", prefix] if prefix else []
+    try:
+        status = _git(_LITERAL + ["status", "--porcelain"] + spec, root)
+        if status.returncode != 0:
+            return {"git": False, "reason": "refused",
+                    "detail": (status.stdout or "").strip().splitlines()[-1]
+                    if (status.stdout or "").strip() else ""}
+        branch = None
+        head = _git(_LITERAL + ["symbolic-ref", "--short", "-q", "HEAD"], root)
+        if head.returncode == 0 and (head.stdout or "").strip():
+            branch = head.stdout.strip().splitlines()[-1].strip()
+        else:
+            sha = _git(_LITERAL + ["rev-parse", "--short", "HEAD"], root)
+            if sha.returncode == 0 and (sha.stdout or "").strip():
+                branch = "detached @ " + sha.stdout.strip().splitlines()[-1].strip()
+        counts = {}
+        num = _git(_LITERAL + ["diff", "--numstat", "HEAD"] + spec, root)
+        if num.returncode == 0:      # unborn HEAD: no counts, not zero counts
+            counts = _numstat_counts(num.stdout)
+        dirty = []
+        for line in (status.stdout or "").splitlines():
+            if len(line) < 4 or line[2] != " ":
+                continue             # merged stderr noise is not a status row
+            code, path = line[:2], line[3:]
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1]
+            path = _unquote_git_path(path)
+            add, dele = counts.get(path, (None, None))
+            rel = _under_prefix(path, prefix)
+            if rel is None:
+                continue             # a pathspec cannot promise this, so check
+            dirty.append({"path": rel, "status": code.strip() or "??",
+                          "add": add, "del": dele})
+        commits = []
+        log = _git(_LITERAL + ["log", "--format=%h%x09%ct%x09%s",
+                               "-%d" % DIFF_COMMITS] + spec, root)
+        if log.returncode == 0:
+            for line in (log.stdout or "").splitlines():
+                parts = line.split("\t", 2)
+                if len(parts) != 3 or not _SHA_RE.match(parts[0]):
+                    continue
+                try:
+                    when = int(parts[1])
+                except ValueError:
+                    when = None
+                commits.append({"sha": parts[0], "when": when,
+                                "subject": parts[2],
+                                "gate": parts[2].startswith(GATE_COMMIT_PREFIX)})
+        return {"git": True, "branch": branch, "root": root, "prefix": prefix,
+                "ignored": scope["ignored"], "dirty": dirty,
+                "commits": commits}
+    except Exception as exc:
+        return {"git": False, "reason": "error", "detail": error_excerpt(exc)}
+
+
+def _strip_to_patch(text):
+    """Drop merged-stderr noise ahead of the first real patch line."""
+    idx = (text or "").find("diff --git ")
+    if idx < 0:
+        return ""
+    return text[idx:]
+
+
+def _bounded_patch(text):
+    truncated = False
+    if len(text) > DIFF_LIMIT:
+        cut = text[:DIFF_LIMIT]
+        nl = cut.rfind("\n")
+        text, truncated = (cut[:nl + 1] if nl > 0 else cut), True
+    return {"diff": text, "truncated": truncated}
+
+
+def git_file_diff(workspace, path=None, sha=None):
+    """One bounded patch: a dirty file's working-tree diff, or a commit's.
+
+    Both arguments arrive from the UI, so the path is confined to the
+    workspace before git ever sees it (and every call carries
+    --literal-pathspecs, without which confinement approves git's pathspec
+    magic as ordinary characters) and the sha is syntax-checked; refusals are
+    the same quiet "not available" the file bridge answers (no existence
+    disclosure). A commit's patch is scoped to the working folder for the same
+    reason the listing is: this pane is not a window onto the parent repo.
+
+    THE EMPTY PATCH IS NOT A CATCH-ALL. `git diff HEAD -- <spec>` exits 0 with
+    no output both for a file that did not change and for a pathspec that
+    matched nothing (measured), so an unresolvable request answered with an
+    empty patch reads on screen as the positive claim "nothing changed" about
+    a file the panel beside it just said gained three lines. `tracked` is
+    therefore established FIRST, and an untracked path that is not a file on
+    disk is refused rather than described. `empty` says which kind of nothing
+    this is, so the pane can word it truthfully. Never raises."""
+    scope = git_scope(workspace)
+    if not scope.get("git"):
+        return {"error": "not available"}
+    root, prefix = scope["root"], scope["prefix"]
+    try:
+        if sha is not None:
+            if not isinstance(sha, str) or not _SHA_RE.match(sha):
+                return {"error": "not available"}
+            args = _LITERAL + ["show", "--format=%h %s", sha, "--"]
+            if prefix:
+                args.append(prefix)
+            done = _git(args, root)
+            if done.returncode != 0:
+                return {"error": "not available"}
+            return _bounded_patch(done.stdout or "")
+        real = confine_to_workspace(workspace, path)
+        if not real:
+            return {"error": "not available"}
+        rel = os.path.relpath(real, os.path.realpath(workspace))
+        rel_posix = rel.replace(os.sep, "/")
+        spec = (prefix + "/" + rel_posix) if prefix else rel_posix
+        tracked = _git(_LITERAL + ["ls-files", "--error-unmatch", "--", spec],
+                       root).returncode == 0
+        if tracked:
+            done = _git(_LITERAL + ["diff", "HEAD", "--", spec], root)
+            if done.returncode != 0:
+                # Unborn HEAD: there is no commit to diff against, and a plain
+                # `git diff` compares the INDEX to the tree — which is empty
+                # for a file that was just `git add`ed, i.e. exactly the state
+                # this branch exists for (measured). --cached is the query
+                # that shows a staged file's whole content as added.
+                done = _git(_LITERAL + ["diff", "--cached", "--", spec], root)
+                if done.returncode != 0:
+                    return {"error": "not available"}
+            text = _strip_to_patch(done.stdout)
+            out = _bounded_patch(text)
+            if not text.strip():
+                out["empty"] = "unchanged"
+            return out
+        if os.path.isfile(real):
+            # Untracked: no HEAD side to diff against, so the null device is
+            # the other half. Gated on NOT tracked, because a no-index diff of
+            # an unchanged tracked file reports every line as an addition.
+            done = _git(_LITERAL + ["diff", "--no-index", "--",
+                                    os.devnull, rel], workspace)
+            text = _strip_to_patch(done.stdout)
+            out = _bounded_patch(text)
+            if not text.strip():
+                out["empty"] = "unchanged"
+            return out
+        return {"error": "not available"}
+    except Exception:
+        return {"error": "not available"}
+
+
 def gate_commit(state, message):
     """Checkpoint a green wave. Returns a human sentence, never raises.
 
@@ -11854,7 +12212,7 @@ def wave_gate(state, io):
         detail = "passed in %ss" % result.get("seconds", "?")
         if gate.get("commit"):
             goal = (state.get("supervisor_goal") or "improvement wave")[:70]
-            detail += " — " + gate_commit(state, "alloy: " + goal)
+            detail += " — " + gate_commit(state, GATE_COMMIT_PREFIX + goal)
             # Bind the checkpoint into this wave's execution records: every
             # task that ran and settled done WITHOUT a commit yet is part of
             # exactly the work this commit contains (earlier waves keep their

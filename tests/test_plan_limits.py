@@ -32,9 +32,25 @@ EVENT = {"type": "rate_limit_event", "session_id": "s", "uuid": "u",
 NOW = 1787894378.0
 
 
+# The measured `resetsAt` is an absolute instant — 2026-08-29 18:00 — and the
+# BRIDGE tests below go through the shipping `get_plan_limits` /
+# `_plan_brake_verdict`, which ask `plan_limits.worst(snap)` with the REAL
+# clock because that is what production does. So from 18:00 on 2026-08-29 the
+# fixture's reading was expired, `worst` correctly answered None, the brake
+# correctly stopped refusing, and three tests failed — permanently, since the
+# instant only recedes further into the past. The measurement is kept exactly
+# as captured (the parsing tests below still pin every field of it, and they
+# pass their own `now`); what is anchored to real time is the LIVENESS, which
+# is the property those tests are actually about. A fixture whose meaning
+# depends on the wall clock has to be built relative to it.
+LIVE_SHIFT = max(0.0, time.time() - NOW)
+
+
 def reading(**over):
     info = dict(PAYLOAD)
-    info.update(over)
+    if isinstance(info.get("resetsAt"), (int, float)):
+        info["resetsAt"] = info["resetsAt"] + LIVE_SHIFT
+    info.update(over)            # an explicit resetsAt= still wins, untouched
     return plan_limits.parse_event(
         {"type": "rate_limit_event", "rate_limit_info": info}, now=NOW)
 
@@ -110,9 +126,12 @@ class SnapshotTests(unittest.TestCase):
         describes a period that is over. Without this a brake refuses a nightly
         job all week over a quota that reset on Saturday."""
         snap = plan_limits.merge({}, reading())
+        reset = snap["seven_day"]["resets_at"]     # from the reading itself,
+        # never a constant: "past its reset" is a fact ABOUT this reading, and
+        # an absolute instant stops meaning that the moment the clock passes it
         self.assertTrue(plan_limits.live_readings(snap, now=NOW))
-        self.assertEqual(plan_limits.live_readings(snap, now=1788044400.0), [])
-        self.assertEqual(plan_limits.live_readings(snap, now=1788044401.0), [])
+        self.assertEqual(plan_limits.live_readings(snap, now=reset), [])
+        self.assertEqual(plan_limits.live_readings(snap, now=reset + 1.0), [])
 
     def test_a_reading_with_no_reset_cannot_expire(self):
         snap = plan_limits.merge({}, reading(resetsAt=None))
@@ -210,7 +229,8 @@ class BrakeTests(unittest.TestCase):
         self.assertIn("starting anyway", why)
 
     def test_an_expired_reading_does_not_refuse(self):
-        allow, _ = plan_limits.brake_verdict(self.snap, 75, now=1788044401.0)
+        past = self.snap["seven_day"]["resets_at"] + 1.0   # from the reading
+        allow, _ = plan_limits.brake_verdict(self.snap, 75, now=past)
         self.assertTrue(allow)
 
     def test_every_verdict_carries_a_sentence(self):

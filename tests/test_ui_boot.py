@@ -57,6 +57,17 @@ STUB_CONFIG = {
     "gemini_default_level": "high",
     "dictation": {"available": True, "engine": "whisper", "model": "base.en",
                   "label": "Whisper (local)", "cached": True, "reason": ""},
+    # a deliberately SMALL fake table (not relay.COMMANDS): the probes test
+    # the menu's mechanism — filtering, completion, scope display — and a
+    # shared "c" prefix plus one scoped entry is the whole vocabulary that
+    # needs. test_commands.py is what pins the real table.
+    "commands": [
+        {"name": "clear", "args": "[seat]", "hint": "fresh session"},
+        {"name": "compact", "args": "[seat]", "hint": "self-summarize"},
+        {"name": "ceiling", "args": "N", "hint": "raise the turn ceiling",
+         "scope": "until-done chats"},
+        {"name": "stop", "args": "", "hint": "end the run"},
+    ],
 }
 
 DOM_JS = r"""// Minimal DOM stub: enough to BOOT ui/index.html's one inline script.
@@ -504,6 +515,8 @@ const hookSaves = [];        // what set_event_hooks was handed
 // null = the bridge's real event list; the probe swaps in one carrying an
 // event hookLabels does NOT know, which is the whole point of the check
 let hooksReply = null;
+const diffCalls = [];        // what get_diff / get_file_diff were asked
+let diffReply = {ok: true};  // the immediate bridge answer (truth = events)
 function apiReply(name, args) {
   apiCalls.push(name);
   switch (name) {
@@ -602,6 +615,9 @@ function apiReply(name, args) {
     case 'set_event_hooks': hookSaves.push(args && args[0]); return {ok: true};
     case 'approve_board': boardCalls.push(args.slice()); return {ok: true};
     case 'list_workspace_files': return [];
+    case 'get_diff':
+    case 'get_file_diff':
+      diffCalls.push([name].concat(args)); return diffReply;
     case 'list_runs': return {runs: []};
     case 'folder_exists': return false;
     case 'get_skills': return {skills: []};
@@ -3058,6 +3074,183 @@ if (topLevelError) {
     p.bannerText = deepText(byId['contBanner']);
   } catch (e) { more.schedError = (e && e.stack) || String(e); }
 
+  // ---- Changes tab (git diff lane): tab routing, honest rendering, the
+  // stale-answer drop, and the pane handoff ----
+  try {
+    const p = more.changes = {};
+    await ctx.newChat();
+    // (a) the tab click routes the shared refresh to get_diff
+    const before = diffCalls.length;
+    ctx.railTabSet('changes');
+    p.calledGetDiff = diffCalls.length > before &&
+      diffCalls[diffCalls.length - 1][0] === 'get_diff';
+    p.fileListHidden = !!byId['fileList'].hidden;
+    p.changesShown = !byId['changesList'].hidden;
+    // (b) the diff event renders: header, rows, blank-not-zero counts, and
+    // the gate marker on exactly the gate commit
+    ctx.uiEvent({event: 'diff', payload: {
+      git: true, branch: 'alloybr',
+      dirty: [
+        {path: 'a.txt', status: 'M', add: 3, del: 1},
+        {path: 'new.txt', status: '??', add: null, del: null},
+      ],
+      commits: [
+        {sha: 'abc1234', when: 1788042441, subject: 'alloy: first wave',
+         gate: true},
+        {sha: 'def5678', when: 1788042000, subject: 'human commit',
+         gate: false},
+      ]}});
+    const rows = byId['changesList'].children
+      .filter(c => (c.className || '').indexOf('chg-row') >= 0);
+    p.rowCount = rows.length;
+    p.headText = deepText(byId['changesList'].children[0]);
+    p.firstRowText = deepText(rows[0]);
+    p.untrackedRowText = deepText(rows[1]);   // must carry no "+0"/"−0"
+    p.gateMarks = rows.filter(r => (r.children || []).some(
+      c => (c.className || '').indexOf('cgate') >= 0)).length;
+    // (c) clicking a file row opens the pane and asks for that file's diff
+    const before2 = diffCalls.length;
+    rows[0].onclick();
+    p.fileDiffCall = diffCalls.length > before2
+      ? diffCalls[diffCalls.length - 1] : 'not called';
+    p.paneOpen = byId['fileRail'].classList.contains('code-open');
+    p.title = byId['codeTitle'].textContent;
+    // (d) a STALE answer — another request's key — must not render
+    ctx.uiEvent({event: 'file_diff', payload: {
+      path: 'other.txt', sha: null, truncated: false,
+      diff: 'diff --git a/other b/other\n+nope\n'}});
+    p.staleIgnored = deepText(byId['codeBody']).indexOf('nope') < 0;
+    // (e) the matching answer renders classed lines + the truncation notice
+    ctx.uiEvent({event: 'file_diff', payload: {
+      path: 'a.txt', sha: null, truncated: true,
+      diff: 'diff --git a/a.txt b/a.txt\n@@ -1 +1,2 @@\n one\n+more\n-gone\n'}});
+    p.lineClasses = byId['codeBody'].children.map(l => l.className);
+    p.truncationSaid = deepText(byId['codeBody']).toLowerCase()
+      .indexOf('truncated') >= 0;
+    // (e2) the two kinds of nothing are worded differently — "binary file"
+    // was in the old sentence and is unreachable (a binary file renders
+    // "Binary files ... differ"), while an unresolvable request must not be
+    // reported as a fact about the file's contents
+    ctx.uiEvent({event: 'file_diff', payload: {
+      path: 'a.txt', sha: null, diff: '', truncated: false,
+      empty: 'unchanged'}});
+    p.unchangedText = deepText(byId['codeBody']);
+    ctx.uiEvent({event: 'file_diff', payload: {
+      path: 'a.txt', sha: null, error: 'not available'}});
+    p.unavailableText = deepText(byId['codeBody']);
+    // (f) a live-code open takes the pane back and clears the diff state
+    ctx.openCode('b.txt', 'claude');
+    p.diffModeCleared = vm.runInContext('diffMode', ctx) === null;
+    // (g) each failure gets its OWN sentence, and git's explanation rides
+    p.reasonTexts = {};
+    for (const [reason, detail] of [['no_repo', ''], ['gone', ''],
+                                    ['no_git', ''],
+                                    ['refused', 'fatal: dubious ownership']]) {
+      ctx.uiEvent({event: 'diff', payload: {git: false, reason, detail}});
+      p.reasonTexts[reason] = deepText(byId['changesList']);
+    }
+    // (h) a gitignored workspace says so instead of "clean"
+    ctx.uiEvent({event: 'diff', payload: {
+      git: true, branch: 'main', prefix: 'sessions/c1/workspace',
+      ignored: true, dirty: [], commits: []}});
+    p.ignoredText = deepText(byId['changesList']);
+    // (i) a subfolder names whose repo the branch belongs to
+    ctx.uiEvent({event: 'diff', payload: {
+      git: true, branch: 'main', prefix: 'pkg', ignored: false,
+      dirty: [{path: 'mod.py', status: 'M', add: 1, del: 0}], commits: []}});
+    p.scopedHead = deepText(byId['changesList'].children[0]);
+    // (j) an OLDER answer must not repaint over a newer one
+    ctx.uiEvent({event: 'diff', payload: {
+      git: true, branch: 'newest', prefix: '', ignored: false,
+      dirty: [], commits: [], seq: 50}});
+    ctx.uiEvent({event: 'diff', payload: {
+      git: true, branch: 'stale', prefix: '', ignored: false,
+      dirty: [], commits: [], seq: 20}});
+    p.staleOverviewIgnored =
+      deepText(byId['changesList']).indexOf('stale') < 0;
+    // (k) put the files tab back for later probes
+    ctx.railTabSet('files');
+    p.filesBack = !byId['fileList'].hidden;
+    ctx.closeCode();
+  } catch (e) { more.changesError = (e && e.stack) || String(e); }
+
+  // ---- slash-command autocomplete: engine vocabulary, filtering,
+  // completion, and the send-not-eaten rule ----
+  try {
+    const p = more.slash = {};
+    const say = byId['say'], menu = byId['slashMenu'];
+    // (a) the vocabulary came from get_config, never a JS table
+    p.vocab = vm.runInContext('SLASH_CMDS.map(c => c.name)', ctx);
+    // (b) "/c" lists the shared-prefix commands
+    say.value = '/c';
+    ctx.slashPaint();
+    p.openOnPrefix = !menu.hidden;
+    p.rowTexts = menu.children.map(deepText);
+    // (c) ArrowDown moves the highlight; Tab completes the highlighted one
+    ctx.slashKey({key: 'ArrowDown', preventDefault(){}});
+    const tabEvt = {key: 'Tab', shiftKey: false, prevented: false,
+                    preventDefault() { this.prevented = true; }};
+    ctx.slashKey(tabEvt);
+    p.tabPrevented = tabEvt.prevented;
+    p.completed = say.value;
+    p.usageAfterComplete = !menu.hidden;
+    // (d) Enter on an UNfinished name completes instead of sending
+    say.value = '/sto';
+    ctx.slashPaint();
+    const enter1 = {key: 'Enter', shiftKey: false, ctrlKey: false,
+                    metaKey: false, prevented: false,
+                    preventDefault() { this.prevented = true; }};
+    p.enterCompletes = ctx.slashKey(enter1) === true && enter1.prevented;
+    p.enterValue = say.value;
+    // (e) Enter on a COMPLETE name falls through — the menu must never eat
+    // the send
+    ctx.slashPaint();
+    const enter2 = {key: 'Enter', shiftKey: false, ctrlKey: false,
+                    metaKey: false, prevented: false,
+                    preventDefault() { this.prevented = true; }};
+    p.enterFallsThrough = ctx.slashKey(enter2) === false && !enter2.prevented;
+    // (f) Escape closes; ordinary prose never opens it
+    say.value = '/c'; ctx.slashPaint();
+    ctx.slashKey({key: 'Escape', preventDefault(){}});
+    p.escClosed = !!menu.hidden;
+    say.value = 'hello /clear'; ctx.slashPaint();
+    p.closedOnProse = !!menu.hidden;
+    // (g) typing an argument collapses the list to a usage reminder, with
+    // the scope stated rather than the command hidden
+    say.value = '/ceiling 40'; ctx.slashPaint();
+    p.usageForArgs = !menu.hidden && deepText(menu).indexOf('ceiling') >= 0;
+    p.scopeShown = deepText(menu).indexOf('until-done') >= 0;
+    say.value = ''; ctx.slashPaint();
+    p.emptyCloses = !!menu.hidden;
+    // (h) a PROGRAMMATIC value change (dictation writes .value directly and
+    // fires no input event) must not leave rows describing the old text —
+    // Enter would then "complete" a command over what was just dictated and
+    // destroy it. Driven through the REAL insertDictation.
+    say.value = '/c'; ctx.slashPaint();
+    p.openBeforeDictation = !menu.hidden;
+    ctx.insertDictation('compact the claude seat');
+    p.valueAfterDictation = say.value;
+    // insertDictation repaints on its own, so the menu is right BEFORE any
+    // key is pressed — slashKey's resync is the second line of defence, not
+    // the only one, and without this the stale rows sit on screen
+    p.menuHiddenRightAfterDictation = !!menu.hidden;
+    const enter3 = {key: 'Enter', shiftKey: false, ctrlKey: false,
+                    metaKey: false, prevented: false,
+                    preventDefault() { this.prevented = true; }};
+    p.dictationSurvives = ctx.slashKey(enter3) === false && !enter3.prevented;
+    p.valueAfterEnter = say.value;
+    // (i) the same guard without going through insertDictation: any future
+    // writer of .value is covered, because slashKey re-derives
+    say.value = '/c'; ctx.slashPaint();
+    say.value = 'plain prose now';          // no input event, no repaint
+    const enter4 = {key: 'Enter', shiftKey: false, ctrlKey: false,
+                    metaKey: false, prevented: false,
+                    preventDefault() { this.prevented = true; }};
+    p.staleMenuNeverEatsProse =
+      ctx.slashKey(enter4) === false && say.value === 'plain prose now';
+    say.value = ''; ctx.slashPaint();
+  } catch (e) { more.slashError = (e && e.stack) || String(e); }
+
   // Put the boot roster back: report() reads the LIVE DOM, so leaving the
   // stage solo would hand every other test in this file a one-seat page.
   // (bootSeats above is the record of what boot itself built.)
@@ -4719,6 +4912,160 @@ class UiBootTests(unittest.TestCase):
         self.assertIn("activeId", report["topLevelError"] or "")
         self.assertEqual(report["seats"], [])
         self.assertFalse(report["bootRan"])
+
+    # ---- Changes tab (git diff lane, 2026-08-29) -----------------------
+    def _changes(self):
+        self.assertIsNone(self.report.get("changesError"))
+        return self.report["changes"]
+
+    def test_changes_tab_swaps_the_lists_and_asks_the_bridge(self):
+        p = self._changes()
+        self.assertTrue(p["calledGetDiff"])
+        self.assertTrue(p["fileListHidden"])
+        self.assertTrue(p["changesShown"])
+        self.assertTrue(p["filesBack"])
+
+    def test_diff_event_renders_header_rows_and_gate_marker(self):
+        p = self._changes()
+        self.assertEqual(p["rowCount"], 4)          # 2 dirty + 2 commits
+        self.assertIn("alloybr", p["headText"])
+        self.assertIn("2 files changed", p["headText"])
+        self.assertIn("a.txt", p["firstRowText"])
+        self.assertIn("+3", p["firstRowText"])
+        self.assertEqual(p["gateMarks"], 1,
+                         "exactly the gate commit wears the ⛭")
+
+    def test_a_count_nobody_reported_stays_blank_never_zero(self):
+        p = self._changes()
+        self.assertNotIn("+0", p["untrackedRowText"])
+        self.assertNotIn("−0", p["untrackedRowText"])
+        self.assertNotIn("null", p["untrackedRowText"])
+
+    def test_row_click_opens_the_pane_and_names_the_file(self):
+        p = self._changes()
+        self.assertEqual(p["fileDiffCall"][0], "get_file_diff")
+        self.assertEqual(p["fileDiffCall"][1], "a.txt")
+        self.assertTrue(p["paneOpen"])
+        self.assertIn("a.txt", p["title"])
+
+    def test_a_stale_file_diff_answer_is_dropped(self):
+        """Two clicks race on worker threads; an answer for a request no
+        longer displayed must not overwrite the one that is."""
+        self.assertTrue(self._changes()["staleIgnored"])
+
+    def test_diff_lines_are_classed_and_truncation_announces_itself(self):
+        p = self._changes()
+        classes = " ".join(p["lineClasses"])
+        self.assertIn("dmeta", classes)
+        self.assertIn("dhunk", classes)
+        self.assertIn("dadd", classes)
+        self.assertIn("ddel", classes)
+        self.assertTrue(p["truncationSaid"])
+
+    def test_the_two_kinds_of_nothing_are_worded_apart(self):
+        """"binary file" was in the old catch-all and is unreachable — a
+        binary file renders "Binary files ... differ". Meanwhile a request
+        the engine could not resolve must not come back as a claim about the
+        file's contents."""
+        p = self._changes()
+        self.assertIn("no changes", p["unchangedText"])
+        self.assertNotIn("binary", p["unchangedText"].lower())
+        self.assertIn("not available", p["unavailableText"].lower())
+
+    def test_live_code_open_clears_the_diff_state(self):
+        self.assertTrue(self._changes()["diffModeCleared"])
+
+    def test_each_failure_gets_its_own_sentence(self):
+        """One flag for five causes becomes a false sentence on screen: a
+        deleted folder, a machine with no git and a repo git refused are all
+        told "Not a git repository." otherwise."""
+        t = self._changes()["reasonTexts"]
+        self.assertIn("Not a git repository", t["no_repo"])
+        self.assertIn("not there any more", t["gone"])
+        self.assertIn("not installed", t["no_git"])
+        self.assertNotIn("Not a git repository", t["refused"])
+        self.assertIn("dubious ownership", t["refused"],
+                      "git's own explanation names the fix — pass it on")
+
+    def test_a_gitignored_workspace_says_so_rather_than_clean(self):
+        t = self._changes()["ignoredText"]
+        self.assertIn("git ignores this folder", t)
+        self.assertNotIn("clean", t)
+
+    def test_a_subfolder_names_whose_repo_it_is_reporting(self):
+        self.assertIn("pkg of this repo", self._changes()["scopedHead"])
+
+    def test_a_stale_overview_answer_is_dropped(self):
+        """get_diff runs on worker threads with no ordering, and refreshes
+        fire on every edit burst — an older snapshot repainted as current is
+        the one thing this panel must never do."""
+        self.assertTrue(self._changes()["staleOverviewIgnored"])
+
+    # ---- slash-command autocomplete (2026-08-29) -----------------------
+    def _slash(self):
+        self.assertIsNone(self.report.get("slashError"))
+        return self.report["slash"]
+
+    def test_vocabulary_is_the_config_table(self):
+        self.assertEqual(self._slash()["vocab"],
+                         [c["name"] for c in STUB_CONFIG["commands"]])
+
+    def test_prefix_filters_the_menu(self):
+        p = self._slash()
+        self.assertTrue(p["openOnPrefix"])
+        joined = " ".join(p["rowTexts"])
+        self.assertIn("/clear", joined)
+        self.assertIn("/compact", joined)
+        self.assertIn("/ceiling", joined)
+        self.assertNotIn("/stop", joined)
+
+    def test_arrow_plus_tab_completes_the_highlighted_command(self):
+        p = self._slash()
+        self.assertTrue(p["tabPrevented"])
+        self.assertEqual(p["completed"], "/compact ")
+        self.assertTrue(p["usageAfterComplete"],
+                        "an argful completion shows its usage reminder")
+
+    def test_enter_completes_an_unfinished_name(self):
+        p = self._slash()
+        self.assertTrue(p["enterCompletes"])
+        self.assertEqual(p["enterValue"], "/stop")
+
+    def test_enter_on_a_complete_name_still_sends(self):
+        """The menu must never eat the send: /stop typed in full has nothing
+        left to complete, so Enter falls through to sendSay."""
+        self.assertTrue(self._slash()["enterFallsThrough"])
+
+    def test_escape_closes_and_prose_never_opens_it(self):
+        p = self._slash()
+        self.assertTrue(p["escClosed"])
+        self.assertTrue(p["closedOnProse"])
+        self.assertTrue(p["emptyCloses"])
+
+    def test_arguments_collapse_to_a_usage_line_with_the_scope_stated(self):
+        p = self._slash()
+        self.assertTrue(p["usageForArgs"])
+        self.assertTrue(p["scopeShown"],
+                        "a scoped command is SHOWN with its scope, not hidden")
+
+    def test_dictated_text_is_not_eaten_by_a_stale_menu(self):
+        """insertDictation assigns #say.value, which fires no input event.
+        With the menu still holding rows painted for "/c", Enter completed
+        /clear over the dictated sentence — destroying it silently, and the
+        natural second Enter then sent /clear, wiping every seat's session."""
+        p = self._slash()
+        self.assertTrue(p["openBeforeDictation"])
+        self.assertIn("compact the claude seat", p["valueAfterDictation"])
+        self.assertTrue(p["menuHiddenRightAfterDictation"],
+                        "insertDictation repaints on its own — slashKey's "
+                        "resync is the second line of defence, not the only")
+        self.assertTrue(p["dictationSurvives"])
+        self.assertEqual(p["valueAfterEnter"], p["valueAfterDictation"])
+
+    def test_any_programmatic_value_change_resyncs_the_menu(self):
+        """The fix is in slashKey, not in the one caller that was found —
+        so a future writer of #say.value is covered too."""
+        self.assertTrue(self._slash()["staleMenuNeverEatsProse"])
 
 
 if __name__ == "__main__":

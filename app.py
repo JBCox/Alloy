@@ -1051,6 +1051,8 @@ class Api:
                           "reason": "Still checking the microphone."},
             "speaker": {"available": False,
                         "detail": "Still checking text-to-speech."},
+            # Static table, no subprocess — safe even in the fallback.
+            "commands": [dict(c) for c in relay.COMMANDS],
         }
 
     def precompute_config(self):
@@ -1222,6 +1224,9 @@ class Api:
             "gemini_default": "gemini-3.7-flash-high",
             "dictation": self._dict_probe or {"available": False, "reason": ""},
             "speaker": self._spk_probe or {"available": False, "detail": ""},
+            # The composer's slash autocomplete: the engine's own command
+            # table, never a hand-kept JS copy (the HELP_TEXT drift rule).
+            "commands": [dict(c) for c in relay.COMMANDS],
             "docs": os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  "README.md"),
         }
@@ -2080,6 +2085,68 @@ class Api:
             except Exception:
                 pass            # a probe that fails must not block the modal
             self.emit("continuous_probe", payload)
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True}
+
+    # ----------------------------------------------------------- changes --
+    # The file rail's Changes tab. Both follow the recheck_auth shape (git is
+    # a subprocess; the bridge thread deadlocks on subprocess.run), and both
+    # resolve the workspace the way read_image does — (run.state or
+    # {}).get("workspace") or run.view_workspace — NOT through _resolve_chat,
+    # because a reopened view-only chat has no live state and its recorded
+    # workspace is still worth diffing. An unknown chat_id resolves to
+    # NOTHING, never to the focused run (the read_image rule: chat A's diff
+    # must not render inside chat B). Answers ride _emit_for so the event
+    # carries the chat id and cannot land in another transcript.
+
+    def _diff_run(self, chat_id):
+        run = self._runs.get(chat_id) if chat_id else self._runs.focused()
+        if run is None:
+            return None, None
+        ws = (run.state or {}).get("workspace") or run.view_workspace
+        return run, ws
+
+    def get_diff(self, chat_id=None, seq=None):
+        """Branch, dirty files and recent commits for the chat's workspace.
+
+        `seq` is the UI's request number, echoed back untouched: these are
+        worker threads with no ordering, refreshes fire on every edit burst,
+        and an older answer landing last would repaint a stale snapshot as
+        current with nothing on screen saying so.
+        """
+        run, ws = self._diff_run(chat_id)
+        if run is None or not ws:
+            return {"error": "No workspace for this chat."}
+
+        def work():
+            try:
+                payload = relay.git_overview(ws)
+            except Exception as e:  # git_overview never raises; belt anyway
+                payload = {"git": False, "reason": "error",
+                           "detail": relay.error_excerpt(e)}
+            payload["seq"] = seq
+            self._emit_for(run, "diff", payload)
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True}
+
+    def get_file_diff(self, path=None, sha=None, chat_id=None):
+        """One bounded patch — a dirty file's, or a whole commit's.
+
+        The request key (path/sha) is echoed back in the payload so the UI
+        can drop an answer for a request it no longer displays (two clicks
+        in a row race on the worker threads)."""
+        run, ws = self._diff_run(chat_id)
+        if run is None or not ws:
+            return {"error": "No workspace for this chat."}
+
+        def work():
+            payload = {"error": "not available"}
+            try:
+                payload = relay.git_file_diff(ws, path=path, sha=sha)
+            except Exception:
+                payload = {"error": "not available"}
+            payload["path"], payload["sha"] = path, sha
+            self._emit_for(run, "file_diff", payload)
         threading.Thread(target=work, daemon=True).start()
         return {"ok": True}
 

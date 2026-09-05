@@ -235,6 +235,15 @@ crashes on resume cannot loop.
   provenance-backed coordination heuristics. Explicit feedback reasons count
   immediately; inferred patterns require recurrence. Unpinned rules expire
   after 30 days, while pinned and dismissed choices survive refreshes.
+- **Slash autocomplete** — typing `/` in the composer opens a menu of the
+  commands that actually exist: the list comes from the engine's own table,
+  so it can never offer something `/help` has not heard of. ↑/↓ move, Tab or
+  Enter completes, Escape closes; once you start typing an argument the menu
+  collapses to a one-line usage reminder. A command that only means something
+  in one kind of room (`/ceiling`, `/checkin`, `/limits`, `/objective`) is
+  still listed, with its scope stated beside it — the engine is the thing
+  that knows the room's state, and it already refuses out loud. Enter on a
+  name you have already typed in full sends it rather than completing it.
 - **`Ctrl+C`** — hard stop; transcript is still saved.
 - Remote interjection: write text into `sessions\<run>\say.txt` (from another
   Claude session, SSH, the phone…) — same effect as typing.
@@ -298,6 +307,38 @@ rail, so a terminal conversation can be reopened there too. A conversation
 spawned by a seat (a **team**) is an ordinary session folder as well: it shows
 up in the rail marked **↳** with a "spawned by …" tooltip, and it replays like
 any other chat.
+
+## Seeing what changed
+
+The right-hand rail has two tabs. **Files** is the working folder newest-first
+(thumbnails, click-to-open, the live code viewer). **Changes** is what git
+says about that same folder:
+
+- The header names the branch and how many files are uncommitted (or says
+  **clean**); a detached HEAD is labelled as such rather than passed off as a
+  branch. If the working folder is a **subfolder** of a bigger repository, the
+  header says so and everything below is scoped to that folder — the tab
+  reports the folder it names, never its parent.
+- **Uncommitted** lists each changed file with its git status letter and
+  ±line counts, and clicking one renders its patch in the pane above: added
+  lines green, removed red, hunk headers blue. A count nobody reported stays
+  blank rather than showing 0 — an untracked file and a binary file both
+  genuinely have no line count, and "+0" would be a claim.
+- **Recent commits** lists the last 30 that touched this folder, newest
+  first. A commit the wave gate made — Alloy's own checkpoint of a green
+  wave — is marked **⛭**, so an overnight run's checkpoints stand apart from
+  your own; clicking one shows that commit's patch, scoped to this folder.
+- When there is nothing to show it says **which** nothing: not a repository,
+  a folder that has been deleted, git not installed, or git refusing to open
+  the repo — in which case git's own explanation is passed through, because
+  that sentence usually names the fix. A chat with the default scratch
+  workspace (which lives inside Alloy's own checkout, under a gitignored
+  `sessions/`) is told that git ignores the folder rather than that it is
+  "clean".
+
+Everything here is read-only: Alloy never commits, stages or reverts from
+this tab, and a patch too big for the pane is cut on a line boundary and
+says so.
 
 ## How it ends
 
