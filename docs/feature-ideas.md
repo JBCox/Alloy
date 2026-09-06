@@ -18,8 +18,14 @@ The biggest gap today: after an overnight Keep Improving run, Josh has commits
 and a transcript, and **no in-app way to see what actually changed.**
 
 *(#1 shipped 2026-08-29 as the Changes tab; #2 shipped 2026-09-05 — see
-CLAUDE.md § Checkpoint and rewind. #12, #13, #15, #16, #20, #26 and #27
-shipped earlier. Grep the code before building anything else from this list.)*
+CLAUDE.md § Checkpoint and rewind. **#18 shipped 2026-09-05** as the "While
+you were away" card — see CLAUDE.md § What happened while you were away. It
+also took the aggregation half of **#3**: per-wave gate history turned out to
+exist already in `supervisor_trace`, so what is left of the gate scoreboard is
+the TREND ("1079 → 1084 tests"), which needs test-output parsing measured
+against pytest, npm and Alloy's own runner before a line is written. #12, #13,
+#15, #16, #20, #26 and #27 shipped earlier. Grep the code before building
+anything else from this list.)*
 
 1. **Diff lane** — a right-rail tab beside Files showing `git diff` per wave
    (and per commit `gate_commit` made), file tree plus hunks, provider-colored
@@ -95,10 +101,17 @@ shipped earlier. Grep the code before building anything else from this list.)*
 17. **Wake-me rules** — the policy layer on top: notify only on (a) a question,
     (b) two red gates, (c) spend past X%, (d) no committed turn in N minutes.
     Everything else stays silent.
-18. **Morning report** — reopening a chat that ran overnight opens with a card:
-    waves, commits, spend by seat, tests delta, unresolved questions, and what
-    the run is working on now. `current_objective`, `wave_report` and the usage
-    accumulator already hold every number.
+18. ~~**Morning report**~~ — SHIPPED 2026-09-05 as "While you were away".
+    Two things this entry asserted were wrong and are worth keeping:
+    `current_objective` and `wave_report` are NOT meta readers (both take a
+    live loop state and reach `state["agents"][i].name`, which a reopened
+    chat does not have until rehydrate runs — and view-only chats never
+    rehydrate), and the usage accumulator does not "hold every number":
+    `usage` is absent from 34 of 52 real sessions. **Commits** are
+    deliberately NOT on the card — the Changes tab already resolves git
+    correctly for a workspace nested inside a bigger repo, and a second
+    reader competing with it is how two surfaces come to disagree about one
+    folder. **Tests delta** is not there either; see #3.
 19. **Global attention count** — one badge (taskbar plus title) for "chats
     waiting on you" across all sessions, not just the rail group.
 

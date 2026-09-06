@@ -13,6 +13,11 @@
        warm bone, moved off gold so it can't be confused with --alloy. */
     --josh: #C9B896; --alloy: #F4B942;
     --danger: #C75B5B;
+    /* --danger's twin, and it exists for the same reason: a surface that
+       needs to say "this went well" must not reach for --gpt, which means
+       A PARTICIPANT SPOKE. (It did, once, in the morning report's first
+       draft — a card of app statistics tinted in one seat's colour.) */
+    --good: #5FB894;
   }
   * { box-sizing: border-box; margin: 0; }
   html, body { height: 100%; }
@@ -409,6 +414,68 @@
     margin: 14px 0; padding: 14px; border: 1px solid rgba(185,171,213,.28);
     border-radius: 11px; background: color-mix(in srgb, var(--surface) 88%, #7965A5 12%);
   }
+  /* The morning report. Alloy chrome throughout, never a provider colour:
+     this is the APP accounting for a run, not a participant speaking — the
+     same rule .working rows and the Changes tab already follow. */
+  .rep-card { border-color: color-mix(in srgb, var(--alloy) 30%, transparent); }
+  .rep-head { display: flex; align-items: center; gap: 9px; margin-bottom: 9px; }
+  .rep-head strong { color: var(--alloy); font-size: 13px; font-weight: 600; }
+  .rep-since { color: var(--muted); font-size: 11.5px; }
+  .rep-x {
+    margin-left: auto; background: none; border: 0; color: var(--muted);
+    cursor: pointer; font-size: 15px; line-height: 1; padding: 2px 4px;
+  }
+  .rep-x:hover { color: var(--text); }
+  .rep-lede { color: var(--text); font-size: 12.5px; line-height: 1.5; margin-bottom: 9px; }
+  /* .rep-v, not .rep-lede: the lede is set with textContent and can never
+     contain an element, so the rule sat in the sheet matching nothing while
+     the note it was written for rendered italic. Only a real browser sees
+     this class of defect — the node harness has no cascade. */
+  .rep-v em { color: var(--muted); font-style: normal; }
+  .rep-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 9px; }
+  .rep-chip {
+    display: inline-flex; align-items: baseline; gap: 5px; padding: 3px 8px;
+    border-radius: 999px; border: 1px solid var(--line);
+    background: rgba(0,0,0,.14); font-size: 11.5px; color: var(--muted);
+  }
+  .rep-chip b { color: var(--text); font-weight: 600; font-size: 12px; }
+  .rep-chip[data-tone=warn] { border-color: #89763C; }
+  .rep-chip[data-tone=warn] b { color: #D9B95F; }
+  .rep-chip[data-tone=bad] { border-color: color-mix(in srgb, var(--danger) 55%, transparent); }
+  .rep-chip[data-tone=bad] b { color: var(--danger); }
+  .rep-chip[data-tone=good] b { color: var(--good); }
+  .rep-rows { display: grid; gap: 6px; }
+  .rep-row {
+    display: grid; grid-template-columns: 92px minmax(0,1fr); gap: 9px;
+    align-items: baseline; font-size: 12px;
+  }
+  .rep-row > .rep-k { color: var(--muted); font-size: 11px; }
+  .rep-row > .rep-v { color: var(--text); min-width: 0; line-height: 1.5; }
+  /* a cost nobody reported is a dash, never a zero */
+  .rep-none { color: var(--muted); opacity: .65; }
+  .rep-files { display: flex; flex-wrap: wrap; gap: 4px 10px; min-width: 0; }
+  .rep-file {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size: 11px; color: var(--muted);
+    /* A flex item will not shrink below its content without min-width: 0,
+       and a workspace-relative path has no break opportunities — so one
+       long deliverable painted outside the card and gave the whole
+       transcript a horizontal scrollbar. The same defect .msg-head shipped
+       in W1.4, pinned there by a source guard for the same reason. */
+    min-width: 0; overflow-wrap: anywhere;
+  }
+  .rep-objs { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+  .rep-obj { font-size: 12px; color: var(--text); line-height: 1.45; }
+  .rep-obj span { color: var(--muted); font-size: 11px; }
+  .rep-fail {
+    margin-top: 7px; padding: 7px 8px; border-radius: 7px;
+    background: rgba(0,0,0,.22); border: 1px solid color-mix(in srgb, var(--danger) 32%, transparent);
+    color: var(--muted); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size: 10.5px; line-height: 1.45; white-space: pre-wrap;
+    max-height: 190px; overflow: auto;
+  }
+  .rep-notes { margin: 10px 0 0; padding: 8px 0 0; border-top: 1px solid var(--line); }
+  .rep-note { color: var(--muted); font-size: 11px; line-height: 1.5; }
   .plan-head { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; }
   .plan-head strong { color: var(--text); font-size: 13px; font-weight: 550; }
   .plan-phase {
@@ -2765,6 +2832,7 @@
         </div>
       </div>
       <div class="after" id="afterRow">
+        <button class="btn-sm" id="openReport">Report</button>
         <button class="btn-sm" id="openTranscript">Transcript</button>
         <button class="btn-sm" id="openWorkspace">Folder</button>
         <button class="btn-sm" id="newBtn">New conversation</button>
@@ -5240,6 +5308,478 @@ function renderPlan(plan) {
    back with a note. `files` and `deps` are NOT offered, because they are the
    workstream isolation contract and the only validator for them parses a
    directive STRING, not a dict. */
+// ---- the morning report -----------------------------------------------
+// What happened in a chat while nobody was reading it. Every number comes
+// from report.build() in Python; this file decides only how to word it, and
+// the wording rules are the same three the engine follows: a count the
+// record could not hold is prefixed "at least", a cost nobody reported is a
+// dash rather than a zero, and an absence with a reason is SAID rather than
+// left as a missing row.
+function repChip(into, label, value, tone) {
+  if (value === null || value === undefined || value === "") return null;
+  const chip = document.createElement("span");
+  chip.className = "rep-chip";
+  if (tone) chip.dataset.tone = tone;
+  const b = document.createElement("b");
+  b.textContent = String(value);
+  const t = document.createElement("span");
+  t.textContent = label;
+  chip.append(b, t);
+  into.appendChild(chip);
+  return chip;
+}
+
+function repRow(into, key, build) {
+  const row = document.createElement("div");
+  row.className = "rep-row";
+  const k = document.createElement("div");
+  k.className = "rep-k"; k.textContent = key;
+  const v = document.createElement("div");
+  v.className = "rep-v";
+  if (build(v) === false) return null;      // the builder declined this row
+  row.append(k, v);
+  into.appendChild(row);
+  return row;
+}
+
+// "at least 5" when the control log lost its beginning, "5" when it did not.
+// The floor is carried per figure rather than stated once at the top,
+// because a reader who scrolls straight to the gate line never sees a
+// caveat parked above the chips.
+function repCount(n, floor) {
+  if (n === null || n === undefined) return null;
+  return (floor ? "≥" : "") + n;
+}
+
+function repMoney(v) { return v === null || v === undefined ? null : "$" + v.toFixed(2); }
+
+function renderReport(rep) {
+  if (!rep || !rep.ok || !rep.show) return null;
+  let card = document.querySelector(".plan-card[data-active-report]");
+  const isNew = !card;
+  if (!card) {
+    card = document.createElement("section");
+    card.className = "plan-card rep-card";
+    card.dataset.activeReport = "1";
+  }
+  card.replaceChildren();
+
+  const head = document.createElement("div");
+  head.className = "rep-head";
+  const title = document.createElement("strong");
+  title.textContent = rep.running ? "While you were away — still running"
+                                  : "While you were away";
+  head.appendChild(title);
+  const clock = rep.clock || {};
+  if (clock.active_from && clock.active_to) {
+    const since = document.createElement("span");
+    since.className = "rep-since";
+    // A BRACKET around what the control log still holds, never a duration.
+    // It is trace-derived, so a trimmed log has lost its beginning and the
+    // range starts wherever the surviving entries do — said, not implied.
+    since.textContent = (clock.active_floor ? "recorded from " : "")
+      + clock.active_from + " → " + clock.active_to;
+    if (clock.active_floor)
+      since.title = "The start of the control log is no longer kept, so the "
+                  + "run began before this.";
+    head.appendChild(since);
+  }
+  const close = document.createElement("button");
+  close.className = "rep-x"; close.type = "button";
+  close.title = "Hide this report"; close.setAttribute("aria-label", "Hide this report");
+  close.textContent = "✕";
+  close.onclick = () => {
+    // Per chat and per process, on the run object like every other per-chat
+    // view state — a module-level flag would hide the next chat's report too.
+    const run = activeId ? runFor(activeId) : null;
+    if (run) run.reportDismissed = true;
+    card.remove();
+    syncReportBtn();
+  };
+  head.appendChild(close);
+  card.appendChild(head);
+
+  const lede = document.createElement("div");
+  lede.className = "rep-lede";
+  lede.textContent = reportLede(rep);
+  card.appendChild(lede);
+
+  const chips = document.createElement("div");
+  chips.className = "rep-chips";
+  // The duration is whichever measurement is honest for THIS run — the
+  // accumulated Keep Improving clock, or the manager's own first-to-last
+  // timestamp. Never created→updated, which measures the chat rather than
+  // the run and reads as twenty hours for one worked on across two days.
+  // The ONE duration the engine allows the card to print. Everything else it
+  // publishes is a span between two instants — created→updated measures the
+  // chat, and the control log's first→last includes every idle gap — so
+  // neither is offered here under any label.
+  if (clock.worked_s !== null && clock.worked_s !== undefined)
+    repChip(chips, "worked", repDuration(clock.worked_s));
+  if (rep.waves.applicable !== false)
+    repChip(chips, rep.waves.dispatched === 1 ? "wave" : "waves",
+            repCount(rep.waves.dispatched, rep.waves.floor));
+  const objs = rep.objectives || {};
+  // "met" counts only objectives the MANAGER settled; the check-in watchdog
+  // retires a stuck board through the same call and those are abandoned, not
+  // met. Records written before the engine told them apart are neither, and
+  // the neutral wording is what the card falls back to.
+  if (objs.met) repChip(chips, objs.met === 1 ? "objective met" : "objectives met",
+                        objs.met, "good");
+  if (objs.unknown) repChip(chips, objs.unknown === 1 ? "objective closed"
+                                                     : "objectives closed",
+                            objs.unknown);
+  const abandoned = (objs.recorded || 0) - (objs.met || 0) - (objs.unknown || 0);
+  if (abandoned > 0) repChip(chips, "abandoned", abandoned, "warn");
+  const t = rep.tasks || {};
+  if (t.total) repChip(chips, "tasks done", t.done + "/" + t.total,
+                       t.failed ? "warn" : null);
+  if (rep.delivered_total) repChip(chips, "files changed", rep.delivered_total);
+  const g = rep.gate || {};
+  if (g.passed) repChip(chips, "green", repCount(g.passed, g.floor), "good");
+  if (g.failed) repChip(chips, "red", repCount(g.failed, g.floor), "bad");
+  if (rep.trouble.revivals)
+    repChip(chips, rep.trouble.revivals === 1 ? "restart" : "restarts",
+            repCount(rep.trouble.revivals, rep.trouble.floor), "warn");
+  if (rep.trouble.errors)
+    repChip(chips, "manager errors", repCount(rep.trouble.errors, rep.trouble.floor), "warn");
+  if (rep.spend.total_usd !== null && rep.spend.total_usd !== undefined)
+    repChip(chips, "spent", repMoney(rep.spend.total_usd));
+  if (chips.childElementCount) card.appendChild(chips);
+
+  const rows = document.createElement("div");
+  rows.className = "rep-rows";
+
+  if (rep.objective && rep.objective.text) {
+    repRow(rows, rep.running ? "Working on" : "Last objective", v => {
+      v.textContent = rep.objective.text;
+      if (rep.objective.source === "opener") {
+        // Named, not silently substituted: what Josh typed and what the
+        // manager decided to pursue are different things, and a card that
+        // prints one under the other's label is the Master-goal-panel bug.
+        const note = document.createElement("em");
+        note.className = "rep-none";
+        note.textContent = "  (your opening message — the manager never set one)";
+        v.appendChild(note);
+      }
+    });
+  }
+
+  // The manager's own closing words, which the engine has always recorded and
+  // nothing has ever shown. It is the one question this card exists to
+  // answer, and the lede deliberately cannot carry it: a mechanical stop and
+  // a goal verdict are different facts and are never merged into one sentence.
+  const verdict = (rep.outcome || {}).trace;
+  if (verdict && (verdict.title || verdict.detail)) {
+    repRow(rows, verdict.type === "goal_accepted" ? "Manager's verdict"
+                                                  : "No verdict", v => {
+      const t = document.createElement("div");
+      t.textContent = verdict.title || "";
+      v.appendChild(t);
+      if (verdict.detail) {
+        const d = document.createElement("div");
+        d.className = "rep-none"; d.style.fontSize = "11.5px";
+        d.textContent = verdict.detail;
+        v.appendChild(d);
+      }
+    });
+  }
+
+  const limits = (rep.trouble || {}).limits || [];
+  if (limits.length) {
+    // WHICH limit, and what it said. "It stopped on a limit you set" names
+    // none of them, and the payload has been carrying the sentence.
+    repRow(rows, "Limit", v => { v.textContent = limits[limits.length - 1]; });
+  }
+
+  const waiting = rep.waiting;
+  if (waiting && (waiting.question || waiting.text || waiting.seat !== undefined)) {
+    // A pending question means two different things, and only one of them is
+    // an ask. While the run is LIVE the modal is coming. Once the run has
+    // stopped, `announce_lost_ask` will tell the seat nobody answered and
+    // will deliberately never re-open the modal — so calling that "waiting on
+    // you" promises an answer box that cannot appear, and an answer typed
+    // into the composer goes somewhere else entirely.
+    const live = !!rep.running;
+    repRow(rows, live ? "Waiting on you" : "Question lost", v => {
+      const q = document.createElement("div");
+      q.textContent = String(waiting.question || waiting.text ||
+                             "A seat asked you something.");
+      v.appendChild(q);
+      if (!live) {
+        const note = document.createElement("div");
+        note.className = "rep-none"; note.style.fontSize = "11px";
+        note.textContent = "The run stopped before this was answered. "
+          + "Continuing tells the seat nobody answered — it is not re-asked.";
+        v.appendChild(note);
+      }
+    });
+  }
+
+  repRow(rows, "Verification", v => {
+    // A room with no manager never had a verification stage; the note says
+    // so once, and a row here would read as a setting somebody forgot.
+    if (g.applicable === false) return false;
+    if (g.skipped) { v.className = "rep-v rep-none"; v.textContent = g.skipped; return; }
+    const parts = [];
+    if (g.passed) parts.push(repCount(g.passed, g.floor) + " passed");
+    if (g.failed) parts.push(repCount(g.failed, g.floor) + " failed");
+    if (g.unfinished) parts.push(g.unfinished + " never reported back");
+    v.textContent = (parts.length ? parts.join(", ") : "never ran") +
+                    (g.command ? " — " + g.command : "");
+    if (g.commits && g.commits.length) {
+      const c = document.createElement("div");
+      c.className = "rep-none"; c.style.fontSize = "11px";
+      c.textContent = "checkpointed as " + g.commits.join(", ");
+      v.appendChild(c);
+    }
+    if (g.last_failure) {
+      const pre = document.createElement("div");
+      pre.className = "rep-fail";
+      pre.textContent = g.last_failure;
+      v.appendChild(pre);
+    }
+  });
+
+  if ((objs.settled || []).length) {
+    repRow(rows, "Objectives", v => {
+      const list = document.createElement("ul");
+      list.className = "rep-objs";
+      objs.settled.forEach(o => {
+        const li = document.createElement("li");
+        li.className = "rep-obj";
+        li.textContent = o.goal || "(no goal recorded)";
+        const meta = document.createElement("span");
+        const bits = [];
+        if (o.outcome === "abandoned") bits.push("abandoned by the check-in");
+        else if (o.outcome !== "met") bits.push("outcome not recorded");
+        if (o.tasks !== null && o.tasks !== undefined)
+          bits.push(o.tasks + (o.tasks === 1 ? " task" : " tasks"));
+        if (o.failed) bits.push(o.failed + " failed");
+        if (o.gate_ok === true) bits.push("verified");
+        else if (o.gate_ok === false) bits.push("verification failed");
+        if (o.delivered && o.delivered.length)
+          bits.push(o.delivered.length + (o.delivered.length === 1 ? " file" : " files"));
+        meta.textContent = bits.length ? "  " + bits.join(" · ") : "";
+        li.appendChild(meta);
+        list.appendChild(li);
+      });
+      v.appendChild(list);
+    });
+  }
+
+  if (rep.delivered && rep.delivered.length) {
+    repRow(rows, "Files", v => {
+      const wrap = document.createElement("div");
+      wrap.className = "rep-files";
+      rep.delivered.forEach(p => {
+        const f = document.createElement("span");
+        f.className = "rep-file"; f.textContent = p;
+        wrap.appendChild(f);
+      });
+      v.appendChild(wrap);
+      if (rep.delivered_total > rep.delivered.length) {
+        const more = document.createElement("div");
+        more.className = "rep-none"; more.style.fontSize = "11px";
+        more.textContent = "+" + (rep.delivered_total - rep.delivered.length) + " more";
+        v.appendChild(more);
+      }
+      // The diff is the Changes tab's job and it is one click away. This
+      // card deliberately runs no git of its own: a second, less careful
+      // reader of one folder is how two surfaces come to disagree about it.
+      const link = document.createElement("button");
+      link.className = "btn-sm"; link.type = "button";
+      link.style.marginTop = "7px";
+      link.textContent = "See what changed";
+      link.onclick = () => {
+        // The rail is collapsed by default under 1288px and the preference
+        // is persisted, so switching its tab alone painted a diff into a
+        // hidden container — a button that fetched, rendered and showed the
+        // user nothing. Open the rail first, then switch.
+        document.querySelector("main").classList.remove("no-files");
+        try { localStorage.setItem("hideFileRail", "0"); } catch (e) {}
+        railTabSet("changes");
+      };
+      v.appendChild(link);
+    });
+  }
+
+  repRow(rows, "Spend", v => {
+    if (!rep.spend.reported) {
+      v.className = "rep-v rep-none";
+      v.textContent = "No seat in this room reports a cost.";
+      return;
+    }
+    const wrap = document.createElement("div");
+    // The relay's OWN calls — the manager's planning, the moderator, the
+    // brief, the auto-title. The engine has always separated them and the
+    // card printed only the total, so the chip could exceed the seat rows
+    // beneath it by a third with nothing on screen explaining the gap. In a
+    // room of seats that report no cost at all, this is the whole spend.
+    const kinds = rep.spend.by_kind || {};
+    Object.keys(kinds).sort().forEach(k => {
+      if (k === "seat") return;                 // that is the rows below
+      const line = document.createElement("div");
+      line.className = "rep-none"; line.style.fontSize = "11.5px";
+      line.textContent = k + " " + repMoney(kinds[k]);
+      wrap.appendChild(line);
+    });
+    (rep.spend.by_seat || []).forEach(s => {
+      const line = document.createElement("div");
+      const name = document.createElement("span");
+      name.textContent = s.name + " ";
+      const val = document.createElement("span");
+      if (s.cost_usd === null || s.cost_usd === undefined) {
+        // A dash, never $0.00 — Gemini and OpenCode report no cost at all,
+        // and a zero there reads as "this seat was free".
+        val.className = "rep-none";
+        val.textContent = "— no cost reported";
+      } else {
+        val.textContent = repMoney(s.cost_usd);
+      }
+      const turns = document.createElement("span");
+      turns.className = "rep-none";
+      turns.textContent = s.turns ? "  (" + s.turns + (s.turns === 1 ? " turn)" : " turns)") : "";
+      line.append(name, val, turns);
+      wrap.appendChild(line);
+    });
+    if (!wrap.childElementCount) return false;
+    v.appendChild(wrap);
+  });
+
+  if (rows.childElementCount) card.appendChild(rows);
+
+  if (rep.notes && rep.notes.length) {
+    const notes = document.createElement("div");
+    notes.className = "rep-notes";
+    rep.notes.forEach(n => {
+      const p = document.createElement("div");
+      p.className = "rep-note"; p.textContent = n;
+      notes.appendChild(p);
+    });
+    card.appendChild(notes);
+  }
+
+  if (isNew) $("feed").appendChild(card);
+  return card;
+}
+
+// Fetch and paint the report for ONE chat. `id` is passed rather than read
+// off activeId inside, because openChat awaits this and Ctrl+Tab can move
+// the focus in the meantime — the same rule the memory modal learned when a
+// note written for project A landed in project B.
+async function loadReport(id) {
+  if (!id) return;
+  let rep = null;
+  try { rep = await pywebview.api.session_report(id); }
+  catch (e) { rep = null; }
+  if (id !== activeId) return;                 // Josh moved on while we read
+  const run = runFor(id);
+  if (run) run.report = rep;
+  if (rep && rep.show && !(run && run.reportDismissed)) renderReport(rep);
+  else {
+    // A card that no longer applies is REMOVED, not left standing. openChat
+    // wipes the feed before calling this, so today the only way to get here
+    // with one on screen is `finish()` re-reading after a run ended — but a
+    // renderer that only ever adds is how a stale card outlives the answer
+    // that produced it, which is the bug this whole feature is about.
+    const stale = document.querySelector(".plan-card[data-active-report]");
+    if (stale) stale.remove();
+  }
+  syncReportBtn();
+}
+
+// The button follows `available` — is there anything recorded to report on —
+// while the CARD auto-opens on `show`. They are different questions: a chat
+// we can describe perfectly well may still be one Josh sat and watched, and
+// tying the button to `show` made every such chat's report unreachable.
+function syncReportBtn() {
+  const btn = $("openReport");
+  if (!btn) return;
+  const run = activeId ? runFor(activeId) : null;
+  const rep = run && run.report;
+  const has = !!(rep && (rep.available || rep.show));
+  btn.hidden = !has;
+  const open = !!document.querySelector(".plan-card[data-active-report]");
+  btn.textContent = open ? "Hide report" : "Report";
+  btn.title = has ? "What happened in this chat while you were away" : "";
+  if (has) $("afterRow").classList.add("show");
+}
+
+function toggleReport() {
+  const card = document.querySelector(".plan-card[data-active-report]");
+  const run = activeId ? runFor(activeId) : null;
+  if (card) {
+    if (run) run.reportDismissed = true;
+    card.remove();
+  } else if (run && run.report) {
+    run.reportDismissed = false;
+    // Pressed on a chat that did not auto-open one, the button still has to
+    // answer: the engine wrote a sentence saying why, and dropping it on the
+    // floor is the absence the state-the-withholding rule forbids. A build
+    // that FAILED (a corrupt meta) says so here too, rather than being
+    // indistinguishable from a quiet night.
+    if (!renderReport(run.report))
+      addMsg("system", "relay", run.report.reason
+             || "There is no report for this chat.", "");
+    else stickBottom();
+  }
+  syncReportBtn();
+}
+
+function repDuration(seconds) {
+  if (seconds === null || seconds === undefined || seconds < 0) return null;
+  if (seconds < 60) return Math.round(seconds) + "s";
+  const m = Math.floor(seconds / 60) % 60, h = Math.floor(seconds / 3600);
+  return h ? (m ? h + "h " + m + "m" : h + "h") : m + "m";
+}
+
+function reportLede(rep) {
+  const by = rep.started_by || {}, out = [];
+  if (by.kind === "schedule")
+    // A Run-now press is not a timer firing at 01:00, and saying so about a
+    // run Josh started thirty seconds earlier is false in both halves.
+    out.push(by.manual
+      ? "Started with Run now, from the schedule "
+        + JSON.stringify(by.name || "") + "."
+      : "Started by the schedule " + JSON.stringify(by.name || "") +
+        (by.when ? " (" + by.when + ")" : "") + ".");
+  else if (by.kind === "webhook")
+    out.push("Started by a script through the local webhook.");
+  else if (by.kind === "terminal")
+    out.push(by.unattended
+      ? "Started from the terminal with nobody at the console."
+      : "Started from the terminal.");
+  else if (by.kind === "josh")
+    out.push("You started this one.");
+  if (rep.running) out.push("It is still running.");
+  else if (rep.interrupted)
+    out.push("Alloy closed while it was still running — continuing picks it up.");
+  else if (rep.outcome && rep.outcome.stopped)
+    // The mechanical stop and the goal verdict answer different questions
+    // and are never merged into one sentence: "stopped on the turn cap" is
+    // not "finished", and the badges above the composer keep them apart for
+    // exactly this reason.
+    out.push("It stopped on " + REPORT_STOPS[rep.outcome.stopped] +
+             (rep.status && rep.status.label
+              ? ", with the manager at " + rep.status.label.toLowerCase() + "."
+              : "."));
+  else if (rep.status && rep.status.label)
+    out.push("The manager is at " + rep.status.label.toLowerCase() + ".");
+  return out.join(" ");
+}
+
+// Termination reasons, worded. An unknown one is passed through rather than
+// mapped to a friendly default: a reason nobody has taught this table is
+// still a real answer, and inventing one for it would be a forged fact.
+const REPORT_STOPS = new Proxy({
+  cap: "the round limit", ceiling: "the turn ceiling", wrap: "a seat wrapping up",
+  stop: "your Stop", limit: "a limit you set", starved: "every seat failing",
+  fatal: "an unrecoverable seat error", moderator_done: "the moderator's call",
+  supervisor_done: "the manager's verdict", battle_vote: "the duel's vote",
+  seat_count: "a roster this mode cannot run",
+}, {get: (t, k) => (typeof k === "string" && k in t) ? t[k] : String(k)});
+
 function renderBoard(board) {
   if (!board || !Array.isArray(board.tasks)) return;
   const phase = board.phase || "proposed", editable = phase === "proposed";
@@ -5797,6 +6337,19 @@ function finish() {
   seats.forEach(s => seatState(s.id, "", seatLabel(s.id)));
   applyAuthToSeats();
   if (transcriptPath) $("afterRow").classList.add("show");
+  // The report is a SNAPSHOT taken at reopen. This row re-shows itself when a
+  // run ends, so without a re-read the Report button came back pointing at
+  // yesterday's wave count, spend and file list — under a heading claiming
+  // to describe the run that had just finished. Re-read, and let the card
+  // repaint itself if it is currently open.
+  if (activeId) {
+    const wasOpen = !!document.querySelector(".plan-card[data-active-report]");
+    loadReport(activeId).then(() => {
+      const run = activeId ? runFor(activeId) : null;
+      if (wasOpen && run && run.report) renderReport(run.report);
+      syncReportBtn();
+    });
+  }
   $("say").focus();
 }
 
@@ -9271,6 +9824,13 @@ async function sendSay() {
   hideFeedback();
   clearFatal(); renderChats();
   document.querySelectorAll(".msg").forEach(e => e.remove());
+  // The sweep above is `.msg`-only, and the morning report is a `.plan-card`
+  // — so typing into a reopened view-only chat (which starts a BRAND NEW
+  // conversation) left the old chat's card sitting above the fresh
+  // transcript, describing a run this one has nothing to do with.
+  const staleReport = document.querySelector(".plan-card[data-active-report]");
+  if (staleReport) staleReport.remove();
+  $("openReport").hidden = true;
   $("afterRow").classList.remove("show");
   transcriptPath = null;
   const permissionMode = $("permissionMode").value;
@@ -10567,6 +11127,7 @@ document.addEventListener("keydown", e => {
 });
 $("permissionMode").onchange = syncPermissionNote;
 $("connectors").onchange = () => { $("connNote").style.display = $("connectors").checked ? "block" : "none"; };
+$("openReport").onclick = toggleReport;
 $("openTranscript").onclick = () => pywebview.api.open_path(transcriptPath);
 $("openWorkspace").onclick = () => pywebview.api.open_path(customFolder || workspacePath);
 /* ---------- chat rail (history) ---------- */
@@ -11310,6 +11871,21 @@ async function openChat(id, findQuery, findExcerpt) {
   run.unread = 0; run.completionUnread = false;
   if (run.plan && Array.isArray(run.plan.tasks)) renderPlan(run.plan);
   if (run.board && Array.isArray(run.board.tasks)) renderBoard(run.board);
+  // The morning report, AFTER the feed was cleared and replayed so the card
+  // lands under the last message it is summarising. openChat's
+  // `id === activeId` guard is what makes this once-per-reopen rather than
+  // once-per-repaint. One bounded meta read; a failure leaves no card and
+  // never blocks the reopen.
+  //
+  // Everything below this line writes into the feed, the composer and the
+  // seat rail, and a bridge round-trip is long enough for Ctrl+Tab. The
+  // guard is HERE as well as inside loadReport: the loader protects its own
+  // card, and this protects the rest of the function — without it another
+  // chat's transcript ended with this one's "Reopened" row and typing
+  // indicators.
+  const openedId = activeId;          // what THIS call put on screen
+  await loadReport(openedId);
+  if (activeId !== openedId) return;
   stickBottom(true);
   // A search hit opened this chat: land on the words, not the bottom.
   // When nothing matches (the snippet came from a message the renderer
@@ -11338,7 +11914,8 @@ async function openChat(id, findQuery, findExcerpt) {
   syncActiveRun(runSeed);
   $("openTranscript").style.display = transcriptPath ? "" : "none";
   $("openWorkspace").style.display = workspacePath ? "" : "none";
-  $("afterRow").classList.toggle("show", !!(transcriptPath || workspacePath));
+  $("afterRow").classList.toggle("show",
+    !!(transcriptPath || workspacePath || (run.report && run.report.show)));
   renderChats();
   await memoryFollowsTheChat();
   $("say").focus();
@@ -11490,6 +12067,9 @@ function resetStage() {
   $("afterRow").classList.remove("show");
   $("openTranscript").style.display = "";
   $("openWorkspace").style.display = "";
+  // The card lives in #feed so EMPTY_HTML below removes it, but the BUTTON
+  // is outside the feed and nothing else would ever hide it again.
+  $("openReport").hidden = true;
   $("feed").innerHTML = EMPTY_HTML;
   historyHasDelivery = false;
   resetTranscriptStructure();   // a fresh stage has no transcript structure

@@ -149,6 +149,16 @@ def fork_session(session_id, upto_message_id=None, sessions_dir=None):
             seat.pop("usage_baseline", None)
         meta["fork_of"] = {"id": source_id,
                            "message_id": upto_message_id}
+        # A fork was made by hand, here, now — by a person clicking ⑂.
+        # `started_by` records who decided a run should happen, and inherited
+        # it says a 01:00 timer did, on a chat that did not exist at 01:00.
+        # Same family as the seat session ids two blocks up: provenance
+        # copied across a branch point forges a history the fork never had,
+        # and this one also makes the morning card auto-open and print the
+        # borrowed sentence as fact. Dropped rather than rewritten to
+        # "josh" — the fork has not run yet, and whoever runs it will stamp
+        # it then.
+        meta.pop("started_by", None)
         if "children" in meta:
             del meta["children"]
         if "parent" in meta:

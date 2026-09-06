@@ -215,6 +215,13 @@ limit) was a decision, so those chats are reopened and left alone. Two
 automatic resumes that produce no turns block the third, so a chat that
 crashes on resume cannot loop.
 
+Either way the chat opens with the **While you were away** card, which is
+where a run nobody watched accounts for itself — including one that stopped
+mid-question. A question a seat asked that the run never answered is shown as
+*lost*, not as waiting: continuing tells the seat nobody answered rather than
+re-opening the modal, so an answer typed now would arrive into a conversation
+that has already moved on.
+
 ## While it's running
 
 - **Type anything + Enter** — injected into the conversation as "Josh (human)"
@@ -293,8 +300,11 @@ named from your opening message):
 
 - `transcript.md` — the whole conversation, appended live.
 - `messages.jsonl` — structured message/system rows used for exact UI replay.
-- `meta.json` — participant settings, pending queues, round state, and each
-  CLI's session id; this is what makes restart-safe continuation possible.
+- `meta.json` — participant settings, pending queues, round state, each CLI's
+  session id, and what STARTED the run (you, a schedule, the local webhook, or
+  a terminal that declared `--unattended`); this is what makes restart-safe
+  continuation possible, and what lets a reopened chat say whether anyone was
+  watching it rather than guessing from how long it ran.
 - `workspace\` — a scratch folder all participants share; they can co-write files
   there (ask them to "write findings.md" etc.). Absent when you chose your own
   working folder — that folder is used directly.
@@ -383,6 +393,47 @@ And when git says it worked but did not — it only *warns* when something else
 on the machine is holding a file open, so the exit code is a lie — the result
 is checked rather than believed: nothing is committed, the folder is reported
 as part-way, and the files still not back are named.
+
+## What happened while you were away
+
+A chat that ran without you reopens with a card at the end of its transcript:
+**While you were away**. It is one read of that chat's own `meta.json` — no
+git, no subprocess — so it costs nothing and is always the record's own
+account, never a re-derivation.
+
+It carries what the run did: how long it *worked*, waves dispatched,
+objectives met, tasks done, files changed, verification green/red with the
+failing tail, the manager's own closing verdict, what it spent by seat, and
+the trouble — restarts, manager errors, and which limit stopped it. The
+**Report** button in the row under the transcript hides and reopens it.
+
+Four things it deliberately will not do:
+
+- **It never calls a span a duration.** The only duration it prints is Keep
+  Improving's accumulated working clock. A chat's created→updated span
+  measures the *chat* (one real session: twenty hours, for a run of minutes),
+  and the control log's first→last bracket includes every idle gap between
+  them. The bracket is still shown, labelled as the range the log covers.
+- **A count it cannot stand behind says so.** The control log keeps its most
+  recent 120 entries and drops the oldest, so on a long night the waves, gate
+  results, restarts and errors are lower bounds and are printed as **≥ N**,
+  with a note saying why. Objectives are counted from their own archive
+  instead — which keeps the last 40 — and the card says how many it recorded
+  whenever it is listing fewer than that.
+- **A cost nobody reported is a dash, never $0.00.** Gemini and OpenCode
+  report no cost at all, so a zero there would read as "this was free". If no
+  seat and no side call reported anything, the card says that instead of
+  showing a total. Token counts are not shown here at all — Stats is the one
+  reader that handles the per-provider conventions correctly.
+- **It never merges two different endings.** How the run stopped (the round
+  cap, your Stop, a limit) and what the manager decided about the goal are
+  separate facts and stay separate sentences.
+
+The card opens by itself when the record actually says nobody was there — a
+schedule, the local webhook, `--unattended`, a crash mid-run, or an
+accumulated working clock past twenty minutes. Otherwise the button is still
+offered, and pressing it tells you why the chat did not qualify. A schedule
+you fired with **Run now** is not treated as unattended: you pressed it.
 
 ## How it ends
 

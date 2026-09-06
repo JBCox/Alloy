@@ -336,6 +336,18 @@ function mkEl(tag) {
   Object.defineProperty(el, 'scrollHeight', {get() { return 100; }});
   Object.defineProperty(el, 'clientHeight', {get() { return 100; }});
   Object.defineProperty(el, 'scrollTop', {get() { return 0; }, set() {}});
+  // Real, because the permissive Proxy below answers an unknown member with a
+  // FUNCTION — which is truthy, so `if (!x.childElementCount) return` never
+  // fired and every "was this container left empty" guard in the product was
+  // structurally untestable while reading as covered. Same family as the
+  // no-op classList, the reflectionless dataset and the missing
+  // replaceChildren: a stub that lies is worse than one that refuses.
+  Object.defineProperty(el, 'childElementCount',
+                        {get() { return el.children.length; }});
+  Object.defineProperty(el, 'firstElementChild',
+                        {get() { return el.children[0] || null; }});
+  Object.defineProperty(el, 'lastElementChild',
+                        {get() { return el.children[el.children.length - 1] || null; }});
   // permissive fallback: unknown members answer as no-op functions
   return new Proxy(el, {
     get(t, k) {
@@ -517,6 +529,10 @@ const hookSaves = [];        // what set_event_hooks was handed
 let hooksReply = null;
 const diffCalls = [];        // what get_diff / get_file_diff were asked
 let diffReply = {ok: true};  // the immediate bridge answer (truth = events)
+// The morning report. null = "this chat has nothing to report", which is
+// what openChat gets for every OTHER probe in this file.
+let reportReply = null;
+const reportCalls = [];
 function apiReply(name, args) {
   apiCalls.push(name);
   switch (name) {
@@ -620,6 +636,9 @@ function apiReply(name, args) {
     case 'restore_preview':
     case 'restore_workspace':
       diffCalls.push([name].concat(args)); return diffReply;
+    case 'session_report':
+      reportCalls.push(args && args[0]);
+      return reportReply || {ok: true, show: false, reason: 'nothing to report'};
     case 'list_runs': return {runs: []};
     case 'folder_exists': return false;
     case 'get_skills': return {skills: []};
@@ -3336,6 +3355,222 @@ if (topLevelError) {
     ctx.closeCode();
   } catch (e) { more.restoreError = (e && e.stack) || String(e); }
 
+  // ---- the morning report: the REAL renderer, driven with the REAL shape
+  // report.build() returns, so a renderer that quietly drops a field or
+  // draws a zero where the engine sent null is visible here ----
+  try {
+    const p = more.report = {};
+    const REP = {
+      ok: true, show: true, available: true, running: false, interrupted: false,
+      id: 'c', title: 'Overnight', mode: 'supervisor', continuous: true,
+      status: {state: 'working', label: 'Wave 1 \u00b7 1 open'},
+      started_by: {kind: 'schedule', name: 'Nightly', when: 'every day at 01:00',
+                   unattended: false, manual: false, known: true},
+      // open_for_s is 20h and is NOT printable; worked_s is the only duration
+      clock: {from: '', to: '', open_for_s: 72949, ran_for_s: 6998,
+              worked_s: 6998, active_from: '2026-09-01 01:00:00',
+              active_to: '2026-09-01 02:56:09', active_floor: true},
+      objective: {text: 'Keep improving Alloy', source: 'supervisor'},
+      outcome: {lifecycle: 'paused', stopped: 'cap', verdict: 'unknown',
+                trace: {type: 'goal_unresolved',
+                        title: 'Ran out of review waves without a verdict',
+                        detail: 'Six waves spent on one objective.'}},
+      waves: {dispatched: 5, floor: true, applicable: true},
+      trouble: {errors: 5, revivals: 15,
+                limits: ['Spend reached the $2.00 cap.'], floor: true},
+      gate: {command: 'python tests/run_all.py', passed: 7, failed: 1,
+             unfinished: 0, floor: true, applicable: true, commits: ['abc1234'],
+             last_failure: 'AssertionError: boom', last_ok: true,
+             last_seconds: 47.5, skipped: null},
+      objectives: {settled: [{goal: 'First goal', tasks: 4, failed: 1,
+                              delivered: ['a.py'], gate_ok: true,
+                              outcome: 'met'},
+                             {goal: 'Second goal', tasks: 2, failed: 0,
+                              delivered: [], gate_ok: null,
+                              outcome: 'abandoned'}],
+                   recorded: 2, met: 1, unknown: 0, shown: 2,
+                   listed_all: true, attempted: ['First goal']},
+      tasks: {done: 1, failed: 1, open: 1, total: 3},
+      delivered: ['README.md', 'relay.py'], delivered_total: 9,
+      spend: {total_usd: 1.25, reported: true,
+              by_kind: {supervisor: 0.31, seat: 0.94},
+              by_seat: [{id: '0', name: 'Claude', provider: 'claude',
+                         cost_usd: 1.25, turns: 6},
+                        {id: '1', name: 'Gem', provider: 'gemini',
+                         cost_usd: null, turns: 4}]},
+      waiting: null, trimmed: true, trace_cap: 120,
+      notes: ['Only the most recent 120 control-log entries are kept.'],
+    };
+    const card = ctx.renderReport(REP);
+    p.rendered = !!card;
+    p.text = deepText(card);
+    // (a) a count the record could not hold says so, per figure
+    // deepText, not .textContent: the stub does not derive a parent's text
+    // from its children, so reading textContent here returns '' for every
+    // chip and the assertion below passes against nothing.
+    p.chips = vm.runInContext(
+      "Array.from(document.querySelectorAll('.rep-chip'))", ctx).map(deepText);
+    // (b) an unreported cost is a dash, never $0.00
+    p.hasDash = p.text.indexOf('no cost reported') >= 0;
+    p.hasZero = p.text.indexOf('$0.00') >= 0;
+    // (c) the honest duration, not created->updated
+    p.saysWorked = p.text.indexOf('1h 56m') >= 0;
+    p.saysOpenFor = p.text.indexOf('20h') >= 0;
+    // (d) the mechanical stop is worded, never merged with the goal verdict
+    p.lede = deepText(vm.runInContext(
+      "document.querySelector('.rep-lede')", ctx));
+    // (e) a second render REPLACES rather than stacking a duplicate card
+    ctx.renderReport(REP);
+    p.cardCount = vm.runInContext(
+      "document.querySelectorAll('.plan-card[data-active-report]').length", ctx);
+    // (f) an unknown termination reason passes through rather than becoming
+    // a friendly invention
+    const odd = JSON.parse(JSON.stringify(REP));
+    odd.outcome.stopped = 'brand_new_reason';
+    odd.started_by = {kind: null, known: false};
+    ctx.renderReport(odd);
+    p.unknownStop = deepText(vm.runInContext(
+      "document.querySelector('.rep-lede')", ctx)).indexOf('brand_new_reason') >= 0;
+    // (g) show:false paints nothing at all
+    vm.runInContext(
+      "document.querySelector('.plan-card[data-active-report]').remove()", ctx);
+    p.hiddenPaints = !ctx.renderReport({ok: true, show: false, reason: 'x'});
+    // (h) the opener is never printed as the manager's objective unlabelled
+    const opener = JSON.parse(JSON.stringify(REP));
+    opener.objective = {text: 'make it better', source: 'opener'};
+    ctx.renderReport(opener);
+    p.openerLabelled = deepText(vm.runInContext(
+      "document.querySelector('.plan-card[data-active-report]')", ctx))
+      .indexOf('the manager never set one') >= 0;
+    vm.runInContext(
+      "document.querySelector('.plan-card[data-active-report]').remove()", ctx);
+    // (i) THE WIRING. Everything above drives renderReport directly, so
+    // loadReport, syncReportBtn, toggleReport, the #openReport button and the
+    // dismissed flag were all structurally untestable -- syncReportBtn could
+    // have been inverted and the suite would have stayed green.
+    reportReply = REP;
+    vm.runInContext("activeId = 'sess-two'", ctx);
+    vm.runInContext("runFor('sess-two', {})", ctx);
+    // Asked about a DIFFERENT id than the one on screen: with both the same
+    // (as an earlier version had it) `session_report(id)` and
+    // `session_report(activeId)` are the same call, so the rule was
+    // invisible. The answer is then dropped by the staleness guard, which is
+    // correct and is what the next assertion checks.
+    let beforeCalls = reportCalls.length;
+    await ctx.loadReport('some-other-chat');
+    p.askedForGivenId = reportCalls.slice(beforeCalls);
+    p.noCardForForeignId = vm.runInContext(
+      "document.querySelectorAll('.plan-card[data-active-report]').length", ctx);
+    beforeCalls = reportCalls.length;
+    await ctx.loadReport('sess-two');
+    p.askedBridge = reportCalls.slice(beforeCalls);
+    p.cardAfterLoad = vm.runInContext(
+      "document.querySelectorAll('.plan-card[data-active-report]').length", ctx);
+    p.btnAfterLoad = !byId['openReport'].hidden;
+    p.btnLabel = byId['openReport'].textContent;
+    // dismissing hides it and the label flips
+    ctx.toggleReport();
+    p.cardAfterDismiss = vm.runInContext(
+      "document.querySelectorAll('.plan-card[data-active-report]').length", ctx);
+    p.dismissedFlag = vm.runInContext("!!runFor('sess-two').reportDismissed", ctx);
+    p.btnLabelDismissed = byId['openReport'].textContent;
+    // ...and pressing it again brings the same card back
+    ctx.toggleReport();
+    p.cardAfterReopen = vm.runInContext(
+      "document.querySelectorAll('.plan-card[data-active-report]').length", ctx);
+    // (j) a chat with nothing to report offers no button at all
+    reportReply = {ok: true, show: false, available: false, reason: 'quiet'};
+    vm.runInContext("activeId = 'sess-three'", ctx);
+    vm.runInContext("runFor('sess-three', {})", ctx);
+    await ctx.loadReport('sess-three');
+    p.btnWhenNothing = !byId['openReport'].hidden;
+    // (k) available-but-not-shown: no card, but the button is offered and
+    // pressing it says WHY rather than doing nothing
+    reportReply = {ok: true, show: false, available: true,
+                   reason: 'You started this one and watched it.'};
+    vm.runInContext("activeId = 'sess-four'", ctx);
+    vm.runInContext("runFor('sess-four', {})", ctx);
+    await ctx.loadReport('sess-four');
+    p.btnWhenAvailable = !byId['openReport'].hidden;
+    p.cardWhenAvailable = vm.runInContext(
+      "document.querySelectorAll('.plan-card[data-active-report]').length", ctx);
+    const feedBefore = byId['feed'].children.length;
+    ctx.toggleReport();
+    p.reasonSpoken = deepText(byId['feed']).indexOf('watched it') >= 0
+                     && byId['feed'].children.length > feedBefore;
+    // (l) a late answer for a chat Josh has left must not paint
+    reportReply = REP;
+    vm.runInContext("activeId = 'sess-five'", ctx);
+    vm.runInContext("runFor('sess-five', {})", ctx);
+    const pending = ctx.loadReport('sess-five');
+    vm.runInContext("activeId = 'sess-six'", ctx);                 // Josh moved on mid-flight
+    await pending;
+    p.staleDropped = vm.runInContext(
+      "document.querySelectorAll('.plan-card[data-active-report]').length", ctx) === 0;
+    // (m) the rows the engine has always carried and nothing rendered:
+    // the manager's own verdict, the limit that stopped the run, the
+    // relay's own side-call spend, and an objective the watchdog abandoned
+    ctx.renderReport(REP);
+    const full = deepText(vm.runInContext(
+      "document.querySelector('.plan-card[data-active-report]')", ctx));
+    p.verdictShown = full.indexOf('Ran out of review waves') >= 0
+                  && full.indexOf('Six waves spent') >= 0;
+    p.limitShown = full.indexOf('Spend reached the $2.00 cap') >= 0;
+    p.sideSpendShown = full.indexOf('supervisor $0.31') >= 0;
+    p.abandonedMarked = full.indexOf('abandoned by the check-in') >= 0;
+    // (n) a question the run never answered is not advertised as answerable
+    const lost = JSON.parse(JSON.stringify(REP));
+    lost.running = false;
+    lost.waiting = {seat: 0, question: 'Refactor or patch?'};
+    ctx.renderReport(lost);
+    const lostText = deepText(vm.runInContext(
+      "document.querySelector('.plan-card[data-active-report]')", ctx));
+    p.lostWorded = lostText.indexOf('Question lost') >= 0
+                && lostText.indexOf('it is not re-asked') >= 0;
+    const liveQ = JSON.parse(JSON.stringify(lost));
+    liveQ.running = true;
+    ctx.renderReport(liveQ);
+    p.liveWorded = deepText(vm.runInContext(
+      "document.querySelector('.plan-card[data-active-report]')", ctx))
+      .indexOf('Waiting on you') >= 0;
+    // (o) Run now is a person, not a timer
+    const manual = JSON.parse(JSON.stringify(REP));
+    manual.started_by.manual = true;
+    ctx.renderReport(manual);
+    p.manualLede = deepText(vm.runInContext(
+      "document.querySelector('.rep-lede')", ctx));
+    // (p) the Spend row is dropped when there is nothing to put in it, and
+    // that is only observable now the stub answers childElementCount for real
+    const noSeats = JSON.parse(JSON.stringify(REP));
+    noSeats.spend = {total_usd: 0.42, reported: true, by_kind: {}, by_seat: []};
+    ctx.renderReport(noSeats);
+    p.spendRowKeys = vm.runInContext(
+      "Array.from(document.querySelectorAll('.rep-row .rep-k'))", ctx)
+      .map(deepText);
+    // (q) See what changed has to OPEN the rail, not just switch its tab
+    vm.runInContext("document.querySelector('main').classList.add('no-files')", ctx);
+    ctx.renderReport(REP);
+    const seeBtn = vm.runInContext(
+      "Array.from(document.querySelectorAll('.plan-card[data-active-report] .btn-sm'))",
+      ctx)[0];
+    if (seeBtn) seeBtn.onclick();
+    p.railOpened = !vm.runInContext(
+      "document.querySelector('main').classList.contains('no-files')", ctx);
+    vm.runInContext(
+      "document.querySelector('.plan-card[data-active-report]').remove()", ctx);
+    // (r) a brand-new conversation must not inherit the old chat's card
+    ctx.renderReport(REP);
+    const beforeNew = vm.runInContext(
+      "document.querySelectorAll('.plan-card[data-active-report]').length", ctx);
+    byId['say'].value = 'a fresh opener';
+    try { await ctx.sendSay(); } catch (e) { p.sendSayError = String(e); }
+    p.cardBeforeNewChat = beforeNew;
+    p.cardAfterNewChat = vm.runInContext(
+      "document.querySelectorAll('.plan-card[data-active-report]').length", ctx);
+    reportReply = null;
+    vm.runInContext("activeId = null", ctx);
+  } catch (e) { more.reportError = (e && e.stack) || String(e); }
+
   // ---- slash-command autocomplete: engine vocabulary, filtering,
   // completion, and the send-not-eaten rule ----
   try {
@@ -5350,6 +5585,182 @@ class UiBootTests(unittest.TestCase):
         """The fix is in slashKey, not in the one caller that was found —
         so a future writer of #say.value is covered too."""
         self.assertTrue(self._slash()["staleMenuNeverEatsProse"])
+
+    # ---- the morning report ------------------------------------------
+    def _report(self):
+        self.assertIsNone(self.report.get("reportError"))
+        return self.report["report"]
+
+    def test_the_report_card_renders_the_real_payload(self):
+        p = self._report()
+        self.assertTrue(p["rendered"])
+        self.assertIn("Keep improving Alloy", p["text"])
+        self.assertIn("python tests/run_all.py", p["text"])
+        self.assertIn("abc1234", p["text"], "the checkpoint sha")
+        self.assertIn("AssertionError: boom", p["text"], "the failing tail")
+
+    def test_every_floored_count_says_it_is_a_floor(self):
+        """The control log trims its OLDEST entries, so a long night's counts
+        are lower bounds — and the caveat rides each figure rather than
+        sitting in a note above the chips a reader scrolls past.
+
+        Asserted per CHIP, not against the chips joined into one string: in
+        that form "≥1" is a substring of "≥15" and two of the four figures
+        share the value 5, so two chips could lose their marker with this
+        test green — which is what the review found it doing.
+        """
+        chips = self._report()["chips"]
+        wanted = {"waves": "≥5", "green": "≥7", "red": "≥1",
+                  "restarts": "≥15", "manager errors": "≥5"}
+        for label, figure in wanted.items():
+            hit = [c for c in chips if label in c]
+            self.assertEqual(len(hit), 1,
+                             "expected exactly one %r chip in %r" % (label, chips))
+            self.assertIn(figure, hit[0],
+                          "the %s chip dropped its floor marker" % label)
+
+    def test_a_cost_nobody_reported_is_a_dash_not_a_zero(self):
+        p = self._report()
+        self.assertTrue(p["hasDash"])
+        self.assertFalse(p["hasZero"], "$0.00 reads as 'this seat was free'")
+
+    def test_the_duration_shown_is_the_run_not_the_chat(self):
+        """created→updated is 20h for this payload and measures how long the
+        CHAT existed; the run worked for 1h 56m."""
+        p = self._report()
+        self.assertTrue(p["saysWorked"])
+        self.assertFalse(p["saysOpenFor"])
+
+    def test_the_mechanical_stop_is_worded_and_not_called_finished(self):
+        lede = self._report()["lede"]
+        self.assertIn("the round limit", lede)
+        self.assertNotIn("finished", lede)
+        self.assertIn("Nightly", lede, "a scheduled run says what started it")
+
+    def test_an_unknown_stop_reason_passes_through_unchanged(self):
+        """A reason nobody has taught the table is still a real answer;
+        mapping it to a friendly default would forge one."""
+        self.assertTrue(self._report()["unknownStop"])
+
+    def test_rendering_twice_replaces_the_card(self):
+        self.assertEqual(self._report()["cardCount"], 1)
+
+    def test_a_chat_with_nothing_to_report_paints_no_card(self):
+        self.assertTrue(self._report()["hiddenPaints"])
+
+    def test_the_opener_is_labelled_when_it_stands_in_for_the_objective(self):
+        self.assertTrue(self._report()["openerLabelled"])
+
+    def test_the_loader_asks_the_bridge_for_the_chat_it_was_given(self):
+        """Driven with an id that is NOT the one on screen — with both the
+        same, `session_report(id)` and `session_report(activeId)` are the
+        same call and the rule cannot be seen. RED-verified after the split.
+        """
+        p = self._report()
+        self.assertEqual(p["askedForGivenId"], ["some-other-chat"])
+        self.assertEqual(p["noCardForForeignId"], 0,
+                         "and its answer is dropped, not painted")
+        self.assertEqual(p["askedBridge"], ["sess-two"])
+        self.assertEqual(p["cardAfterLoad"], 1)
+        self.assertTrue(p["btnAfterLoad"])
+        self.assertEqual(p["btnLabel"], "Hide report")
+
+    def test_the_button_dismisses_and_brings_the_card_back(self):
+        """Nothing exercised syncReportBtn or toggleReport before this — the
+        button's hidden flag could have been inverted with the suite green."""
+        p = self._report()
+        self.assertEqual(p["cardAfterDismiss"], 0)
+        self.assertTrue(p["dismissedFlag"])
+        self.assertEqual(p["btnLabelDismissed"], "Report")
+        self.assertEqual(p["cardAfterReopen"], 1)
+
+    def test_a_chat_with_nothing_recorded_offers_no_button(self):
+        self.assertFalse(self._report()["btnWhenNothing"])
+
+    def test_a_chat_that_will_not_auto_open_still_offers_its_reason(self):
+        """`available` and `show` are different questions. The button follows
+        available; pressing it on a chat that did not auto-open says WHY,
+        rather than being a control that does nothing."""
+        p = self._report()
+        self.assertTrue(p["btnWhenAvailable"])
+        self.assertEqual(p["cardWhenAvailable"], 0)
+        self.assertTrue(p["reasonSpoken"])
+
+    def test_a_late_report_for_a_chat_josh_left_is_dropped(self):
+        """openChat awaits this mid-function and Ctrl+Tab is faster than a
+        bridge round-trip."""
+        self.assertTrue(self._report()["staleDropped"])
+
+    def test_the_managers_verdict_is_shown(self):
+        """The engine has collected goal_accepted / goal_unresolved with their
+        title and detail since the Supervisor shipped, and no surface read
+        them — the one question a morning report exists to answer."""
+        self.assertTrue(self._report()["verdictShown"])
+
+    def test_the_limit_that_stopped_the_run_is_named(self):
+        """"It stopped on a limit you set" names none of them, and the
+        payload has been carrying the sentence all along."""
+        self.assertTrue(self._report()["limitShown"])
+
+    def test_the_relays_own_side_call_spend_is_shown(self):
+        """Without it the total chip exceeds the seat rows beneath it with
+        nothing on screen explaining the gap — and in a room of seats that
+        report no cost at all, the side calls are the whole spend."""
+        self.assertTrue(self._report()["sideSpendShown"])
+
+    def test_an_abandoned_objective_is_marked_in_the_list(self):
+        self.assertTrue(self._report()["abandonedMarked"])
+
+    def test_a_lost_question_is_not_called_waiting(self):
+        """`announce_lost_ask` tells the seat nobody answered and NEVER
+        re-opens the modal, so "waiting on you" on a stopped run promises an
+        answer box that cannot appear — and an answer typed into the composer
+        goes somewhere else entirely."""
+        p = self._report()
+        self.assertTrue(p["lostWorded"])
+        self.assertTrue(p["liveWorded"], "a live run really is waiting")
+
+    def test_run_now_is_not_called_a_timer(self):
+        lede = self._report()["manualLede"]
+        self.assertIn("Run now", lede)
+        self.assertNotIn("every day at 01:00", lede)
+
+    def test_the_spend_row_is_dropped_when_it_would_be_empty(self):
+        """Only visible now the stub answers childElementCount for real: it
+        used to come back as a truthy no-op function, so every
+        was-this-container-left-empty guard in the product was untestable."""
+        keys = self._report()["spendRowKeys"]
+        self.assertNotIn("Spend", keys)
+        self.assertIn("Verification", keys)
+
+    def test_see_what_changed_opens_the_rail(self):
+        """The file rail is collapsed by default under 1288px and the
+        preference persists, so switching its tab alone painted the diff into
+        a hidden container — a button that showed the user nothing."""
+        self.assertTrue(self._report()["railOpened"])
+
+    def test_a_new_conversation_drops_the_old_chats_card(self):
+        """sendSay's new-conversation sweep is `.msg`-only and the card is a
+        `.plan-card`, so typing into a reopened view-only chat left the old
+        chat's report above a fresh, unrelated transcript."""
+        p = self._report()
+        self.assertEqual(p["cardBeforeNewChat"], 1)
+        self.assertEqual(p["cardAfterNewChat"], 0)
+
+    def test_openchat_tail_is_guarded_across_the_await(self):
+        """Everything after `await loadReport` writes into the feed, the
+        composer and the seat rail, and a bridge round-trip is long enough
+        for Ctrl+Tab."""
+        ui = self.report["uiSource"] if "uiSource" in self.report else None
+        src = ui or open(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "ui", "index.html"),
+            encoding="utf-8").read()
+        body = src[src.index("async function openChat("):]
+        body = body[:body.index("\nfunction restoreSeats")]
+        self.assertIn("await loadReport(openedId);", body)
+        self.assertIn("if (activeId !== openedId) return;", body)
+        self.assertLess(body.index("await loadReport(openedId);"),
+                        body.index("if (activeId !== openedId) return;"))
 
 
 if __name__ == "__main__":

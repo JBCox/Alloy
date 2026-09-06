@@ -5039,6 +5039,15 @@ class SessionStore:
             # context, never wrong continuity, which is the same severity
             # class v1->v2 already accepted.
             "brief": brief_record(state.get("brief")),
+            # WHO decided this run should happen — a schedule, a script
+            # through the local webhook, or Josh. Additive, and the only
+            # durable answer to "was anybody watching": `Run.background` and
+            # `_unattended` are both private and deliberately never saved, so
+            # before this a reopened chat could not tell a 01:00 scheduled
+            # room from one Josh started and sat through. Written by the
+            # front end that started the run, exactly like `_unattended`, for
+            # the same reason: the engine cannot know.
+            "started_by": started_by_record(state.get("started_by")),
             # additive like brief: old code ignoring these merely loses the
             # ask feature on resume, never continuity
             "ask": bool(state.get("ask")),
@@ -6240,6 +6249,51 @@ def brief_preamble_block(brief, agent=None, solo=False):
             + (brief.get("digest") or "").strip() + "\n\n")
 
 
+STARTED_BY_KINDS = ("josh", "schedule", "webhook", "terminal")
+
+
+def started_by_record(value):
+    """Normalize the provenance stamp, or None when there isn't one.
+
+    Answers "who decided this run should happen", which is the durable half
+    of a question the engine already asks and throws away: `unattended(state)`
+    reads a PRIVATE `_unattended` bool that meta deliberately never keeps, so
+    a resumed chat is attended by construction. That is right for the engine
+    — the thing resuming it is Josh — and useless afterwards, because a chat
+    reopened at breakfast cannot then say whether it started itself at 01:00.
+
+    Written by a FRONT END for the same reason `_unattended` is: only the
+    thing that started a run knows how. An unrecognised kind is dropped
+    rather than stored, so a reader can treat any value it gets back as one
+    of `STARTED_BY_KINDS` — and an ABSENT record means "not recorded", never
+    "Josh", which matters because every chat saved before this existed has
+    none and guessing would put a fact where there is an inference.
+    """
+    row = value if isinstance(value, dict) else {}
+    kind = str(row.get("kind") or "")
+    if kind not in STARTED_BY_KINDS:
+        return None
+    out = {"kind": kind}
+    for key in ("name", "when", "room"):
+        text = row.get(key)
+        if isinstance(text, str) and text.strip():
+            out[key] = text.strip()[:200]
+    # `unattended` is a PROPERTY of the start, not a kind of starter: a
+    # terminal run is unattended when `--unattended` says so and attended
+    # otherwise, and folding that into `kind` would either invent a
+    # who ("unattended" is not one) or lose the distinction entirely. Only
+    # ever recorded as True — an absent flag means "attended, or not
+    # recorded", which the reader already words as an inference.
+    if row.get("unattended") is True:
+        out["unattended"] = True
+    # Same shape, opposite meaning: a schedule fired by the Run-now button
+    # had a person behind it, and dropping the flag recorded that run as
+    # unattended-by-construction.
+    if row.get("manual") is True:
+        out["manual"] = True
+    return out
+
+
 def was_interrupted(meta):
     """True when this chat's PROCESS died mid-run, rather than the run ending.
 
@@ -6823,6 +6877,14 @@ def session_summary(session_dir, meta=None):
         "supervisor_trace": list(meta.get("supervisor_trace") or []),
         "supervisor_status": supervisor_status(meta),
         "interrupted": was_interrupted(meta),
+        # NOT `started_by` and NOT `ask_pending`, though the morning report
+        # reads both. This function runs once per session folder inside
+        # `list_sessions` and its docstring pins it at one meta read; the
+        # report gets a whole meta dict of its own through
+        # `Api.session_report`, so putting them here would have been payload
+        # on every boot for a reader that does not exist — and
+        # RAIL_SUMMARY_FIELDS would strip them from the rail anyway. Add
+        # them the day something on the rail actually reads them.
         "continuous": meta.get("continuous") or None,
         "tasks": list(meta.get("workstreams") or []),
         "goal": meta.get("topic", ""),
@@ -7150,6 +7212,11 @@ def rehydrate(meta, workspace=None):
         "spawn": meta.get("spawn"),
         "ask": bool(meta.get("ask")),      # pre-feature metas -> False
         "ask_pending": meta.get("ask_pending"),
+        # Anything SessionStore.save reads off state must be put BACK on
+        # state here, or a resumed chat writes the default over the real
+        # value on its very next save — the lesson `connectors` and
+        # `desktop` both learned the hard way.
+        "started_by": started_by_record(meta.get("started_by")),
         "auto_titled": bool(meta.get("auto_titled")),
         "plan": meta.get("plan"),
         "board_review": bool(meta.get("board_review")),
@@ -10123,7 +10190,7 @@ def supervisor_trace(state, io, phase, title, detail="", **facts):
         "detail": str(detail or "")[:8000],
     }
     for key in ("task_id", "owner", "files", "deps", "status", "goal",
-                "tasks", "before", "after"):
+                "tasks", "before", "after", "commit"):
         if key in facts and facts[key] is not None:
             entry[key] = facts[key]
     entries.append(entry)
@@ -11241,12 +11308,22 @@ def _gate_block(state):
         last.get("command", "?"), head, (last.get("tail") or "")[-1200:])
 
 
-def archive_objective(state):
+def archive_objective(state, outcome="met"):
     """Retire the settled board so the next objective plans onto a clean one.
 
     Keeping every task forever would make the UI's task map unreadable after a
     dozen objectives and force each new plan to dodge a growing list of used
     ids. The trace keeps the full history; this keeps a compact summary.
+
+    `outcome` is why the board was retired, and it is load-bearing because
+    there are TWO callers and they mean opposite things: `next_objective`
+    retires a board the manager judged FINISHED, and the check-in watchdog's
+    `replan` remedy retires one it judged STUCK. Both wrote the identical
+    record, so every later reader counted an abandoned objective as a met
+    one — including `describe_objective`, which wrote "Objective met: …"
+    into Alloy's own memory for a board the watchdog had just thrown away.
+    A record saved before this existed carries no `outcome` and is honestly
+    unknown; it is never assumed to be "met".
     """
     pol = state["continuous"]
     tasks = state.get("workstreams") or []
@@ -11260,6 +11337,7 @@ def archive_objective(state):
             "failed": sum(1 for t in tasks if t.get("status") == "failed"),
             "delivered": delivered[:40],
             "gate": (pol.get("gate") or {}).get("last"),
+            "outcome": "met" if outcome == "met" else "abandoned",
         }
         pol.setdefault("history", []).append(record)
         del pol["history"][:-OBJECTIVE_HISTORY_MAX]
@@ -11275,7 +11353,14 @@ def describe_objective(record):
     if not goal:
         return ""
     n, failed = int(record.get("tasks") or 0), int(record.get("failed") or 0)
-    parts = ["Objective met: %s." % goal.rstrip("."),
+    # The watchdog retires a STUCK board through the same function, and this
+    # note goes into Alloy's own memory where a later run reads it back as
+    # fact. "Objective met" for a board the check-in gave up on is a forged
+    # result, so the lead follows the record rather than the call site.
+    lead = {"abandoned": "Objective abandoned"}.get(
+        record.get("outcome"), "Objective met"
+        if record.get("outcome") == "met" else "Objective closed")
+    parts = ["%s: %s." % (lead, goal.rstrip(".")),
              "%d task%s" % (n, "" if n == 1 else "s")]
     if failed:
         parts.append("%d failed" % failed)
@@ -11551,7 +11636,10 @@ def apply_remedy(state, io, remedy, detail):
         goal = current_objective(state)
         if not goal:
             return "There is no objective to re-plan."
-        archive_objective(state)
+        # ABANDONED, not met: the watchdog is here because the board stopped
+        # moving. Recorded as "met" it became a green tick on the morning
+        # card and a "Objective met: …" note in Alloy's own memory.
+        archive_objective(state, outcome="abandoned")
         rearm_seats(state)
         # An explicit replan is exactly what the latch exists to block on
         # resume, so it clears the latch — AND the wave budget. Without the
@@ -12581,6 +12669,7 @@ def wave_gate(state, io):
     gate["last"] = result
     if result.get("ok"):
         detail = "passed in %ss" % result.get("seconds", "?")
+        sha = None          # bound below only when checkpointing is on
         if gate.get("commit"):
             goal = (state.get("supervisor_goal") or "improvement wave")[:70]
             detail += " — " + gate_commit(state, GATE_COMMIT_PREFIX + goal)
@@ -12588,6 +12677,13 @@ def wave_gate(state, io):
             # task that ran and settled done WITHOUT a commit yet is part of
             # exactly the work this commit contains (earlier waves keep their
             # own shas; a repaired task re-settles without its old one).
+            #
+            # Read ONCE, here, into a local. `gate_commit.last_sha` is a
+            # module-level function attribute and Alloy runs several
+            # conversations at a time, so a second chat's gate reaching this
+            # line in between would substitute its sha — or None for a dirty
+            # tree — into this chat's persisted record. Re-reading it further
+            # down was how that became possible.
             sha = getattr(gate_commit, "last_sha", None)
             if sha:
                 bound = [t["id"] for t in state.get("workstreams") or []
@@ -12598,11 +12694,22 @@ def wave_gate(state, io):
                              for x in state.get("workstreams") or []}
                     by_id[tid]["commit"] = sha
                 if bound:
+                    # `committed`, NOT `passed`. This is bookkeeping, not a
+                    # verdict: any reader counting gate outcomes by status
+                    # would otherwise count one extra pass per checkpointed
+                    # wave, and the count would drift further from the truth
+                    # the better the run was doing.
                     supervisor_trace(state, io, "gate",
                                      "Bound commit " + sha,
-                                     ", ".join(bound), status="passed")
+                                     ", ".join(bound), status="committed",
+                                     commit=sha)
+        # The sha rides as a FIELD as well as inside `detail`'s sentence.
+        # gate_commit's answer is prose meant for Josh ("committed as abc1234"
+        # / "nothing had changed, so there was nothing to commit"), and a
+        # later reader parsing its own side's prose for a sha is one wording
+        # change away from silently finding none.
         supervisor_trace(state, io, "gate", "Gate passed", detail,
-                         status="passed")
+                         status="passed", commit=sha)
         io.emit("message", state["log"](
             "relay", "Verification passed (%s) %s" % (command, detail)))
     else:
@@ -16233,6 +16340,14 @@ def main():
              "providers": [p for p, _, _, _ in seats],
              "workspace": workspace, "transcript": transcript,
              "topic": args.topic, "title": args.topic, "created": store.created,
+             # The terminal is a front end too, and the SECOND one that
+             # knows how its own invocation started — the same authority
+             # `--unattended` already carries one state key over. A cron or
+             # Task Scheduler run genuinely happened while nobody was
+             # watching, and the chat it leaves behind is reopened in the
+             # app, where that is exactly the question the report answers.
+             "started_by": {"kind": "terminal",
+                            "unattended": bool(args.unattended)},
              "yolo": permission == "full", "permission": permission,
              "permission_grants": [],
              "connectors": bool(args.connectors),

@@ -30,6 +30,7 @@ import memory as memory_mod
 import outcome
 import plan_limits
 import relay
+import report as report_mod
 import retro as retro_mod
 import schedule as schedule_mod
 import stats as stats_mod
@@ -1456,7 +1457,11 @@ class Api:
         seats = [{"id": i, "provider": p, "enabled": True}
                  for i, p in enumerate(providers)]
         cfg = {"opener": payload["topic"], "turns": payload.get("turns", 10),
-               "seats": seats}
+               "seats": seats,
+               # Provenance for the report a reopened chat opens with. A
+               # script started this; nobody was watching, and that is a
+               # fact worth keeping rather than inferring from a duration.
+               "started_by": {"kind": "webhook"}}
         ws = payload.get("workspace")
         if ws and os.path.isdir(ws):
             cfg["workspace"] = ws
@@ -1880,6 +1885,18 @@ class Api:
                               "room": rec["room"],
                               "when": schedule_mod.describe(rec),
                               "manual": bool(manual)}
+        # The same identity as a durable meta stamp, so the report a reopened
+        # chat opens with can say WHAT started it at 01:00 rather than
+        # inferring "nobody was watching" from how long it ran. The
+        # transcript row above is for reading; this is for reading BACK.
+        start["started_by"] = {"kind": "schedule", "name": rec["name"],
+                               "room": rec["room"],
+                               "when": schedule_mod.describe(rec),
+                               # Run-now had a person behind it. The flag is
+                               # already computed for the transcript row one
+                               # block up; dropping it here recorded a run
+                               # Josh pressed as one a timer fired at 01:00.
+                               "manual": bool(manual)}
         run = self._runs.background()
         self._runs.spawn(self._run, (start, run), run=run)
         return True, ("Started %s%s." % (rec["room"],
@@ -3073,6 +3090,43 @@ class Api:
         rx = fb.get("reactions")
         return rx if isinstance(rx, dict) else {}
 
+    def session_report(self, session_id=None):
+        """What happened in this chat while nobody was reading it.
+
+        Bridge-thread safe, and deliberately so: report.py opens no file,
+        starts no subprocess and knows nothing about git, so the whole card
+        costs ONE meta.json read. The three git facts a reader might expect
+        here (commits, diffs, what is dirty) are the Changes tab's job — it
+        already resolves the repository correctly for a workspace nested
+        inside a bigger one, and a second, less careful git reader competing
+        with it is how two surfaces come to disagree about one folder.
+
+        `session_id` is read at CALL time and an unknown one is refused
+        rather than falling back to the focused run: this card names a chat,
+        and naming the wrong one is worse than naming none.
+        """
+        path = session_path(session_id) if session_id else \
+            (self._runs.focused().session_dir if self._runs.focused() else None)
+        if not path or not os.path.isdir(path):
+            return {"ok": False, "show": False,
+                    "reason": "That chat no longer exists."}
+        meta = read_meta(path)
+        if not meta:
+            return {"ok": False, "show": False,
+                    "reason": "This chat has no saved record to report on."}
+        run = self._runs.get(os.path.basename(os.path.normpath(path)))
+        # Every relay-owned rule is computed HERE with relay's own functions
+        # and passed in already normalized. A second copy of
+        # `supervisor_status`' precedence (open work outranks a past
+        # no-verdict ending) inside a standalone module is exactly the drift
+        # `browser_mcp._confine` cost a whole parity suite to contain.
+        return report_mod.build(meta, {
+            "status": relay.supervisor_status(meta),
+            "interrupted": relay.was_interrupted(meta),
+            "running": bool(run and run.is_running()),
+            "trace_cap": relay.SUPERVISOR_TRACE_MAX,
+        })
+
     def export_session(self, session_id):
         """Render one chat as a self-contained HTML file and open it.
 
@@ -4007,6 +4061,16 @@ class Api:
                 "agents": agents, "slot_ids": slot_ids, "providers": providers,
                 "transcript": store.transcript, "workspace": workspace,
                 "topic": topic or opener, "title": title_src, "created": store.created,
+                # Who decided this run should happen. The front end is the
+                # only thing that can know — the same rule `_unattended`
+                # follows — and unlike `_unattended` this one is PERSISTED,
+                # because the question "was anybody watching?" is asked
+                # again hours later by a reopened chat. Defaulting to "josh"
+                # is correct HERE and only here: this call is reached from
+                # the Send button, the webhook and a scheduled fire, and the
+                # latter two say so in cfg.
+                "started_by": relay.started_by_record(
+                    cfg.get("started_by") or {"kind": "josh"}),
                 "yolo": yolo, "permission": permission,
                 # Per-conversation "always allow <tool>" grants Josh gives at
                 # the ask-first modal; run_rounds appends to this and
