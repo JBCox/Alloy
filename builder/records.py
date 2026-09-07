@@ -43,6 +43,20 @@ class _Unknown:
 UNKNOWN = _Unknown()
 
 
+class _NotApplicable(_Unknown):
+    """Singleton for a quantity that has no meaning for the seat that produced it (addendum R-105: the manual
+    image seat has no vendor cost accounting). Distinct from UNKNOWN, and never zero."""
+
+    __slots__ = ()
+    reason = "manual image seat: the owner generated in an app; Alloy does no vendor cost accounting (D12)"
+
+    def __repr__(self) -> str:
+        return "NOT_APPLICABLE"
+
+
+NOT_APPLICABLE = _NotApplicable()
+
+
 @dataclass(frozen=True)
 class Measured:
     value: float | int
@@ -61,6 +75,8 @@ Quantity = Measured | Estimated | _Unknown
 
 
 def quantity_to_json(q: Quantity) -> dict[str, Any]:
+    if q is NOT_APPLICABLE:
+        return {"kind": "not_applicable", "reason": NOT_APPLICABLE.reason}
     if q is UNKNOWN:
         return {"kind": "unknown"}
     if isinstance(q, Measured):
@@ -73,6 +89,8 @@ def quantity_to_json(q: Quantity) -> dict[str, Any]:
 def quantity_from_json(d: dict[str, Any] | None) -> Quantity:
     if not d or d.get("kind") == "unknown":
         return UNKNOWN
+    if d["kind"] == "not_applicable":
+        return NOT_APPLICABLE
     if d["kind"] == "measured":
         return Measured(d["value"], d.get("source", ""))
     if d["kind"] == "estimated":
@@ -153,6 +171,22 @@ class FindingState(StrEnum):
     REASSESS = "reassess"
 
 
+class CanonState(StrEnum):
+    """Concept-stage canon machine (design Section 14; addendum R-99 to R-103)."""
+
+    NO_CANON = "no_canon"
+    ANCHOR_PENDING = "anchor_pending"
+    ANCHOR_APPROVED = "anchor_approved"
+    TURNAROUND_PENDING = "turnaround_pending"
+    TURNAROUND_APPROVED = "turnaround_approved"
+    COMPLETE = "complete"
+
+
+# Reference canon states (addendum R-94) and precedence (R-95, highest first).
+CANON_REFERENCE_STATES = ("candidate", "approved", "superseded", "rejected")
+PRECEDENCE = {"owner_target": 0, "anchor": 1, "turnaround": 2, "study": 3}
+
+
 def _values(enum_cls: type[StrEnum]) -> tuple[str, ...]:
     return tuple(m.value for m in enum_cls)
 
@@ -200,6 +234,16 @@ KIND_SPECS: dict[str, KindSpec] = {
     "preflight_report": KindSpec("pf", ("agent_id",)),
     "coverage": KindSpec("cov", ("part_id", "view_id", "revision_id", "inspected_by")),
     "packet": KindSpec("pk", ("kind", "agent_id", "files")),
+    # --- concept stage (addendum A) ---
+    # generation request + manifest (R-96): written at creation and updated on import, abandon, or failure
+    "generation": KindSpec("gen", ("target", "prompt", "attachments", "seat"),
+                           ("open", "imported", "checked", "approved", "rejected", "abandoned", "failed"), "open"),
+    "canon_description": KindSpec("canon", ("text", "structured", "version", "anchor_reference_id", "written_by")),
+    "evidence_conflict": KindSpec("conf", ("reference_ids", "region", "what_differs", "reported_by"),
+                                  ("open", "resolved_by_user", "resolved_by_regeneration"), "open"),
+    "study_request": KindSpec("study", ("part_id", "view", "purpose"),
+                              ("requested", "generated", "checked", "approved", "rejected", "withdrawn"), "requested"),
+    "concept_plan": KindSpec("cplan", ("needed_views", "approval_mode"), _values(CanonState), "no_canon"),
 }
 
 

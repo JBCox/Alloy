@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .blender.runner import BlenderRunner
+from .concept import ConceptError, ConceptStage
 from .config import BuilderConfig, default_workflow_dir, discover_blender, slugify
 from .engine import Engine, EngineFailure
 from .project import Project
@@ -175,6 +176,9 @@ def _print_preflight(report: dict[str, Any], ctx: Ctx) -> None:
     for label, entry in report.items():
         if label == "blender":
             continue
+        if label == "I":
+            _print_seat_preflight(entry, ctx)
+            continue
         local = entry.get("local") or {}
         eff = entry.get("effective_settings") or {}
         ctx.say(f"agent {label}: provider={entry['provider']} model={entry['model']} reasoning={entry['reasoning'] or 'not exposed'}"
@@ -197,6 +201,35 @@ def _print_preflight(report: dict[str, Any], ctx: Ctx) -> None:
                     + (f"  [local: {tiers['local_evidence']}]" if tiers.get("local") != "ok" and tiers.get("local_evidence") else ""))
         for b in entry["blockers"]:
             ctx.say(f"  BLOCKER: {b}")
+
+
+def _print_seat_preflight(entry: dict[str, Any], ctx: Ctx) -> None:
+    """Addendum R-109: the image seat's three tiers, live reported as not applicable for the manual seat."""
+    d = entry.get("declared") or {}
+    tiers = entry.get("tiers") or {}
+    ctx.say(f"image seat I: seat={d.get('seat')} vendor={d.get('vendor')} model={d.get('model')} -> "
+            f"{'OK' if entry.get('ok') else 'BLOCKED'}")
+    ctx.say(f"  declared={tiers.get('declared')}  local={tiers.get('local')}  live={tiers.get('live')}")
+    ctx.say(f"  local: {(entry.get('local') or {}).get('evidence')}")
+    ctx.say(f"  live: {(entry.get('live') or {}).get('evidence')}")
+    for b in entry.get("blockers") or []:
+        ctx.say(f"  BLOCKER: {b}")
+
+
+def _ensure_preflight(eng: Engine, adapters: dict[str, Any], args: argparse.Namespace, ctx: Ctx) -> None:
+    """Real adapters spend money: a current live preflight report is required and never produced implicitly (R-18,
+    R-21); scripted mocks are probed on the spot."""
+    loaded = eng.load_preflight()
+    if len(loaded) < len(adapters):
+        missing = ", ".join(sorted(set(adapters) - set(loaded)))
+        if all(isinstance(a, ScriptedAdapter) for a in adapters.values()):
+            ctx.say(f"preflight: no current report for {missing}; running preflight (live) on the scripted agents")
+            report = eng.preflight(live=True)
+            _print_preflight(report, ctx)
+        else:
+            raise CliError(f"no current live preflight report for agent(s) {missing} (never run, or the CLI path, version, "
+                           f"model, or settings changed since; R-18). Run `preflight {args.workflow_dir} --live` first: it spends "
+                           "provider usage and is never started implicitly.")
 
 
 def cmd_preflight(args: argparse.Namespace, ctx: Ctx) -> int:
@@ -280,17 +313,7 @@ def _run_engine(args: argparse.Namespace, ctx: Ctx, *, resume: bool) -> int:
         runner = ctx.runner(cfg, prj)
         adapters = ctx.adapters(cfg, args)
         eng = ctx.engine(cfg, prj, adapters, runner, verbose=not getattr(args, "quiet", False))
-        loaded = eng.load_preflight()
-        if len(loaded) < len(adapters):
-            missing = ", ".join(sorted(set(adapters) - set(loaded)))
-            if all(isinstance(a, ScriptedAdapter) for a in adapters.values()):
-                ctx.say(f"preflight: no current report for {missing}; running preflight (live) on the scripted agents")
-                report = eng.preflight(live=True)
-                _print_preflight(report, ctx)
-            else:
-                raise CliError(f"no current live preflight report for agent(s) {missing} (never run, or the CLI path, version, "
-                               f"model, or settings changed since; R-18). Run `preflight {args.workflow_dir} --live` first: it spends "
-                               "provider usage and is never started implicitly.")
+        _ensure_preflight(eng, adapters, args, ctx)
         if resume:
             run = eng.attach()
             if run is None:
@@ -451,13 +474,263 @@ def cmd_fixture(args: argparse.Namespace, ctx: Ctx) -> int:
     return 0
 
 
+# ----------------------------------------------------------------------- concept (R-110)
+
+CONCEPT_NEEDS_AGENTS = ("start", "import", "approve", "reject", "regenerate", "study")
+
+
+def _concept_open(args: argparse.Namespace, ctx: Ctx) -> tuple[Project, Engine, ConceptStage]:
+    cfg = ctx.config(args)
+    prj = ctx.project(args)
+    try:
+        if args.concept_cmd in CONCEPT_NEEDS_AGENTS and not getattr(args, "no_agents", False):
+            runner = ctx.runner(cfg, prj, required=False)
+            adapters = ctx.adapters(cfg, args)
+            eng = ctx.engine(cfg, prj, adapters, runner, verbose=not getattr(args, "quiet", False))
+            _ensure_preflight(eng, adapters, args, ctx)
+        else:
+            eng = Engine(prj, cfg, adapters={}, runner=None)
+        concept = ConceptStage(eng)
+    except Exception:
+        prj.close()
+        raise
+    return prj, eng, concept
+
+
+def _say_events(events: list[str], ctx: Ctx) -> None:
+    for e in events:
+        ctx.say(f"  - {e}")
+
+
+def _print_coverage(concept: ConceptStage, ctx: Ctx) -> None:
+    cov = concept.coverage()
+    ctx.say(f"canon: {cov['canon_state']}  anchor: {cov['anchor'] or '-'}  images: {cov['images']['count']}/{cov['images']['max'] or 'unlimited'}"
+            f"  conflicts open: {cov['conflicts_open']}")
+    for view, e in cov["views"].items():
+        detail = e["approved"] or e["candidates"] or e["requests_open"] or []
+        ctx.say(f"  view {view:14s} {e['status']:10s} {', '.join(detail)}")
+    for part, e in cov["parts"].items():
+        for st in e["studies"]:
+            ctx.say(f"  study {part:13s} {st['state']:10s} {st['id']} ({st['view']}) -> {st.get('reference_id') or '-'}")
+    if cov["missing"]:
+        ctx.say(f"  missing approved views: {', '.join(cov['missing'])}")
+    for esc in cov["escalations"]:
+        if esc.get("open"):
+            ctx.say(f"  ESCALATED to the owner ({esc.get('view') or 'anchor'}): {esc.get('reason')}")
+    if cov.get("proceeded_partial"):
+        pp = cov["proceeded_partial"]
+        ctx.say(f"  proceeded with a partial set by {pp.get('by')} at {pp.get('at')} (missing: {', '.join(pp.get('missing') or []) or 'none'})")
+
+
+def _print_prompts(concept: ConceptStage, ctx: Ctx) -> None:
+    rows = concept.prompts()
+    if not rows:
+        ctx.say("no open generation requests")
+        return
+    for r in rows:
+        ctx.say(f"request {r['request_id']}  target: {r['target']}  round {r['round']}  images expected: {r['expected_count']}"
+                f"  art director: {r['art_director'] or 'owner'}")
+        ctx.say(f"  prompt file: {r['prompt_file']}")
+        ctx.say("  prompt (paste as-is):")
+        for line in (r["prompt"] or "").splitlines() or [""]:
+            ctx.say(f"    {line}")
+        if r["attachments"]:
+            ctx.say("  attach these images, in this order:")
+            for a in r["attachments"]:
+                ctx.say(f"    {a['path']}  ({a['role']}, {a['reference_id']}, sha256 {str(a['sha256'])[:12]}...)")
+        else:
+            ctx.say("  attachments: none")
+        ctx.say(f"  then: {r['import_command']}")
+
+
+def cmd_concept(args: argparse.Namespace, ctx: Ctx) -> int:
+    prj, eng, concept = _concept_open(args, ctx)
+    try:
+        ctx.say(concept.mode_text())
+        handler = globals()[f"_concept_{args.concept_cmd}"]
+        return int(handler(args, ctx, prj, eng, concept))
+    except ConceptError as exc:
+        raise CliError(str(exc)) from exc
+    except EngineFailure as exc:
+        raise CliError(str(exc)) from exc
+    finally:
+        prj.close()
+
+
+def _concept_start(args, ctx, prj, eng, concept) -> int:
+    labels = None
+    if args.labels:
+        if len(args.labels) != len(args.from_image or []):
+            raise CliError("give one --labels value per --from-image (comma-separated labels)")
+        labels = [[x.strip() for x in lab.split(",") if x.strip()] for lab in args.labels]
+    views = [v.strip() for v in args.views.split(",") if v.strip()] if args.views else None
+    plan = concept.start(from_text=args.from_text, from_images=args.from_image or [], labels=labels, approval=args.approval,
+                         views=views, actor=f"user:{args.user}")
+    ctx.say(f"concept stage {plan.id} started ({plan.data['start_mode']}); canon: {plan.state}; needed views: "
+            f"{', '.join(plan.data['needed_views'])}")
+    ad = plan.data.get("art_director") or {}
+    if ad:
+        ctx.say(f"art director {ad.get('seat')}: {ad.get('rationale')}")
+    if plan.state == "anchor_approved":
+        ctx.say("seed image(s) approved as canon; the first is the anchor (R-99). Writing the canon description and view requests:")
+        _say_events(concept.advance(), ctx)
+    _print_prompts(concept, ctx)
+    _print_coverage(concept, ctx)
+    return 0
+
+
+def _concept_prompts(args, ctx, prj, eng, concept) -> int:
+    _print_prompts(concept, ctx)
+    return 0
+
+
+def _concept_import(args, ctx, prj, eng, concept) -> int:
+    from .providers.imagegen.base import watch_folder
+
+    actor = f"user:{args.user}"
+    files = list(args.files or [])
+    request_id = args.request_id
+    if args.as_anchor or args.as_view:
+        files = [request_id] + files          # with --as-anchor/--as-view every positional is a file (R-96a)
+        request_id = None
+    imported: list[Any] = []
+    if args.watch:
+        if request_id is None:
+            raise CliError("--watch needs the request id the new files belong to")
+        ctx.say(f"watching {args.watch} for new images for request {request_id} (Ctrl+C to stop"
+                + (f"; timeout {args.watch_timeout:g}s" if args.watch_timeout else "") + ")")
+        count = {"n": 0}
+
+        def on_file(path: Path) -> None:
+            refs = concept.import_files(request_id, [path], vendor=args.vendor, model=args.model, attached=args.attached, actor=actor)
+            imported.extend(refs)
+            count["n"] += 1
+            for r in refs:
+                ctx.say(f"  imported {path.name} -> {r.id} (candidate, {r.data['sha256'][:12]}...)")
+            if args.watch_max and count["n"] >= args.watch_max:
+                raise StopIteration
+        try:
+            result = watch_folder(args.watch, on_file, poll_s=0.5, timeout_s=args.watch_timeout, ignore_existing=not args.watch_existing)
+        except KeyboardInterrupt:
+            result = {"imported": count["n"], "stopped_by": "keyboard", "errors": []}
+        ctx.say(f"watch ended ({result['stopped_by']}): {result['imported']} file(s) imported")
+        for err in result.get("errors") or []:
+            ctx.say(f"  refused {err['file']}: {err['error']}")
+    else:
+        if not files:
+            raise CliError("give at least one file to import")
+        if args.as_anchor:
+            imported = concept.import_as("anchor", files, vendor=args.vendor, model=args.model, actor=actor)
+            ctx.say(f"request {imported[0].data['generation_id']} created by the owner at import (--as-anchor, R-96a)")
+        elif args.as_view:
+            imported = concept.import_as("view", files, view=args.as_view, vendor=args.vendor, model=args.model, actor=actor)
+            ctx.say(f"request {imported[0].data['generation_id']} created by the owner at import (--as-view {args.as_view}, R-96a)")
+        else:
+            imported = concept.import_files(request_id, files, vendor=args.vendor, model=args.model, attached=args.attached, actor=actor)
+    for r in imported:
+        d = r.data.get("declared") or {}
+        ctx.say(f"candidate {r.id}: {Path(r.data['file']).name} {r.data['width']}x{r.data['height']} sha256 {r.data['sha256'][:12]}... "
+                f"labels={r.data['labels']} declared vendor={d.get('vendor') or '-'} model={d.get('model') or '-'} "
+                "(declarations by the owner, not verified)")
+    if not imported:
+        return 0
+    if args.no_check:
+        ctx.say("checks skipped (--no-check); run `concept approve`/`reject` or import again without --no-check to run the verdicts")
+        return 0
+    if not eng.adapters:
+        return 0
+    ctx.say("advancing: consistency verdicts from both LLM seats where due (spends provider usage), then the mode's decisions")
+    _say_events(concept.advance(), ctx)
+    _print_coverage(concept, ctx)
+    return 0
+
+
+def _concept_list(args, ctx, prj, eng, concept) -> int:
+    st = concept.status()
+    ctx.say(f"plan {st['plan_id'] or '-'}  seat: {st['seat']['seat']} ({st['seat']['vendor']})  cost: {st['cost']['kind']}"
+            f"  art director: {(st['art_director'] or {}).get('seat') or '-'}  rejected rounds: {st['rejected_rounds']}")
+    _print_coverage(concept, ctx)
+    ctx.say(f"requests: {st['requests']['by_state']}")
+    for c in st["candidates"]:
+        ctx.say(f"  candidate {c['id']} {c['labels']} verdicts={c['verdicts']} summary={c['summary']}")
+    if st["conflicts_open"]:
+        ctx.say(f"  open conflicts: {', '.join(st['conflicts_open'])} (reject one image of each, or regenerate; never averaged)")
+    if st["requests"]["open"]:
+        ctx.say(f"open requests: {', '.join(st['requests']['open'])} (see `concept prompts`)")
+    return 0
+
+
+def _concept_show(args, ctx, prj, eng, concept) -> int:
+    ctx.say(json.dumps(concept.show(args.record_id), ensure_ascii=False, indent=1, default=str))
+    return 0
+
+
+def _concept_approve(args, ctx, prj, eng, concept) -> int:
+    refs = concept.approve(args.ids, actor=f"user:{args.user}")
+    for r in refs:
+        ctx.say(f"approved {r.id} ({', '.join(r.data.get('labels') or [])}) as {r.data.get('precedence_label')} "
+                f"(mode {r.data['approval']['mode']}, verdicts {{{', '.join(f'{k}={v.get('verdict')}' for k, v in r.data['approval']['verdicts'].items())}}})")
+    _say_events(concept.advance(), ctx)
+    _print_coverage(concept, ctx)
+    if concept.open_requests():
+        ctx.say("open requests: " + ", ".join(g.id for g in concept.open_requests()) + " (see `concept prompts`)")
+    return 0
+
+
+def _concept_reject(args, ctx, prj, eng, concept) -> int:
+    refs = concept.reject(args.ids, reason=args.reason, actor=f"user:{args.user}")
+    for r in refs:
+        ctx.say(f"rejected {r.id}: {args.reason}")
+    _say_events(concept.advance(), ctx)
+    _print_coverage(concept, ctx)
+    return 0
+
+
+def _concept_regenerate(args, ctx, prj, eng, concept) -> int:
+    gen = concept.regenerate(args.record_id, note=args.note or "", actor=f"user:{args.user}")
+    ctx.say(f"new request {gen.id} (round {gen.data['round']}, revises {gen.data.get('revises')}) written by art director {gen.data['art_director']}")
+    _print_prompts(concept, ctx)
+    return 0
+
+
+def _concept_study(args, ctx, prj, eng, concept) -> int:
+    study = concept.study(args.part, view=args.view, region=args.region, purpose=args.purpose or f"study of {args.part}",
+                          requested_by=f"user:{args.user}", actor=f"user:{args.user}")
+    ctx.say(f"study {study.id} requested for part {args.part} ({args.view}); prompt written")
+    _print_prompts(concept, ctx)
+    return 0
+
+
+def _concept_proceed(args, ctx, prj, eng, concept) -> int:
+    before = concept.coverage()["missing"]
+    plan = concept.proceed(actor=f"user:{args.user}")
+    if plan.data.get("proceeded_partial"):
+        ctx.say(f"canon {plan.state}: proceeding with a partial set; missing views recorded: {', '.join(before) or 'none'}")
+    else:
+        ctx.say(f"canon {plan.state}: the needed set is approved")
+    _print_coverage(concept, ctx)
+    return 0
+
+
+def _concept_abandon(args, ctx, prj, eng, concept) -> int:
+    gen = concept.abandon(args.request_id, reason=args.reason, actor=f"user:{args.user}")
+    ctx.say(f"request {gen.id} abandoned; manifest written: {gen.data['manifest_file']}")
+    return 0
+
+
+def _concept_failed(args, ctx, prj, eng, concept) -> int:
+    gen = concept.mark_failed(args.request_id, reason=args.reason, actor=f"user:{args.user}")
+    ctx.say(f"request {gen.id} marked failed; manifest written: {gen.data['manifest_file']}")
+    return 0
+
+
 # ---------------------------------------------------------------------------- parser
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m builder", description=(
         "Collaborative Model Builder (two AI agents reconstruct a concept design as an editable Blender model; Alloy owns "
         "the state). Verbs: new, open, intake, preset, preflight, start, resume, pause, cancel, feedback, status, findings, "
-        "accept, reopen, waive, checkpoint, journal, fixture."))
+        "accept, reopen, waive, checkpoint, journal, concept, fixture."))
     sub = p.add_subparsers(dest="verb", required=True)
 
     def wf(sp: argparse.ArgumentParser) -> None:
@@ -577,6 +850,73 @@ def build_parser() -> argparse.ArgumentParser:
     wf(sp)
     sp.add_argument("--tail", type=int, default=30)
     sp.set_defaults(func=cmd_journal)
+
+    sp = sub.add_parser("concept", help="concept stage: generate the canon reference set with the manual image seat (addendum A)")
+    csub = sp.add_subparsers(dest="concept_cmd", required=True)
+
+    def cwf(q: argparse.ArgumentParser, agents: bool = False) -> None:
+        wf(q)
+        q.add_argument("--user", default="cli")
+        if agents:
+            q.add_argument("--mock", help="screenplay JSON for scripted mock agents")
+            q.add_argument("--quiet", action="store_true")
+
+    q = csub.add_parser("start", help="start from text and/or seed images; opens the anchor request or writes the canon description")
+    cwf(q, agents=True)
+    q.add_argument("--from-text", help="the asset idea in words")
+    q.add_argument("--from-image", action="append", help="seed image supplied by the owner (repeatable); approved on entry, the first is the anchor")
+    q.add_argument("--labels", action="append", help="comma-separated view labels for the matching --from-image")
+    q.add_argument("--approval", choices=["each", "anchor_only", "auto"], help="approval mode (default: builder.concept.approval)")
+    q.add_argument("--views", help="comma-separated needed views (default: builder.concept.views)")
+    q = csub.add_parser("prompts", help="print every open generation request: prompt to paste, images to attach, request id")
+    cwf(q)
+    q = csub.add_parser("import", help="import generated images for a request (copied unmodified, hashed, marked candidate)")
+    cwf(q, agents=True)
+    q.add_argument("request_id", help="the request id (with --as-anchor/--as-view: the first file)")
+    q.add_argument("files", nargs="*")
+    q.add_argument("--vendor", choices=["chatgpt", "gemini", "other"], help="declared by the owner; recorded as a declaration")
+    q.add_argument("--model", help="model name as shown in the app; recorded as a declaration")
+    q.add_argument("--attached", help="comma-separated reference ids actually attached (declaration)")
+    q.add_argument("--as-anchor", action="store_true", help="no matching request: create an anchor request for these files (R-96a)")
+    q.add_argument("--as-view", metavar="VIEW", help="no matching request: create a request for this needed view (R-96a)")
+    q.add_argument("--watch", metavar="FOLDER", help="import new image files from FOLDER as they appear, all for request_id")
+    q.add_argument("--watch-timeout", type=float, help="stop watching after this many seconds")
+    q.add_argument("--watch-max", type=int, help="stop after this many files")
+    q.add_argument("--watch-existing", action="store_true", help="also import files already in the folder")
+    q.add_argument("--no-check", action="store_true", help="import only; do not run the seats' consistency verdicts now")
+    q = csub.add_parser("list", help="canon state, coverage of the needed set, requests, candidates, conflicts")
+    cwf(q)
+    q = csub.add_parser("show", help="print one concept record (reference, generation, study, conflict, canon, plan)")
+    cwf(q)
+    q.add_argument("record_id")
+    q = csub.add_parser("approve", help="approve candidate image(s); recorded with the mode and the seats' verdicts")
+    cwf(q, agents=True)
+    q.add_argument("ids", nargs="+")
+    q = csub.add_parser("reject", help="reject image(s) with a reason")
+    cwf(q, agents=True)
+    q.add_argument("ids", nargs="+")
+    q.add_argument("--reason", required=True)
+    q = csub.add_parser("regenerate", help="write a revised prompt as a new request (bounded by max_regenerations_per_view)")
+    cwf(q, agents=True)
+    q.add_argument("record_id", help="a generation request id or a generated reference id")
+    q.add_argument("--note", help="what to change")
+    q = csub.add_parser("study", help="request a per-piece study conditioned on the canon (R-104)")
+    cwf(q, agents=True)
+    q.add_argument("--part", required=True)
+    q.add_argument("--view", required=True)
+    q.add_argument("--region")
+    q.add_argument("--purpose")
+    q = csub.add_parser("proceed", help="accept a partial reference set explicitly (recorded) and hand off to intake")
+    cwf(q)
+    q = csub.add_parser("abandon", help="abandon an open request (its manifest records the abandonment, R-96)")
+    cwf(q)
+    q.add_argument("request_id")
+    q.add_argument("--reason", required=True)
+    q = csub.add_parser("failed", help="mark an open request failed (the app refused or produced nothing usable)")
+    cwf(q)
+    q.add_argument("request_id")
+    q.add_argument("--reason", required=True)
+    sp.set_defaults(func=cmd_concept)
 
     sp = sub.add_parser("fixture", help="create the disposable fixture project (needs Blender)")
     fsub = sp.add_subparsers(dest="fixture_cmd", required=True)

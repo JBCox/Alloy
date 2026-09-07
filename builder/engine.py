@@ -119,6 +119,7 @@ class Engine:
         self.blender_info: dict[str, Any] = {}
         self.blender_version = "unknown"
         self.preflight_reports: dict[str, dict[str, Any]] = {}
+        self._probe_spend: dict[str, dict[str, Any]] = {}
         self.cancel_event = threading.Event()
         self._pause_requested = False
         self._render_script_sha = script_sha256("render.py")
@@ -193,6 +194,7 @@ class Engine:
                 continue
             adapter = self.adapters[label]
             agent = self.agents[label]
+            self._probe_spend[label] = {"measured": 0.0, "estimated": 0.0, "unknown_invocations": 0}
             declared = adapter.declared_capabilities()
             local = adapter.preflight_local()
             caps = {cap: {"declared": declared.get(cap, "no"), **self._local_tier(adapter, local, cap), "live": "not_run"}
@@ -219,14 +221,57 @@ class Engine:
                      "reasoning": agent.data["reasoning"], "capabilities": caps, "local": local, "ok": ok,
                      "blockers": blockers, "cache_key": cache_key, "live": live, "at": utc_now(),
                      "effective_settings": self._last_effective(label),
-                     "reasoning_fallbacks": list(getattr(adapter, "fallbacks_reported", []) or [])}
+                     "reasoning_fallbacks": list(getattr(adapter, "fallbacks_reported", []) or []),
+                     "probe_cost": dict(self._probe_spend.get(label) or {"measured": 0.0, "estimated": 0.0, "unknown_invocations": 0})}
             rec = self.store.upsert(Record.new("preflight_report", entry), actor="engine", event="preflight.recorded")
             agent.data["preflight_report_id"] = rec.id
             self.agents[label] = self.store.upsert(agent, actor="engine", event="agent.preflight")
             report[label] = entry
             self.preflight_reports[label] = entry
+        if not labels or "I" in labels:
+            report["I"] = self._preflight_image_seat()
+            self.preflight_reports["I"] = report["I"]
         self._emit("preflight", report=report)
         return report
+
+    def _preflight_image_seat(self) -> dict[str, Any]:
+        """Addendum R-109: the image seat's three tiers. Manual seat: declared (manual, intended vendor), local (import
+        directory writable, flow confirmed once), live (not applicable; provenance is as declared by the owner and
+        consistency is checked by both LLM seats)."""
+        from .providers.imagegen import make_image_seat
+
+        seat = make_image_seat(self.config.image_generation)
+        plans = self.store.list("concept_plan")
+        confirmed = bool(plans and plans[-1].data.get("flow_confirmed_at"))
+        import_dir = Path(self.config.concept.get("import_dir") or self.project.path("concept", "imports"))
+        entry = seat.preflight(import_dir=import_dir, flow_confirmed=confirmed)
+        entry.update({"agent_id": "I", "label": "I", "seat": "I", "provider": seat.name, "model": entry["declared"].get("model"),
+                      "reasoning": "", "capabilities": {}, "blockers": entry.get("blockers") or [], "live_probes": False})
+        rec = self.store.upsert(Record.new("preflight_report", entry), actor="engine", event="preflight.recorded",
+                                inputs={"seat": "I"})
+        entry["report_id"] = rec.id
+        return entry
+
+    def _note_probe_spend(self, label: str, usage: Any) -> None:
+        from .records import Estimated, Measured
+
+        entry = self._probe_spend.setdefault(label, {"measured": 0.0, "estimated": 0.0, "unknown_invocations": 0})
+        cost = usage.cost_usd
+        if isinstance(cost, Measured):
+            entry["measured"] = round(entry["measured"] + float(cost.value), 6)
+        elif isinstance(cost, Estimated):
+            entry["estimated"] = round(entry["estimated"] + float(cost.value), 6)
+        else:
+            entry["unknown_invocations"] += 1
+
+    def _seed_probe_spend(self, tracker: LimitTracker) -> None:
+        """Carry the stored preflight probe spend of every agent into ``tracker`` (design 12b item 16 follow-up)."""
+        for label, entry in self.preflight_reports.items():
+            pc = entry.get("probe_cost") if isinstance(entry, dict) else None
+            if pc:
+                tracker.add_external("preflight_probe", measured=float(pc.get("measured") or 0.0),
+                                     estimated=float(pc.get("estimated") or 0.0),
+                                     unknown_invocations=int(pc.get("unknown_invocations") or 0))
 
     def _last_usage_known(self, label: str) -> bool:
         invs = [i for i in self.store.list("invocation") if i.data.get("agent_id") == self.agents[label].id]
@@ -449,6 +494,10 @@ class Engine:
             res = adapter.invoke(req, cancel_event=cancel_event or self.cancel_event)
             if count_toward_limits:
                 self.limits.note_complete("request", agent_id=agent.id, usage=res.usage)
+            else:
+                # a preflight probe is not a modeling request but its cost is real: it counts toward the monetary cap
+                self.limits.note_external_cost("preflight_probe", res.usage)
+                self._note_probe_spend(label, res.usage)
             results.append(res)
             if res.outcome == "ok":
                 # only a successful call advances the session: a failed `new` never becomes a `resume` (R-10)
@@ -516,12 +565,13 @@ class Engine:
     def start(self, *, attended: bool | None = None, component_name: str | None = None) -> Record:
         if not self.preflight_reports:
             raise RuntimeError("preflight has not been run; run preflight before start (R-21)")
-        blockers = {label: r["blockers"] for label, r in self.preflight_reports.items() if not r["ok"]}
+        blockers = {label: r["blockers"] for label, r in self.preflight_reports.items() if not r["ok"] and label != "I"}
         if blockers:
             raise RuntimeError("preflight blocks the run: " + json.dumps(blockers, ensure_ascii=False))
         attended = self.config.attended if attended is None else attended
         self.limits = LimitTracker(self.config.limits, cost_enforced_by_provider={
             label: self.adapters[label].declared_capabilities().get("cost_cap") == "yes" for label in self._labels()})
+        self._seed_probe_spend(self.limits)
         run = Record.new("run", {
             "project_id": self.project.record.id, "attended": attended, "stage": "intake", "component_id": None,
             "stop_reason": None, "notes": [], "started_at": utc_now(), "limits": dict(self.config.limits),
@@ -557,6 +607,8 @@ class Engine:
             if reports and reports[-1].data.get("cache_key") == key:
                 loaded[label] = dict(reports[-1].data)
                 self.preflight_reports[label] = loaded[label]
+        if self.run is None and not self.limits.external_costs:
+            self._seed_probe_spend(self.limits)
         if self.runner is not None and not self.blender_info:
             self.blender_info = self.runner.smoke()
             self.blender_version = str(self.blender_info.get("blender_version", "unknown"))
@@ -696,11 +748,21 @@ class Engine:
         return briefs[-1].data["text"] if briefs else "(no reconstruction brief yet)"
 
     def _reference_items(self) -> list[EvidenceItem]:
+        """Approved canon only (addendum R-94): candidates never enter modeling packets; ranked by precedence (R-95)."""
+        from .concept import canon_rank
+
         items = []
-        for ref in self.references.current():
-            items.append(EvidenceItem(Path(ref.data["file"]), "reference",
-                                      {"reference_id": ref.id, "label": ",".join(ref.data.get("labels") or []),
-                                       "kind": ref.data.get("kind"), "version": ref.data.get("version")}))
+        for ref in canon_rank(self.references.approved()):
+            meta = {"reference_id": ref.id, "label": ",".join(ref.data.get("labels") or []),
+                    "kind": ref.data.get("kind"), "version": ref.data.get("version"),
+                    "canon_state": ref.data.get("canon_state", "approved")}
+            if ref.data.get("generation_id"):
+                meta["precedence"] = ref.data.get("precedence")
+                meta["note"] = (f"approved generated {ref.data.get('precedence_label')} (precedence {ref.data.get('precedence')}); "
+                                "canon by owner approval, not evidence of a pre-existing design (R-32, A.1)")
+            if ref.data.get("part_id"):
+                meta["part_id"] = ref.data["part_id"]
+            items.append(EvidenceItem(Path(ref.data["file"]), "reference", meta))
         return items
 
     def _render_items(self, renders: list[Record]) -> list[EvidenceItem]:
@@ -795,9 +857,10 @@ class Engine:
             return DEFAULT_FRAMING
         return bbox_union(chosen)
 
-    def _views(self, comp: Record, rev: Record) -> dict[str, Record]:
+    def _views(self, comp: Record, rev: Record, extra_defs: list[dict[str, str]] | None = None) -> dict[str, Record]:
         """View records for ``comp``: cameras framed from the measured bounding box, frozen per component and
-        re-framed (new version, journaled) only when parts no longer fit the frame (R-60)."""
+        re-framed (new version, journaled) only when parts no longer fit the frame (R-60). ``extra_defs`` adds
+        views for one packet (a close-up aligned to a finding's view) without making them part of the gate set."""
         existing = {v.data["name"]: v for v in self.store.list("view") if v.data.get("component_id") == comp.id}
         all_parts = [p.id for p in self.store.list("part")]
         part_ids = list(comp.data.get("part_ids") or [])
@@ -806,6 +869,7 @@ class Engine:
         # R-61 component close-ups: one per part of the component that has a measured bounding box
         defs = list(STANDARD_VIEW_DEFS) + [closeup_view_def(pid) for pid in part_ids
                                            if pid in boxes and not boxes[pid].get("empty")]
+        defs += [d for d in (extra_defs or []) if d["part_id"] in boxes and not boxes[d["part_id"]].get("empty")]
         out: dict[str, Record] = {}
         for vd in defs:
             if vd["subject"] == "part":
@@ -847,12 +911,16 @@ class Engine:
                                 view=view.data["spec"], view_version=int(view.data.get("version", 1)),
                                 blender_version=self.blender_version, render_script_sha256=self._render_script_sha)
 
-    def _render_component(self, rev: Record, comp: Record, reason: str) -> list[Record]:
+    def _render_component(self, rev: Record, comp: Record, reason: str, only_defs: list[dict[str, str]] | None = None) -> list[Record]:
+        """Render the component's views at ``rev`` (cache by key). With ``only_defs`` just those extra views."""
         out: list[Record] = []
         all_renders = self.store.list("render", state="ok")
+        views = self._views(comp, rev, extra_defs=only_defs)
+        if only_defs is not None:
+            views = {n: v for n, v in views.items() if n in {d["name"] for d in only_defs}}
         self._execution("rendering")
         try:
-            for name, view in self._views(comp, rev).items():
+            for name, view in views.items():
                 key = self._cache_key(rev, view)
                 cached = [r for r in all_renders if r.data.get("cache_key") == key and r.data.get("revision_id") == rev.id]
                 if cached:
@@ -1056,9 +1124,13 @@ class Engine:
     # ------------------------------------------------------------------- stages
 
     def _stage_intake(self) -> None:
-        refs = self.references.current()
+        plans = self.store.list("concept_plan")
+        if plans and plans[-1].state != "complete":
+            raise EngineFailure(f"concept stage is {plans[-1].state}, not complete: approve the needed references or run "
+                                "`concept proceed` to accept a partial set (R-103); intake uses approved canon only (R-94)")
+        refs = self.references.approved()
         if not refs:
-            raise EngineFailure("no references registered; run intake before starting (R-26)")
+            raise EngineFailure("no approved references registered; run intake (or the concept stage) before starting (R-26)")
         ready, reasons = self.references.intake_ready()
         if not ready:
             raise EngineFailure("intake is not ready: " + "; ".join(reasons))
@@ -1333,9 +1405,17 @@ class Engine:
         open_findings = self._open_findings(comp)
         if any(f.state == "evidence_gap" for f in open_findings):
             gaps = [f.id for f in open_findings if f.state == "evidence_gap"]
+            studies = [s for f in open_findings if f.state == "evidence_gap" for s in (f.data.get("study_request_ids") or [])]
+            note = f"finding(s) {gaps} need more reference evidence; add references or waive with a rationale"
+            if studies:
+                generated = [s for s in studies if (self.store.get("study_request", s) or Record("study_request", s)).state != "requested"
+                             or (self.store.get("study_request", s) or Record("study_request", s)).data.get("generation_id")]
+                how = ("generate them through the concept stage (`concept prompts`, then `concept import`)"
+                       if generated or self.store.list("concept_plan") else
+                       "start a concept stage (`concept start --from-image <approved reference>`) and run `concept study` to generate them (R-104)")
+                note += f"; {len(studies)} study request(s) recorded ({', '.join(studies)}): {how}"
             self._set_stage("done")
-            self._stop("waiting_for_user", "missing_evidence",
-                       f"finding(s) {gaps} need more reference evidence; add references or waive with a rationale")
+            self._stop("waiting_for_user", "missing_evidence", note)
             return
         reassess = [f for f in open_findings if f.state == "reassess"]
         if reassess and not reassess[0].data.get("reassessed"):
@@ -1440,13 +1520,25 @@ class Engine:
         rev = self._latest_revision()
         before = [self.store.require("render", rid) for rid in attempt.data.get("before_render_ids", [])]
         after = [self.store.require("render", rid) for rid in attempt.data.get("after_render_ids", [])]
+        # a close-up in the finding's own view, BEFORE (the attempt's base revision) and AFTER (R-61, R-65)
+        aligned = self._aligned_closeup_def(finding)
+        if aligned is not None:
+            before_rev = self.store.get("revision", before[0].data["revision_id"]) if before else None
+            if before_rev is not None and before_rev.id != rev.id:
+                before += self._render_component(before_rev, comp, f"close-up in the finding's view, before {finding.id}", only_defs=[aligned])
+            after += self._render_component(rev, comp, f"close-up in the finding's view, after {finding.id}", only_defs=[aligned])
+            attempt.data["aligned_closeup_view"] = aligned["name"]
         measurement = self._measure(rev, comp)
         evidence = self._reference_items()
         evidence += [EvidenceItem(Path(r.data["file"]), "render", {"render_id": r.id, "revision_id": r.data["revision_id"],
-                                                                     "view": r.data["view_name"], "note": "BEFORE"}) for r in before if r.state == "ok"]
+                                                                     "view": r.data["view_name"], "note": "BEFORE",
+                                                                     **({"label": "close-up in the finding's own view"} if aligned and r.data["view_name"] == aligned["name"] else {})})
+                     for r in before if r.state == "ok"]
         evidence += self._crop_items(before, [finding.data["part_id"]], note="BEFORE")
         evidence += [EvidenceItem(Path(r.data["file"]), "render", {"render_id": r.id, "revision_id": r.data["revision_id"],
-                                                                     "view": r.data["view_name"], "note": "AFTER"}) for r in after if r.state == "ok"]
+                                                                     "view": r.data["view_name"], "note": "AFTER",
+                                                                     **({"label": "close-up in the finding's own view"} if aligned and r.data["view_name"] == aligned["name"] else {})})
+                     for r in after if r.state == "ok"]
         evidence += self._crop_items(after, [finding.data["part_id"]], note="AFTER")
         if measurement:
             evidence.append(measurement)
@@ -1505,6 +1597,15 @@ class Engine:
                               inputs={"verdict": verdict, "note": note})
         self._set_stage("correct", verify=None)
 
+    def _aligned_closeup_def(self, finding: Record) -> dict[str, str] | None:
+        """A close-up framed on the finding's part in the direction of the view the finding names, when that view is
+        a standard one and not already the three-quarter close-up direction."""
+        view_name = str(finding.data.get("view") or "")
+        direction = next((d["direction"] for d in STANDARD_VIEW_DEFS if d["name"] == view_name), None)
+        if direction is None or direction == closeup_view_def(finding.data["part_id"])["direction"]:
+            return None
+        return closeup_view_def(finding.data["part_id"], direction)
+
     def _stage_reassess(self) -> None:
         comp = self._component()
         pending = [f for f in self._open_findings(comp) if f.state == "reassess" and not f.data.get("reassessed")]
@@ -1551,9 +1652,51 @@ class Engine:
         finding.data["reassigned_to"] = agent.id
         if outcome.value.get("evidence_gap"):
             finding.state = "evidence_gap"
+        finding.data["study_request_ids"] = self._record_study_requests(outcome.value.get("study_requests") or [],
+                                                                        requested_by=f"agent:{reassessor}", finding=finding)
         self.store.upsert(finding, actor="engine", event="finding.reassessed", run_id=self._run_id(),
                           inputs={"cause": outcome.value.get("cause"), "by": reassessor})
         self._set_stage("correct")
+
+    def _record_study_requests(self, requests: list[dict[str, Any]], *, requested_by: str, finding: Record) -> list[str]:
+        """Addendum R-104: an agent may ask for a per-piece study. With a concept stage and an approved anchor the art
+        director writes the prompt at once; otherwise the request is recorded for the owner (`concept study`)."""
+        from .concept import ConceptError, ConceptStage
+
+        ids: list[str] = []
+        if not requests:
+            return ids
+        concept = ConceptStage(self)
+        plan = concept.plan
+        for sr in requests:
+            part_id = sr.get("part_id") or finding.data.get("part_id")
+            if self.store.get("part", part_id) is None:
+                self.store.append_journal(actor="engine", event="study_request.refused", run_id=self._run_id(),
+                                          inputs={"part_id": part_id, "reason": "unknown part"})
+                continue
+            if plan is not None and plan.data.get("anchor_reference_id"):
+                try:
+                    rec = concept.study(part_id, view=sr.get("view") or "front", purpose=sr.get("purpose") or "evidence gap",
+                                        region=sr.get("region"), draft_prompt=sr.get("draft_prompt"), requested_by=requested_by,
+                                        actor="engine")
+                except ConceptError as exc:
+                    self.store.append_journal(actor="engine", event="study_request.not_generated", run_id=self._run_id(),
+                                              inputs={"part_id": part_id, "reason": str(exc)[:300]})
+                    rec = self._plain_study(sr, part_id, requested_by, finding)
+            else:
+                rec = self._plain_study(sr, part_id, requested_by, finding)
+            ids.append(rec.id)
+        return ids
+
+    def _plain_study(self, sr: dict[str, Any], part_id: str, requested_by: str, finding: Record) -> Record:
+        rec = Record.new("study_request", {"part_id": part_id, "view": sr.get("view") or "front", "region": sr.get("region"),
+                                           "purpose": sr.get("purpose") or "evidence gap", "draft_prompt": sr.get("draft_prompt"),
+                                           "requested_by": requested_by, "finding_id": finding.id, "created_at": utc_now(),
+                                           "reference_id": None, "generation_id": None,
+                                           "note": "no concept stage with an approved anchor: generate with `concept study` "
+                                                   "after `concept start` (R-104)"})
+        return self.store.upsert(rec, actor="engine", event="study_request.created", run_id=self._run_id(),
+                                 inputs={"part_id": part_id, "requested_by": requested_by, "finding_id": finding.id})
 
     def _stage_gate(self) -> None:
         comp = self._component()
@@ -1712,9 +1855,12 @@ class Engine:
         uncertainties = [f for f in open_findings if f["state"] in ("evidence_gap", "reassess")]
         if briefs:
             uncertainties += [{"unresolved_decision": q} for q in (briefs[-1].data.get("structured") or {}).get("unresolved_decisions") or []]
+        from .concept import ConceptStage
+
         return {
             "run_id": self.run.id if self.run else None,
             "execution": self.run.state if self.run else "idle",
+            "concept": ConceptStage(self).summary(),
             "stop_reason": self.run.data.get("stop_reason") if self.run else None,
             "stage": self.run.data.get("stage") if self.run else None,
             "attended": self.run.data.get("attended") if self.run else self.config.attended,

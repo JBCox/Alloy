@@ -36,13 +36,19 @@ CROP_PAD = 0.15                # crop padding as a fraction of the projected rec
 CROP_MAX_FRACTION = 0.6        # no crop when the part already fills most of the overview render
 
 
-def closeup_view_def(part_id: str) -> dict[str, str]:
-    return {"name": f"{CLOSEUP_PREFIX}{part_id}", "mode": "clay", "direction": CLOSEUP_DIRECTION, "subject": "part",
-            "part_id": part_id}
+def closeup_view_def(part_id: str, direction: str = CLOSEUP_DIRECTION) -> dict[str, str]:
+    """The standard close-up is three-quarter (``closeup:<part>``); a close-up aligned to another view direction, used
+    for verification packets in the finding's own view, is ``closeup:<part>@<direction>`` (R-61, R-65)."""
+    if direction not in DIRECTIONS:
+        raise ValueError(f"unknown close-up direction {direction!r}; expected one of {sorted(DIRECTIONS)}")
+    name = f"{CLOSEUP_PREFIX}{part_id}" if direction == CLOSEUP_DIRECTION else f"{CLOSEUP_PREFIX}{part_id}@{direction}"
+    return {"name": name, "mode": "clay", "direction": direction, "subject": "part", "part_id": part_id}
 
 
 def part_of_closeup(view_name: str) -> str | None:
-    return view_name[len(CLOSEUP_PREFIX):] if view_name.startswith(CLOSEUP_PREFIX) else None
+    if not view_name.startswith(CLOSEUP_PREFIX):
+        return None
+    return view_name[len(CLOSEUP_PREFIX):].split("@", 1)[0]
 
 
 DIRECTIONS: dict[str, tuple[float, float, float]] = {

@@ -239,6 +239,18 @@ builder:
     B: {provider: codex, model: gpt-6-astra, reasoning: xhigh, executable: ""}
   provider_timeouts: {response: 900, inactivity: 180, cancel_probe_after: 8}   # seconds; cancel_probe_after = preflight --live cancellation probe
   limits: {wall_clock_minutes: 0, max_cost_usd: 0, max_requests: 0, max_renders: 0, attempts_per_finding: 2}
+  # Concept stage (addendum A). approval: each | anchor_only | auto (D11), shown by every `concept` verb.
+  # max_images and max_regenerations_per_view count imported and generated images alike (R-105).
+  concept:
+    approval: each
+    anchor_candidates: 4
+    views: [front, side, rear, top, underside, three-quarter]
+    max_images: 40
+    max_regenerations_per_view: 3
+    import_dir: ""                      # empty = <workflow>\concept\imports (used by the image-seat preflight)
+  # The image seat I (D12): manual = the owner generates in the vendor's app from the prompt Alloy writes and runs
+  # `concept import`; vendor and model are recorded as the owner declares them. No API key anywhere in this build.
+  image_generation: {seat: manual, vendor: chatgpt, model: ""}
   presets:
     e10-bearer-head:
       name: "E10 Bearer - Head"

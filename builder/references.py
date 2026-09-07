@@ -14,9 +14,10 @@ from PIL import Image, ImageDraw
 
 from .ids import sha256_file, utc_now
 from .project import Project
-from .records import Record
+from .records import PRECEDENCE, Record
 
-KINDS = ("target", "previous_attempt", "rejected", "hypothesis")
+# ``generated`` is reserved for concept-stage imports (addendum R-96a); ``add`` refuses it, ``add_generated`` sets it.
+KINDS = ("target", "previous_attempt", "rejected", "hypothesis", "generated")
 KNOWN_LABELS = ("front", "side", "rear", "top", "underside", "three-quarter", "detail", "other")
 REGION_PURPOSES = ("target_region", "detail_crop")
 
@@ -33,15 +34,10 @@ class References:
             composite: bool = False, replaces_id: str | None = None, known_dimensions: dict[str, Any] | None = None,
             scale: dict[str, Any] | None = None, pose_notes: str = "", evidence_preference: int | None = None,
             actor: str = "user") -> Record:
-        if kind not in KINDS:
-            raise ValueError(f"reference kind {kind!r} must be one of {KINDS}")
-        if not isinstance(labels, list) or not all(isinstance(x, str) and x for x in labels):
-            raise ValueError("labels must be a list of non-empty strings")
-        src = Path(source_path)
-        if not src.is_file():
-            raise FileNotFoundError(src)
-        with Image.open(src) as im:
-            width, height, fmt = im.size[0], im.size[1], im.format
+        if kind not in KINDS or kind == "generated":
+            raise ValueError(f"reference kind {kind!r} must be one of {tuple(k for k in KINDS if k != 'generated')}")
+        _check_labels(labels)
+        src, width, height, fmt = _open_image(source_path)
         version = 1
         previous: Record | None = None
         if replaces_id:
@@ -49,11 +45,7 @@ class References:
             version = int(previous.data.get("version", 1)) + 1
         rec = Record.new("reference", {})
         dest = self.dir / f"{rec.id}_v{version}{src.suffix.lower()}"
-        shutil.copyfile(src, dest)
-        digest = sha256_file(dest)
-        if digest != sha256_file(src):
-            dest.unlink(missing_ok=True)
-            raise OSError("reference copy hash differs from the original (R-48)")
+        digest = _copy_unmodified(src, dest)
         rec.data.update({
             "file": str(dest), "sha256": digest, "width": width, "height": height, "format": fmt,
             "labels": list(labels), "kind": kind, "notes": notes, "composite": bool(composite), "version": version,
@@ -61,6 +53,9 @@ class References:
             "evidence_of_original": kind == "target", "known_dimensions": known_dimensions or {},
             "scale": scale or {}, "pose_notes": pose_notes, "evidence_preference": evidence_preference,
             "added_at": utc_now(),
+            # addendum R-94, R-95: owner-supplied references are canon on entry with the highest precedence
+            "canon_state": "approved", "precedence": PRECEDENCE["owner_target"], "precedence_label": "owner_target",
+            "derived_from": None, "generation_id": None,
         })
         rec = self.store.upsert(rec, actor=actor, event="reference.added", inputs={"source": str(src), "labels": labels})
         self.store.register_file(dest, kind="reference", record_id=rec.id)
@@ -69,11 +64,48 @@ class References:
             self.store.upsert(previous, actor=actor, event="reference.replaced", inputs={"by": rec.id})
         return rec
 
+    def add_generated(self, source_path: str | Path, *, generation_id: str, labels: list[str], precedence_label: str,
+                      derived_from: str | None, declared: dict[str, Any], part_id: str | None = None, notes: str = "",
+                      actor: str = "user") -> Record:
+        """Concept-stage import (addendum R-96a, R-97): the file is copied unmodified under ``refs/generated/<request>/``,
+        hashed, linked to its generation request, and marked ``candidate``. Vendor and model are declarations."""
+        _check_labels(labels)
+        if precedence_label not in PRECEDENCE or precedence_label == "owner_target":
+            raise ValueError(f"generated references take precedence anchor, turnaround, or study, not {precedence_label!r}")
+        src, width, height, fmt = _open_image(source_path)
+        rec = Record.new("reference", {})
+        dest = self.dir / "generated" / generation_id / f"{rec.id}{src.suffix.lower()}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        digest = _copy_unmodified(src, dest)
+        rec.data.update({
+            "file": str(dest), "sha256": digest, "width": width, "height": height, "format": fmt,
+            "labels": list(labels), "kind": "generated", "notes": notes, "composite": False, "version": 1,
+            "replaces_id": None, "replaced_by": None, "original_path": str(src),
+            "evidence_of_original": False,          # R-32: a generated image is never evidence of a pre-existing design
+            "known_dimensions": {}, "scale": {}, "pose_notes": "", "evidence_preference": None, "added_at": utc_now(),
+            "canon_state": "candidate", "precedence": PRECEDENCE[precedence_label], "precedence_label": precedence_label,
+            "derived_from": derived_from, "generation_id": generation_id, "part_id": part_id,
+            "declared": dict(declared), "verdicts": {}, "approval": None, "rejection": None,
+        })
+        rec = self.store.upsert(rec, actor=actor, event="reference.imported",
+                                inputs={"source": str(src), "generation_id": generation_id, "labels": labels,
+                                        "declared": dict(declared)})
+        self.store.register_file(dest, kind="reference", record_id=rec.id)
+        return rec
+
     def get(self, reference_id: str) -> Record:
         return self.store.require("reference", reference_id)
 
     def current(self) -> list[Record]:
         return [r for r in self.store.list("reference") if not r.data.get("replaced_by")]
+
+    def approved(self) -> list[Record]:
+        """Canon references (addendum R-94): only these enter intake and evidence packets as references. A record
+        without a canon state predates the concept stage and was owner-supplied, so it counts as approved."""
+        return [r for r in self.current() if r.data.get("canon_state", "approved") == "approved"]
+
+    def candidates(self) -> list[Record]:
+        return [r for r in self.current() if r.data.get("canon_state") == "candidate"]
 
     # --- regions -------------------------------------------------------------------
 
@@ -104,14 +136,37 @@ class References:
 
     def intake_ready(self) -> tuple[bool, list[str]]:
         reasons: list[str] = []
-        targets = [r for r in self.current() if r.data.get("kind") == "target"]
+        # owner targets, or approved generated canon (addendum A.1: approved images become the design)
+        targets = [r for r in self.approved() if r.data.get("kind") in ("target", "generated")]
         if not targets:
-            reasons.append("no target reference has been added")
+            reasons.append("no approved target reference has been added")
         for t in targets:
             if t.data.get("composite") and not any(r.data.get("purpose") == "target_region" for r in self.regions(t.id)):
                 reasons.append(f"composite reference {t.id} needs an explicit target region so unrelated subjects never "
                                "enter the evidence (R-27)")
         return (not reasons), reasons
+
+
+def _check_labels(labels: Any) -> None:
+    if not isinstance(labels, list) or not all(isinstance(x, str) and x for x in labels):
+        raise ValueError("labels must be a list of non-empty strings")
+
+
+def _open_image(source_path: str | Path) -> tuple[Path, int, int, str | None]:
+    src = Path(source_path)
+    if not src.is_file():
+        raise FileNotFoundError(src)
+    with Image.open(src) as im:
+        return src, im.size[0], im.size[1], im.format
+
+
+def _copy_unmodified(src: Path, dest: Path) -> str:
+    shutil.copyfile(src, dest)
+    digest = sha256_file(dest)
+    if digest != sha256_file(src):
+        dest.unlink(missing_ok=True)
+        raise OSError("reference copy hash differs from the original (R-48)")
+    return digest
 
 
 def _validate_bbox(bbox: Any, width: int, height: int) -> tuple[int, int, int, int]:

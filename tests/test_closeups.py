@@ -180,3 +180,35 @@ def test_review_and_verification_packets_carry_closeups_and_crops(project):
         if r.data["view_name"].startswith(CLOSEUP_PREFIX):
             assert r.data["manifest"]["view"]["part_id"] == part_of_closeup(r.data["view_name"])
             assert Path(r.data["file"]).is_file()
+
+
+def test_closeup_view_def_can_align_to_a_named_view():
+    """Phase 2b carry-over: a close-up framed in the finding's own view direction (R-61, R-65)."""
+    vd = closeup_view_def("p_bracket", direction="side")
+    assert vd["name"] == f"{CLOSEUP_PREFIX}p_bracket@side" and vd["direction"] == "side" and vd["part_id"] == "p_bracket"
+    assert part_of_closeup(vd["name"]) == "p_bracket"
+    with pytest.raises(ValueError):
+        closeup_view_def("p_bracket", direction="sideways")
+
+
+def test_verification_packet_carries_a_closeup_in_the_findings_own_view(project):
+    """The floating-bracket finding names the side view: BEFORE and AFTER close-ups aligned to 'side' are rendered for
+    the verifier in addition to the standard three-quarter close-up; the review packet does not carry them."""
+    eng, adapters, runner = _engine(project)
+    eng.preflight(live=True)
+    eng.start()
+    status = eng.run_until_stop(max_steps=60)
+    assert status["stop_reason"] == "ready_for_user_review", status["notes"]
+    verify = next(i for i in adapters["A"].invocations if i.purpose == "verification")
+    vfiles = _manifest(verify)["files"]
+    aligned = f"{CLOSEUP_PREFIX}p_bracket@side"
+    before = [f for f in vfiles if f["role"] == "render" and f["meta"].get("note") == "BEFORE" and f["meta"]["view"] == aligned]
+    after = [f for f in vfiles if f["role"] == "render" and f["meta"].get("note") == "AFTER" and f["meta"]["view"] == aligned]
+    assert len(before) == 1 and len(after) == 1
+    assert before[0]["meta"]["revision_id"] != after[0]["meta"]["revision_id"]
+    text = (Path(verify.packet_dir) / "PACKET.md").read_text(encoding="utf-8")
+    assert "finding's own view" in text
+    view = next(v for v in project.store.list("view") if v.data["name"] == aligned)
+    assert view.data["spec"]["camera"]["framing"]["direction"] == "side" and view.data["part_id"] == "p_bracket"
+    review = next(i for i in adapters["B"].invocations if i.purpose == "review_task")
+    assert not any(f["meta"].get("view") == aligned for f in _manifest(review)["files"])

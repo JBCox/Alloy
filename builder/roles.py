@@ -35,6 +35,16 @@ def other_seat(seats: list[str], seat: str) -> str:
     raise ValueError(f"no seat other than {seat!r} among {seats}")
 
 
+def consistency_seats(seats: list[str], image_seat: str | None = None) -> list[Assignment]:
+    """Addendum R-102: every generated image is checked by *both* LLM seats independently, before either sees the
+    other's verdict. The image seat judges nothing (D10), so it is never among them."""
+    llm = [s for s in seats if s != image_seat]
+    if len(llm) < 2:
+        raise ValueError("two LLM seats are required for independent consistency verdicts (R-102)")
+    return [Assignment("consistency_checker", s, "both LLM seats judge independently before sharing (R-102); the image "
+                                                  "seat judges nothing (D10)") for s in llm]
+
+
 def assert_no_conflict(role: str, seat: str, author: str | None) -> None:
     """R-107: a seat never holds a role that judges its own operation."""
     if role in INDEPENDENT_OF_AUTHOR and author is not None and seat == author:

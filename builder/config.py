@@ -24,6 +24,13 @@ DEFAULT_AGENTS: dict[str, dict[str, str]] = {
     "B": {"provider": "codex", "model": "gpt-6-astra", "reasoning": "xhigh", "executable": ""},
 }
 ISOLATED_REVIEW_MODES = ("when_contaminated", "always")
+# Concept stage (addendum A, D11, D12, R-100, R-102, R-105)
+APPROVAL_MODES = ("each", "anchor_only", "auto")
+DEFAULT_CONCEPT_VIEWS = ["front", "side", "rear", "top", "underside", "three-quarter"]
+DEFAULT_CONCEPT: dict[str, Any] = {"approval": "each", "anchor_candidates": 4, "views": list(DEFAULT_CONCEPT_VIEWS),
+                                   "max_images": 40, "max_regenerations_per_view": 3, "import_dir": ""}
+IMAGE_SEATS = ("manual",)       # an API seat may be added later (keys from the environment only, D12)
+DEFAULT_IMAGE_GENERATION: dict[str, str] = {"seat": "manual", "vendor": "chatgpt", "model": ""}
 BLENDER_SEARCH_ROOTS = (Path(r"C:\Program Files\Blender Foundation"),)
 
 
@@ -51,6 +58,8 @@ class BuilderConfig:
     attended: bool = True
     isolated_reviews: str = "when_contaminated"
     presets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    concept: dict[str, Any] = field(default_factory=lambda: _copy_concept(DEFAULT_CONCEPT))
+    image_generation: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_IMAGE_GENERATION))
     warnings: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -103,6 +112,8 @@ class BuilderConfig:
         presets_raw = section.get("presets")
         cfg.presets = {str(k): dict(v) for k, v in (presets_raw or {}).items() if isinstance(v, dict)} \
             if isinstance(presets_raw, dict) else {}
+        cfg.concept = _parse_concept(section.get("concept"), warnings)
+        cfg.image_generation = _parse_image_generation(section.get("image_generation"), warnings)
         return cfg
 
     @classmethod
@@ -127,7 +138,70 @@ class BuilderConfig:
             "agents": {k: v.to_dict() for k, v in self.agents.items()},
             "provider_timeouts": dict(self.provider_timeouts), "limits": dict(self.limits),
             "presets": {k: dict(v) for k, v in self.presets.items()},
+            "concept": _copy_concept(self.concept), "image_generation": dict(self.image_generation),
         }
+
+
+def _copy_concept(d: dict[str, Any]) -> dict[str, Any]:
+    out = dict(d)
+    out["views"] = list(d.get("views") or [])
+    return out
+
+
+def _parse_concept(given: Any, warnings: list[str]) -> dict[str, Any]:
+    out = _copy_concept(DEFAULT_CONCEPT)
+    if given is None:
+        return out
+    if not isinstance(given, dict):
+        warnings.append("concept: expected a mapping; using defaults")
+        return out
+    for name, value in given.items():
+        if name == "approval":
+            mode = _as_str(value, "each", "concept.approval", warnings)
+            if mode not in APPROVAL_MODES:
+                warnings.append(f"concept.approval={mode!r} is not one of {APPROVAL_MODES}; using each")
+                mode = "each"
+            out["approval"] = mode
+        elif name == "views":
+            if isinstance(value, list) and all(isinstance(v, str) and v for v in value):
+                out["views"] = list(value)
+            elif isinstance(value, str) and value.strip():
+                out["views"] = [v.strip() for v in value.split(",") if v.strip()]
+            else:
+                warnings.append(f"concept.views: expected a list of view names, got {value!r}; using defaults")
+        elif name == "import_dir":
+            out["import_dir"] = _as_str(value, "", "concept.import_dir", warnings)
+        elif name in ("anchor_candidates", "max_images", "max_regenerations_per_view"):
+            try:
+                if isinstance(value, bool):
+                    raise ValueError
+                out[name] = int(value)
+            except (TypeError, ValueError):
+                warnings.append(f"concept.{name}: expected a number, got {value!r}; using {DEFAULT_CONCEPT[name]}")
+        else:
+            warnings.append(f"concept.{name}: unknown setting; ignored")
+    return out
+
+
+def _parse_image_generation(given: Any, warnings: list[str]) -> dict[str, str]:
+    out = dict(DEFAULT_IMAGE_GENERATION)
+    if given is None:
+        return out
+    if not isinstance(given, dict):
+        warnings.append("image_generation: expected a mapping; using defaults")
+        return out
+    seat = _as_str(given.get("seat"), "manual", "image_generation.seat", warnings)
+    if seat not in IMAGE_SEATS:
+        warnings.append(f"image_generation.seat={seat!r} is not available in this build (only {IMAGE_SEATS}); using manual. "
+                        "An API seat, if added later, takes keys from the environment only (D12)")
+        seat = "manual"
+    out["seat"] = seat
+    out["vendor"] = _as_str(given.get("vendor"), "chatgpt", "image_generation.vendor", warnings)
+    out["model"] = _as_str(given.get("model"), "", "image_generation.model", warnings)
+    for name in given:
+        if name not in ("seat", "vendor", "model"):
+            warnings.append(f"image_generation.{name}: unknown setting; ignored")
+    return out
 
 
 # --- lenient coercion -------------------------------------------------------------

@@ -1,9 +1,10 @@
-"""The four state machines (spec R-4) with guarded, journaled transitions.
+"""The state machines (spec R-4; addendum A canon) with guarded, journaled transitions.
 
-* execution   (record kind ``run``,        field ``state``)
-* review      (record kind ``component``,  field ``state``)
-* acceptance  (record kind ``acceptance``, field ``state``)
-* stop reason (record kind ``run``,        field ``data['stop_reason']``)
+* execution   (record kind ``run``,          field ``state``)
+* review      (record kind ``component``,    field ``state``)
+* acceptance  (record kind ``acceptance``,   field ``state``)
+* stop reason (record kind ``run``,          field ``data['stop_reason']``)
+* canon       (record kind ``concept_plan``, field ``state``)  the fifth machine, concept stage (design Section 14)
 
 Rules enforced here, not by prompts (R-1, R-5): only ``engine`` and ``user`` actors may transition;
 an illegal transition raises ``IllegalTransition`` and writes nothing; guards read facts the engine
@@ -16,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .ids import utc_now
-from .records import AcceptanceState, ExecutionState, Record, ReviewState, StopReason
+from .records import AcceptanceState, CanonState, ExecutionState, Record, ReviewState, StopReason
 from .store import Store, actor_kind_of
 
 Guard = Callable[[Record, dict[str, Any], dict[str, Any]], str | None]
@@ -150,7 +151,44 @@ _ACCEPTANCE_COPIES = {
     "superseded": ("supersede_reason", "superseded_by"),
 }
 
-MACHINES: dict[str, Machine] = {m.record_kind: m for m in (EXECUTION, REVIEW, ACCEPTANCE)}
+# --- canon (concept stage, design Section 14; addendum R-95, R-99 to R-103) --------------
+
+CANON = Machine("canon", "concept_plan", tuple(s.value for s in CanonState))
+_no_open_conflicts = _ctx_false("_has_open_conflicts", "an evidence conflict is open; resolve it or regenerate (R-95)")
+
+
+def _conflicts_guard(rec: Record, ctx: dict[str, Any], inputs: dict[str, Any]) -> str | None:
+    ctx["_has_open_conflicts"] = int(ctx.get("open_conflicts", 0) or 0) > 0
+    return _no_open_conflicts(rec, ctx, inputs)
+
+
+def _proceed_guard(rec: Record, ctx: dict[str, Any], inputs: dict[str, Any]) -> str | None:
+    """Completing from a partial turnaround is the owner's explicit decision, recorded (R-103)."""
+    if ctx.get("_actor_kind") != "user":
+        return "only the user proceeds with a partial reference set (R-103)"
+    if inputs.get("proceed") is not True:
+        return "an explicit proceed=True is required to accept a partial set (R-103)"
+    return _conflicts_guard(rec, ctx, inputs)
+
+
+CANON.allow("no_canon", "anchor_pending", _ctx_true("anchor_requests_open", "no anchor candidate request is open"))
+CANON.allow("no_canon", "anchor_approved", _ctx_true("anchor_approved", "no approved anchor exists"))
+CANON.allow("anchor_pending", "anchor_approved", _ctx_true("anchor_approved", "no approved anchor exists"))
+CANON.allow("anchor_approved", "anchor_pending")            # the anchor was rejected or superseded
+CANON.allow("turnaround_pending", "anchor_pending")
+CANON.allow("anchor_approved", "turnaround_pending", _ctx_true("canon_description", "no canon description is recorded (R-101)"))
+CANON.allow("anchor_approved", "turnaround_approved",
+            _all(_ctx_true("coverage_met", "the needed reference set is not covered by approved references (R-103)"),
+                 _conflicts_guard))
+CANON.allow("turnaround_pending", "turnaround_approved",
+            _all(_ctx_true("coverage_met", "the needed reference set is not covered by approved references (R-103)"),
+                 _conflicts_guard))
+CANON.allow("turnaround_approved", "turnaround_pending")    # a view was rejected or superseded after approval
+CANON.allow("turnaround_pending", "complete", _proceed_guard)
+CANON.allow("turnaround_approved", "complete", _conflicts_guard)
+CANON.allow("complete", "turnaround_pending")               # reopened by a rejection after hand-off (recorded)
+
+MACHINES: dict[str, Machine] = {m.record_kind: m for m in (EXECUTION, REVIEW, ACCEPTANCE, CANON)}
 
 
 def machine_for(record: Record) -> Machine:
@@ -201,6 +239,9 @@ def transition(store: Store, record: Record, to_state: str, *, actor: str, reaso
         if to_state == "accepted_at_revision":
             record.data["accepted_by"] = actor
             record.data["accepted_at"] = utc_now()
+    elif machine is CANON and to_state == "complete" and inp.get("proceed") is True:
+        record.data["proceeded_partial"] = {"by": actor, "at": utc_now(), "missing": list(inp.get("missing") or []),
+                                            "reason": reason}
     record.state = to_state
     return store.upsert(record, actor=actor, event=f"{record.kind}.transition", inputs=journal_inputs,
                         evidence=evidence, outcome=to_state, run_id=run_id)

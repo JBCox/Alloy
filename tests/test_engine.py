@@ -355,3 +355,31 @@ def test_pause_request_is_honoured_at_a_safe_boundary(project):
     eng.resume(user="user:josh")
     status = eng.run_until_stop(max_steps=60)
     assert status["stop_reason"] == "ready_for_user_review"
+
+
+def test_preflight_probe_spend_counts_toward_the_monetary_cap(project):
+    """Phase 2b carry-over (design 12b item 16): the live probes cost real money; their reported cost is carried into
+    the run's tracker as external spend, so the cap covers the whole session, not only the modeling calls."""
+    def priced(item, cost):
+        return {**item, "__usage__": {"cost_usd": cost}}
+
+    probes = {"probe": [priced({"shape": "triangle", "color": "red", "number": 7}, 0.7)],
+              "write_probe": [priced({"attempted_path": "scratch/x.txt", "outcome": "attempted_and_refused", "write_succeeded": False,
+                                      "error_text": "denied"}, 0.6)],
+              "session_probe": [priced({"nonce": "{nonce}"}, 0.5), priced({"nonce": "{nonce}"}, 0.5)]}
+    adapters = _adapters(a_extra=probes)
+    eng = _engine(project, adapters, cfg=_config(limits={"max_cost_usd": 2.0, "attempts_per_finding": 2}))
+    report = eng.preflight(live=True)
+    assert abs(report["A"]["probe_cost"]["measured"] - 2.3) < 1e-6 and report["B"]["probe_cost"]["measured"] == 0.0
+    assert report["A"]["probe_cost"]["unknown_invocations"] >= 1      # the cancelled probe reported no cost
+    eng.start()
+    cons = eng.limits.status()
+    assert abs(cons["external"]["preflight_probe"]["measured"] - 2.3) < 1e-6
+    assert cons["requests"]["completed"] == 0                          # probes are not modeling requests
+    status = eng.run_until_stop(max_steps=10)
+    assert status["stop_reason"] == "budget_limit" and "2.30" in status["notes"][-1]["note"]
+    assert status["consumption"]["requests"]["completed"] == 0         # nothing dispatched once the cap is reached
+    # a second engine on the same project (a later CLI process) restores the probe spend from the stored report
+    eng2 = _engine(project, _adapters(), cfg=_config(limits={"max_cost_usd": 2.0}))
+    eng2.load_preflight()
+    assert abs(eng2.limits.status()["external"]["preflight_probe"]["measured"] - 2.3) < 1e-6

@@ -34,6 +34,8 @@ class LimitTracker:
         self._correction_attempts: dict[str, int] = {}
         self.per_agent: dict[str, dict[str, int]] = {}
         self.max_invocation_cost: dict[str, float] = {}     # agent id -> largest single-invocation cost reported (measured or estimated)
+        # spend outside the modeling requests (preflight probes) that still counts toward the monetary cap
+        self.external_costs: dict[str, dict[str, float | int]] = {}
 
     def restore(self, snapshot: dict[str, Any] | None) -> None:
         """Continue counting from a persisted ``status()`` snapshot (restart, or a second process)."""
@@ -50,6 +52,9 @@ class LimitTracker:
         self._correction_attempts = {k: int(v) for k, v in (snapshot.get("correction_attempts") or {}).items()}
         self.per_agent = {k: dict(v) for k, v in (snapshot.get("per_agent") or {}).items()}
         self.max_invocation_cost = {k: float(v) for k, v in (snapshot.get("max_invocation_cost") or {}).items()}
+        self.external_costs = {k: {"measured": float(v.get("measured") or 0.0), "estimated": float(v.get("estimated") or 0.0),
+                                   "unknown_invocations": int(v.get("unknown_invocations") or 0)}
+                               for k, v in (snapshot.get("external") or {}).items()}
         self.started = self._now() - float(snapshot.get("elapsed_s") or 0.0)
 
     # --- accounting ---------------------------------------------------------------
@@ -78,6 +83,34 @@ class LimitTracker:
             self.unknown_cost_invocations += 1
         if isinstance(cost, (Measured, Estimated)) and agent_id:
             self.max_invocation_cost[agent_id] = max(self.max_invocation_cost.get(agent_id, 0.0), float(cost.value))
+
+    def note_external_cost(self, source: str, usage: Usage | None) -> None:
+        """Spend that is not a modeling request (a preflight probe) but is real money: it enters the measured or
+        estimated total so the cap covers it; unknown stays unknown, never zero (R-25, R-85)."""
+        cost = usage.cost_usd if usage is not None else UNKNOWN
+        entry = self.external_costs.setdefault(source, {"measured": 0.0, "estimated": 0.0, "unknown_invocations": 0})
+        if isinstance(cost, Measured):
+            entry["measured"] = round(float(entry["measured"]) + float(cost.value), 6)
+            self.cost_measured_total = round((self.cost_measured_total or 0.0) + float(cost.value), 6)
+        elif isinstance(cost, Estimated):
+            entry["estimated"] = round(float(entry["estimated"]) + float(cost.value), 6)
+            self.cost_estimated_total = round((self.cost_estimated_total or 0.0) + float(cost.value), 6)
+        else:
+            entry["unknown_invocations"] = int(entry["unknown_invocations"]) + 1
+            self.unknown_cost_invocations += 1
+
+    def add_external(self, source: str, *, measured: float = 0.0, estimated: float = 0.0, unknown_invocations: int = 0) -> None:
+        """Seed spend recorded by an earlier tracker (a preflight report from another process)."""
+        entry = self.external_costs.setdefault(source, {"measured": 0.0, "estimated": 0.0, "unknown_invocations": 0})
+        if measured:
+            entry["measured"] = round(float(entry["measured"]) + float(measured), 6)
+            self.cost_measured_total = round((self.cost_measured_total or 0.0) + float(measured), 6)
+        if estimated:
+            entry["estimated"] = round(float(entry["estimated"]) + float(estimated), 6)
+            self.cost_estimated_total = round((self.cost_estimated_total or 0.0) + float(estimated), 6)
+        if unknown_invocations:
+            entry["unknown_invocations"] = int(entry["unknown_invocations"]) + int(unknown_invocations)
+            self.unknown_cost_invocations += int(unknown_invocations)
 
     def note_transport_retry(self, agent_id: str | None = None) -> None:
         self.transport_retries += 1
@@ -177,4 +210,5 @@ class LimitTracker:
             "max_invocation_cost": dict(self.max_invocation_cost),
             "findings_at_attempt_limit": [f for f in self._correction_attempts if not self.correction_allowed(f)],
             "per_agent": dict(self.per_agent),
+            "external": {k: dict(v) for k, v in self.external_costs.items()},
         }

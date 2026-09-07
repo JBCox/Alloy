@@ -115,8 +115,40 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     }, ["finding_id", "verdict", "evidence_refs"]),
     "reassessment": _obj({
         "cause": {"type": "string", "enum": ["geometry", "camera", "material", "lighting", "evidence", "unknown"]},
-        "materially_different_approach": STRING, "evidence_gap": {"type": "boolean"}, "rationale": STRING,
+        "materially_different_approach": STRING, "evidence_gap": {"type": "boolean"},
+        # addendum R-104: an agent may ask for a per-piece study when the evidence is insufficient
+        "study_requests": _arr(_obj({"part_id": STRING, "view": STRING, "region": STRING, "purpose": STRING,
+                                     "draft_prompt": STRING}, ["part_id", "view", "purpose"])),
+        "rationale": STRING,
     }, ["cause", "materially_different_approach", "evidence_gap"]),
+    # --- concept stage (addendum A) ---
+    # R-100: the art director's generation prompt states subject, silhouette, construction, materials, palette, style,
+    # and framing. `attachments` names reference ids the owner should upload with the prompt (R-96).
+    "art_director_prompt": _obj({
+        "subject": STRING, "silhouette": STRING, "construction": STRING, "materials": STRING, "palette": STRING,
+        "style": STRING, "framing": STRING, "prompt": STRING, "avoid": STRINGS, "attachments": STRINGS,
+        "view": STRING, "rationale": STRING,
+    }, ["subject", "silhouette", "construction", "materials", "palette", "style", "framing", "prompt", "avoid", "attachments"]),
+    # R-101: the canon description every later prompt derives from
+    "canon_description": _obj({
+        "silhouette_and_proportions": STRING, "main_masses": STRING,
+        "parts_and_construction": _arr(_obj({"name": STRING, "description": STRING}, ["name", "description"])),
+        "materials_and_colors": STRING, "distinguishing_details": STRINGS, "unknowns": STRINGS, "rationale": STRING,
+    }, ["silhouette_and_proportions", "main_masses", "parts_and_construction", "materials_and_colors",
+        "distinguishing_details", "unknowns"]),
+    # R-102: an independent consistency verdict naming specific inconsistencies (part, region, what differs)
+    "consistency_verdict": _obj({
+        "reference_id": STRING, "verdict": {"type": "string", "enum": ["consistent", "inconsistent", "uncertain"]},
+        "inconsistencies": _arr(_obj({"part": STRING, "region": STRING, "what_differs": STRING,
+                                      "severity": {"type": "string", "enum": SEVERITIES}}, ["part", "region", "what_differs"])),
+        "rationale": STRING,
+    }, ["reference_id", "verdict", "inconsistencies"]),
+    # D11 `auto`: the art director's anchor pick with stated criteria, journaled and reversible
+    "anchor_pick": _obj({
+        "chosen_reference_id": STRING, "criteria": STRINGS,
+        "rejected": _arr(_obj({"reference_id": STRING, "reason": STRING}, ["reference_id", "reason"])),
+        "rationale": STRING,
+    }, ["chosen_reference_id", "criteria", "rejected"]),
 }
 
 
