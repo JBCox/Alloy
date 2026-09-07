@@ -217,3 +217,37 @@ execution:
 special_commands:
   debate_rounds: 3
   all_parallel: false
+
+# ============================================================================
+# Collaborative Model Builder
+# ============================================================================
+# Settings for `python main.py --build ...` (also `python -m builder`). Parsed
+# leniently by builder/config.py; unknown keys are ignored. The chat modes above
+# never read this section.
+
+builder:
+  # Where a project's workflow state (database, revisions, renders, logs) lives
+  # when `new --workflow-dir` is not given. Empty = <project_dir>\alloy-builder\<slug>
+  workflow_root: ""
+  attended: true                        # attended by default; `start --unattended` opts out
+  isolated_reviews: when_contaminated   # when_contaminated | always
+  blender:
+    executable: ""                      # empty = auto-detect C:\Program Files\Blender Foundation\Blender *\blender.exe
+    deadlines: {validate: 120, apply: 600, render: 900, measure: 120, fixture: 300}
+  agents:
+    A: {provider: claude, model: fable, reasoning: max, executable: ""}
+    B: {provider: codex, model: gpt-6-astra, reasoning: xhigh, executable: ""}
+  provider_timeouts: {response: 900, inactivity: 180, cancel_probe_after: 8}   # seconds; cancel_probe_after = preflight --live cancellation probe
+  limits: {wall_clock_minutes: 0, max_cost_usd: 0, max_requests: 0, max_renders: 0, attempts_per_finding: 2}
+  presets:
+    e10-bearer-head:
+      name: "E10 Bearer - Head"
+      project_dir: "C:\\Death Factory"
+      asset: "E10 Bearer, the humanoid enemy"
+      target_reference: "C:\\Death Factory\\docs\\art\\locked-theme-concept-v1.png"
+      # The region is chosen by the user during an authorized run and never guessed.
+      target_region: {name: "lower-left humanoid", bbox: null}
+      existing_source: "C:\\Death Factory\\art-source\\blender\\E10\\E10_Bearer_v4_proportions.blend"
+      existing_source_trust: "unfinished; proportions not assumed correct"
+      first_component: "Head"
+      rejected_references: []

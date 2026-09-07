@@ -86,6 +86,10 @@ class Config:
     # Custom role templates
     custom_templates: dict[str, RoleTemplate] = field(default_factory=dict)
 
+    # Collaborative Model Builder settings: the top-level `builder:` key kept as a raw dict here and
+    # parsed leniently by builder/config.py (spec D9). Preserved by save().
+    builder: dict = field(default_factory=dict)
+
     @classmethod
     def config_exists(cls) -> bool:
         """Check if a config file exists in any standard location."""
@@ -244,6 +248,7 @@ class Config:
             mode_settings=mode_settings,
             mode_global=mode_global,
             custom_templates=custom_templates,
+            builder=data.get("builder", {}) if isinstance(data.get("builder"), dict) else {},
         )
 
     def get_enabled_ais(self) -> dict[str, AIConfig]:
@@ -328,6 +333,9 @@ class Config:
                 "retry_delay": self.retry_delay,
             },
         }
+
+        if self.builder:
+            data["builder"] = self.builder
 
         # Ensure directory exists
         config_path.parent.mkdir(parents=True, exist_ok=True)

@@ -1083,8 +1083,16 @@ Examples:
     )
     parser.add_argument("--gui", action="store_true", help="Launch graphical interface")
     parser.add_argument("--setup", action="store_true", help="Run setup wizard")
+    parser.add_argument("--build", nargs=argparse.REMAINDER,
+                        help="Collaborative Model Builder: python main.py --build <verb ...> (try --build --help)")
 
     args = parser.parse_args()
+
+    # Collaborative Model Builder (builder/ package): everything after --build belongs to its own parser.
+    # It never routes through the chat modes or the Orchestrator (spec D2).
+    if args.build is not None:
+        from builder.cli import main as build_main
+        sys.exit(build_main(args.build))
 
     # Handle --gui flag
     if args.gui:
