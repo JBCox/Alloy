@@ -516,6 +516,96 @@ Phase 2b delivered: `builder/concept.py`, `builder/providers/imagegen/{__init__,
 
 **Owner-driven end-to-end proposal (awaiting approval).** Config: `builder.limits: {max_requests: 12, max_cost_usd: 12, wall_clock_minutes: 90}`, `builder.concept: {approval: each, views: [front, side], anchor_candidates: 2, max_images: 8, max_regenerations_per_view: 1}`, `builder.agents.B.executable` at the desktop app's codex 0.153.1. Steps: `new` a project in a scratch directory; `preflight <wf> --live` only if the stored reports are stale (5 to 10 calls per agent, about 0.5 to 0.8 USD per claude probe); `concept start <wf> --from-text "..."` (1 claude call, the anchor prompt); the owner generates 2 candidates in ChatGPT or Gemini and runs `concept import` (0 calls); `concept approve <ref>` (1 claude call for the canon description, 2 for the two view prompts); the owner generates and imports each view (2 claude verdicts + 2 codex verdicts); `concept approve` both (0 calls) or, if a view is inconsistent, one regeneration (1 claude prompt, then 2 more verdicts); `start <wf> --max-steps 2` to see intake run on the approved set (2 calls) or stop before it. Expected: 9 to 12 LLM calls, of which 6 to 8 claude at 2 to 3 USD each by the CLI's own estimate (intake-sized calls; verdict packets are smaller, so likely less) and 3 to 4 codex at unknown cost. Enforceable by Alloy: `max_requests`, `max_images`, `max_regenerations_per_view`, wall clock; by claude: `--max-budget-usd` per invocation (an estimate, and it stops a call only after the spend, so the tracker also refuses to dispatch when the remaining budget is below the agent's largest reported call). Not enforceable: codex cost. The image seat costs nothing to Alloy and whatever the owner's app subscription charges, recorded as not applicable.
 
+## 12d. Phase 3 construction notes (2026-09-07, the GUI per R-91, R-92, R-110)
+
+Built against Section 9.2 and Addendum A R-110. Decisions made while building:
+
+1. **A Tk-free read model and session** (`builder/viewmodel.py`). `snapshot(engine)` turns the records into one plain dict per panel of R-91 (project and references with canon state and `evidence_of_original`, agents with the three capability tiers and the requested versus effective reasoning setting, stage with the last task, its owner and rationale, the ownership holder and base revision, active operations, parts with construction relations kept apart from the parent hierarchy, renders labelled with revision and render ids, evidence label and staleness, findings with before and after render ids and attempts, coverage rows, measured boxes per revision, consumption and limits, checkpoints, the concept stage with prompts, candidates, both seats' verdicts, coverage, conflicts, and the mode text, and a journal tail). `BuilderSession` owns the project, engine, and concept stage on one worker thread; every public method submits a job and returns; results arrive on `events` as `busy`, `event`, `done`, `error`, `snapshot`, `closed` tuples. The engine observer also publishes a snapshot at every `stage`, `run.stopped`, and `preflight` event so the window shows progress during a long run (R-92) rather than only at the end. This split lets the binding be tested without a Tk main loop (`tests/test_viewmodel.py`).
+2. **The window never touches the store.** `gui/builder_view.py` `BuilderWindow(tk.Toplevel)` drains `session.events` with `after(50)` like `gui/app.py` and renders snapshots. Pause is a thread-safe flag (`Engine.pause()` plus the session's own event, applied by the engine at the next step boundary); cancel sets the engine's cancel event, pushes a `cancel` control request through the store (whose connection is shared with a lock and `check_same_thread=False`), and the worker cancels the run after the loop returns when it has not already; feedback is a `feedback` control request applied at the next safe boundary (R-59). `SQLite` is only ever used on the worker thread apart from those two control-request writes, which the store already serialises for the CLI's cross-process case.
+3. **Previews are files, labelled, scaled for presentation only** (R-92). `ImagePane` opens the actual PNG with Pillow, fits it into the canvas (aspect preserved, zoom 0.25 to 4), and states the scale in a separate presentation line ("scaled to N% to fit ... the evidence file is unmodified"). A missing or unreadable file is shown as such, never substituted. Stale renders carry the reason from `render_is_stale` in the label (R-64). Reference labels carry canon state, precedence, `evidence of original: yes | no (generated: a hypothesis, never evidence of the original, R-32)`, and the owner's declarations marked as not verified.
+4. **Measurements toggle draws only measured boxes** (R-68). `viewmodel.overlay_rects` projects the bounding boxes from the latest `logs/meas_*/measurement.json` of the render's revision through the view's recorded camera (`render.project_bbox`, no padding) into render pixels; a render whose revision has no measurement shows "no measurement recorded for this revision" and draws nothing. The overlay says they are bounding boxes not calibrated to the references.
+5. **Before and after follow the selected finding** (R-73, R-74). Selecting a finding switches the comparison to its before and after renders, preferring the finding's own view, selects its part in the tree, and lists its evidence render ids; a finding without an after render says it has not been verified on a new render.
+6. **Controls** (R-75, R-76, D8): Start with an attended checkbox whose help text states the attended rule and that "ready for user review" is never "accepted"; Resume (runs recovery first when the project was opened with a non-terminal run, like the CLI); Pause; Cancel (confirmed); Accept; Reopen with a required reason; Request correction and Waive with a required rationale on the selected finding; Restore checkpoint (confirmed, explains that history is never rewritten); Feedback. Live preflight is behind a confirmation dialog that states what it invokes and the measured probe costs; the local preflight is free. Real adapters are refused a run without a current live preflight report exactly as in the CLI (R-18, R-21); scripted mocks are probed on the spot.
+7. **Concept approval panel** (R-110): the mode text is the first line and is also shown in the window's top bar; open requests with the prompt verbatim, Copy prompt, the attachments in order with paths and reference ids, the CLI import command, declared vendor and model entries, Import (file dialog), Abandon and Mark failed with reasons; candidates in a table with declared vendor/model, both seats' verdicts and the summary; the anchor beside the selected candidate with the candidate labelled a hypothesis; the verdict text lists every inconsistency (part, region, what differs, severity) and each seat's rationale; Approve, Reject with a required reason, Regenerate with a note (targets the candidate's request), Proceed with a partial set (confirmed), Request study for the selected part, Start from text or seed images. Open conflicts and escalations are shown in the coverage line and never resolved by the panel on its own.
+8. **Hooks** (Section 9.4): one `add_command` in `gui/app.py` (View menu, "Model Builder...") that imports `gui.builder_view` lazily so the chat app's startup is unchanged; a Builder tab in `gui/settings.py` (`_create_builder_tab`, `_collect_builder`) exposing attended, isolated reviews, the Blender executable, both seats' provider, model, reasoning, and executable, the limits, the concept keys, and the image seat. The collected `builder` dict is deep-merged, so presets, deadlines, provider timeouts, and workflow_root survive a save; `tests/test_settings_builder_tab.py` proves the round trip through the real editor including the file's comments (ruamel path).
+9. **Tk in tests.** Tk tests use one session-scoped hidden root (`tests/conftest.py::tk_root`) because creating a second `Tk()` after destroying the first fails on this machine (`invalid command name "tcl_findLibrary"`); they skip with that reason when no display exists. A `StubSession` records the jobs the window submits so control tests never run the engine.
+10. **Standalone launch.** `python -m gui.builder_view <workflow_dir> [screenplay.json]` opens the window without the chat app (the second argument binds scripted mocks, as `--mock` does in the CLI).
+11. **Selection re-entrancy (found by the screenshot run, fixed with a test).** A programmatic `selection_set` on a Treeview fires `<<TreeviewSelect>>`, whose handler selected again: the window spun forever reloading images the moment it processed events (the hidden-root tests never did). Every programmatic selector now sets a guard and only changes a selection that differs, and the handlers ignore events raised under the guard; `test_programmatic_selection_does_not_re_enter_the_select_handlers` processes real events and bounds the loop by unbinding.
+12. **Look.** The window uses the chat app's theme vocabulary (`Card.TFrame` panels, subheadings, dim captions, accent and danger buttons, `ToolTip` for the explanations) instead of raw ttk defaults; the Treeview styles are builder-only because the chat app has none. The image caption sits in a fixed-height strip so its text length cannot resize the canvas (its text depends on the scale, which depends on the canvas size). Selecting the Concept tab widens the right column (the right column is a third of the window otherwise), and the concept image panes use a one-line compact label with the full provenance in the verdict text.
+13. **Not built.** Reference-region selection by dragging on the image (R-26 target regions still come from the CLI `intake --region`); a component or view filter on the part tree beyond selection; the efficiency harness and packaging (Phase 4).
+
+Phase 3 delivered: `builder/viewmodel.py`, `gui/builder_view.py`, the two hooks, `tests/test_viewmodel.py` (7), `tests/test_builder_view.py` (8), `tests/test_settings_builder_tab.py` (3), `tests/conftest.py::tk_root`, screenshots under `docs/reports/phase3/`. Tests: 245 deterministic (18 new; all pass), 21 real-Blender (20 pass plus the live smoke test, which carries both markers and is skipped unless `ALLOY_LIVE=1`).
+
+**Owner-driven live concept pass, revised proposal (Phase 3 session, awaiting approval; nothing spent).** Supersedes the figures in 12c: the caps there (12 requests, 12 USD) are below the minimum path once the preflight probes are seeded into the tracker.
+
+Facts re-verified today (read-only): `claude --version` = 2.1.233; `codex --version` on PATH = 0.147.0 (refused by the
+API for gpt-6-astra, design 12b item 15); `%USERPROFILE%\.codex\plugins\.plugin-appserver\codex.exe --version` =
+codex-cli 0.153.1 (the binary the live runs use).
+
+## Config (a scratchpad copy, passed with `--config`; config.yaml untouched)
+
+```yaml
+builder:
+  agents:
+    A: {provider: claude, model: fable, reasoning: max, executable: ""}
+    B: {provider: codex, model: gpt-6-astra, reasoning: xhigh,
+        executable: "C:\\Users\\joshu\\.codex\\plugins\\.plugin-appserver\\codex.exe"}
+  provider_timeouts: {response: 900, inactivity: 900, cancel_probe_after: 8}   # claude json prints nothing until done (12b item 15)
+  limits: {max_requests: 14, max_cost_usd: 20, wall_clock_minutes: 120, max_renders: 0, attempts_per_finding: 1}
+  concept: {approval: each, views: [front, side], anchor_candidates: 2, max_images: 8, max_regenerations_per_view: 1}
+  image_generation: {seat: manual, vendor: chatgpt, model: ""}
+```
+
+## Exact invocations, in order (WF = a new project directory in the scratchpad)
+
+1. `python -m builder new --workflow-dir WF --name "Concept pass" --asset "<subject>" --first-component Hull`  (0 calls)
+2. `python -m builder preflight WF --live --config live.yaml`
+   per agent: image probe 1, write probe 1, session probe 2, cancellation probe 1, plus at most one repair round per
+   probe = 5 to 10 calls per agent. Required: a new project has no stored report (R-18), and `concept start` refuses
+   to probe implicitly.
+3. `python -m builder concept start WF --from-text "<subject>" --config live.yaml`  (1 claude call: the anchor prompt)
+4. `python -m builder concept prompts WF --config live.yaml`; the owner generates 2 anchor candidates in ChatGPT or
+   Gemini and runs `python -m builder concept import WF <gen_id> <file1> <file2> --vendor chatgpt --model "<as shown>"
+   --config live.yaml`  (0 calls: anchor candidates are picked by the owner in `each` mode, never checked by verdict)
+5. `python -m builder concept approve WF <ref_id> --user josh --config live.yaml`
+   (3 claude calls: canon description, front prompt, side prompt)
+6. The owner generates front and side, imports each: `concept import WF <gen_front> <file>` and `... <gen_side> <file>`
+   (2 claude verdicts + 2 codex verdicts)
+7. `python -m builder concept approve WF <front_ref> <side_ref> --user josh --config live.yaml`  (0 calls) - or, if a
+   view is `inconsistent`, one `concept regenerate` round (1 claude prompt, then 2 more verdicts after the re-import)
+8. Optional: `python -m builder start WF --max-steps 2 --config live.yaml` to watch intake run on the approved set
+   (1 claude intake + 1 codex intake), or stop before it.
+   The same flow can be driven from the new GUI (View > Model Builder..., Concept tab) - identical engine calls.
+
+## Expected calls and cost (CLI's own estimates from design 12b items 15 and 16; codex reports no cost)
+
+| step | claude calls | codex calls | claude USD (estimate) |
+|---|---|---|---|
+| preflight --live | 5 to 10 | 5 to 10 | 2.5 to 8 (0.5 to 0.8 per probe; 2.65 measured for one full claude preflight) |
+| concept start | 1 | 0 | up to 2 to 3 (prompt-writing; packets are smaller than intake, so likely less) |
+| approve anchor | 3 | 0 | up to 6 to 9 (likely less, same reason) |
+| two view imports | 2 | 2 | up to 4 to 6 |
+| regeneration (if needed) | 3 | 1 | up to 6 to 9 |
+| intake (optional) | 1 | 1 | about 2.3 (measured 2.26 on the fixture) |
+| **minimum path** | **11 to 16** | **7 to 12** | **about 15 to 26** |
+| **with regeneration and intake** | **15 to 20** | **9 to 14** | **about 23 to 38** |
+
+Prompt and verdict calls have not been measured live; their cost is bounded above by the intake-sized figure and is
+recorded as an estimate until the run reports it. Every figure above is the CLI's own `total_cost_usd` estimate.
+
+## Caps
+
+- Enforceable by Alloy: `max_requests` (every LLM call, probes excluded but their spend is seeded into the tracker),
+  `max_images`, `max_regenerations_per_view`, `wall_clock_minutes`, `attempts_per_finding`.
+- Enforceable by claude per invocation: `--max-budget-usd` = remaining budget (an estimate; it stops a call only after
+  the spend, so the tracker also refuses to dispatch when the remaining budget is below the agent's largest reported
+  call, 12b item 16). With `max_cost_usd: 20` the run pauses with `budget_limit` before the optional intake if the
+  earlier calls come in at the upper estimates.
+- Not enforceable: codex cost (unknown, never zero). The image seat costs Alloy nothing (not applicable); the owner's
+  app subscription is outside Alloy.
+
+Approve, adjust the caps, or decline in this chat; nothing runs until then.
+
 ## 14. Concept stage, seats, and roles (design for Addendum A, 2026-09-07)
 
 Spec: `docs/specs/collaborative-model-builder-addendum-concept-stage.md`. Owner decisions: image generation by an OpenAI or Google image model as a third seat; roles assigned per task with one seat able to hold several; approval modes `each` (default), `anchor_only`, `auto`; modeling adapters first (Phase 2a), then the concept stage (Phase 2b).

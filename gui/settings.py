@@ -106,6 +106,7 @@ class SettingsEditor(tk.Toplevel):
         self.notebook.add(self._create_modes_tab(), text="  Modes  ")
         self.notebook.add(self._create_templates_tab(), text="  Templates  ")
         self.notebook.add(self._create_advanced_tab(), text="  Advanced  ")
+        self.notebook.add(self._create_builder_tab(), text="  Builder  ")
 
         # Button bar
         self._create_button_bar(main)
@@ -716,6 +717,147 @@ class SettingsEditor(tk.Toplevel):
         )
         self.destroy()
 
+    def _create_builder_tab(self) -> ttk.Frame:
+        """Collaborative Model Builder settings (the ``builder`` key; spec D9).
+
+        Only the keys shown here are collected; everything else under ``builder``
+        (presets, deadlines, provider timeouts, workflow_root) survives through the
+        deep merge in ``_merged_config``.
+        """
+        tab = ttk.Frame(self.notebook)
+        scroll = ScrollableFrame(tab)
+        scroll.pack(fill="both", expand=True, padx=PAD["medium"], pady=PAD["medium"])
+        content = scroll.scrollable_frame
+
+        builder = self.config_data.get("builder")
+        builder = builder if isinstance(builder, dict) else {}
+
+        def section(data, key):
+            value = data.get(key)
+            return value if isinstance(value, dict) else {}
+
+        blender = section(builder, "blender")
+        agents = section(builder, "agents")
+        limits = section(builder, "limits")
+        concept = section(builder, "concept")
+        image_gen = section(builder, "image_generation")
+        w = self.builder_widgets = {}
+
+        def add(key, widget):
+            widget.pack(anchor="w", fill="x", pady=PAD["xs"])
+            w[key] = widget
+            return widget
+
+        ttk.Label(content, text="Collaborative Model Builder", style="Subheading.TLabel").pack(anchor="w")
+        ttk.Label(content, text="Used by `python main.py --build ...` and the Model Builder window. "
+                                "The chat modes never read these settings.", wraplength=600).pack(anchor="w")
+        add("attended", LabeledCheckbox(content, label="Attended by default (the run stops for your acceptance before "
+                                                       "advancing past a detailed component)",
+                                        default=bool(builder.get("attended", True)), on_change=self._mark_modified))
+        add("isolated_reviews", LabeledDropdown(content, label="Isolated reviews:", options=["when_contaminated", "always"],
+                                                default=str(builder.get("isolated_reviews") or "when_contaminated"),
+                                                on_change=self._mark_modified))
+        add("blender.executable", LabeledFileEntry(content, label="Blender executable (empty = auto-detect):",
+                                                   default=str(blender.get("executable") or ""), is_directory=False,
+                                                   on_change=self._mark_modified))
+
+        ttk.Separator(content, orient="horizontal").pack(fill="x", pady=PAD["medium"])
+        ttk.Label(content, text="Agents (seats A and B)", style="Subheading.TLabel").pack(anchor="w")
+        for label in ("A", "B"):
+            agent = section(agents, label)
+            row = ttk.Frame(content)
+            row.pack(fill="x", pady=PAD["xs"])
+            ttk.Label(row, text=f"Seat {label}").pack(anchor="w")
+            grid = ttk.Frame(row)
+            grid.pack(fill="x")
+            for col, (key, text, width) in enumerate((("provider", "provider:", 12), ("model", "model:", 18),
+                                                       ("reasoning", "reasoning:", 10))):
+                widget = LabeledEntry(grid, label=text, default=str(agent.get(key) or ""), width=width,
+                                      on_change=self._mark_modified)
+                widget.grid(row=0, column=col, padx=(0, PAD["small"]), sticky="w")
+                w[f"agents.{label}.{key}"] = widget
+            add(f"agents.{label}.executable", LabeledFileEntry(content, label=f"Seat {label} executable (empty = PATH):",
+                                                              default=str(agent.get("executable") or ""),
+                                                              is_directory=False, on_change=self._mark_modified))
+
+        ttk.Separator(content, orient="horizontal").pack(fill="x", pady=PAD["medium"])
+        ttk.Label(content, text="Limits (0 = unlimited)", style="Subheading.TLabel").pack(anchor="w")
+        for key, text, hi in (("wall_clock_minutes", "Wall clock (minutes):", 100000), ("max_requests", "Max provider requests:", 100000),
+                              ("max_renders", "Max renders:", 100000), ("attempts_per_finding", "Correction attempts per finding:", 20)):
+            add(f"limits.{key}", LabeledSpinbox(content, label=text, from_=0, to=hi, default=int(limits.get(key) or 0),
+                                                on_change=self._mark_modified))
+        add("limits.max_cost_usd", LabeledEntry(content, label="Max cost (USD; enforceable only where the provider reports "
+                                                              "cost, otherwise labelled unenforceable):",
+                                                default=str(limits.get("max_cost_usd") if limits.get("max_cost_usd") is not None else 0),
+                                                width=12, on_change=self._mark_modified))
+
+        ttk.Separator(content, orient="horizontal").pack(fill="x", pady=PAD["medium"])
+        ttk.Label(content, text="Concept stage (image generation is manual: you generate in your app and import)",
+                  style="Subheading.TLabel", wraplength=600).pack(anchor="w")
+        add("concept.approval", LabeledDropdown(content, label="Approval mode:", options=["each", "anchor_only", "auto"],
+                                                default=str(concept.get("approval") or "each"), on_change=self._mark_modified))
+        add("concept.anchor_candidates", LabeledSpinbox(content, label="Anchor candidates:", from_=1, to=12,
+                                                        default=int(concept.get("anchor_candidates") or 4), on_change=self._mark_modified))
+        views = concept.get("views")
+        views_text = ", ".join(str(v) for v in views) if isinstance(views, list) else "front, side, rear, top, underside, three-quarter"
+        add("concept.views", LabeledEntry(content, label="Turnaround views (comma-separated):", default=views_text, width=60,
+                                          on_change=self._mark_modified))
+        add("concept.max_images", LabeledSpinbox(content, label="Max images (imported and generated alike):", from_=1, to=10000,
+                                                 default=int(concept.get("max_images") or 40), on_change=self._mark_modified))
+        add("concept.max_regenerations_per_view", LabeledSpinbox(content, label="Max regenerations per view:", from_=0, to=100,
+                                                                 default=int(concept.get("max_regenerations_per_view") or 3),
+                                                                 on_change=self._mark_modified))
+        add("concept.import_dir", LabeledFileEntry(content, label="Import directory (empty = <workflow>\\concept\\imports):",
+                                                   default=str(concept.get("import_dir") or ""), is_directory=True,
+                                                   on_change=self._mark_modified))
+        add("image_generation.seat", LabeledDropdown(content, label="Image seat:", options=["manual"],
+                                                     default=str(image_gen.get("seat") or "manual"), on_change=self._mark_modified))
+        add("image_generation.vendor", LabeledDropdown(content, label="Intended vendor (declared, never verified):",
+                                                       options=["chatgpt", "gemini", "other"],
+                                                       default=str(image_gen.get("vendor") or "chatgpt"), on_change=self._mark_modified))
+        add("image_generation.model", LabeledEntry(content, label="Image model as shown in the app (declaration):",
+                                                   default=str(image_gen.get("model") or ""), width=30, on_change=self._mark_modified))
+        return tab
+
+    def _collect_builder(self) -> dict:
+        """The builder keys the Builder tab exposes; merged onto the rest of ``builder`` on save."""
+        w = self.builder_widgets
+
+        def number(text):
+            try:
+                value = float(text)
+            except (TypeError, ValueError):
+                return 0
+            return int(value) if value.is_integer() else value
+
+        return {
+            "attended": bool(w["attended"].get()),
+            "isolated_reviews": w["isolated_reviews"].get(),
+            "blender": {"executable": w["blender.executable"].get()},
+            "agents": {label: {key: w[f"agents.{label}.{key}"].get() for key in ("provider", "model", "reasoning", "executable")}
+                       for label in ("A", "B")},
+            "limits": {
+                "wall_clock_minutes": w["limits.wall_clock_minutes"].get(),
+                "max_cost_usd": number(w["limits.max_cost_usd"].get()),
+                "max_requests": w["limits.max_requests"].get(),
+                "max_renders": w["limits.max_renders"].get(),
+                "attempts_per_finding": w["limits.attempts_per_finding"].get(),
+            },
+            "concept": {
+                "approval": w["concept.approval"].get(),
+                "anchor_candidates": w["concept.anchor_candidates"].get(),
+                "views": [v.strip() for v in w["concept.views"].get().split(",") if v.strip()],
+                "max_images": w["concept.max_images"].get(),
+                "max_regenerations_per_view": w["concept.max_regenerations_per_view"].get(),
+                "import_dir": w["concept.import_dir"].get(),
+            },
+            "image_generation": {
+                "seat": w["image_generation.seat"].get(),
+                "vendor": w["image_generation.vendor"].get(),
+                "model": w["image_generation.model"].get(),
+            },
+        }
+
     def _create_templates_tab(self) -> ttk.Frame:
         """Create custom role templates tab."""
         tab = ttk.Frame(self.notebook)
@@ -1019,6 +1161,7 @@ class SettingsEditor(tk.Toplevel):
                 "retry_count": self.retry_count.get(),
                 "retry_delay": self.retry_delay.get(),
             },
+            "builder": self._collect_builder(),
         }
 
     def _validate(self) -> Optional[str]:

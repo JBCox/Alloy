@@ -78,6 +78,24 @@ def blender_exe() -> Path:
     return exe
 
 
+@pytest.fixture(scope="session")
+def tk_root():
+    """One hidden Tk root for the whole session: creating a second ``Tk()`` after destroying the first trips Tk's
+    library lookup on Windows (``tcl_findLibrary``). Skipped with a reason when no display is available."""
+    import tkinter as tk
+
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:  # pragma: no cover - headless machines
+        pytest.skip(f"no display for Tk: {exc}")
+    root.withdraw()
+    yield root
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
+
+
 @pytest.fixture
 def workdir(tmp_path: Path) -> Path:
     """A disposable directory whose name contains spaces and non-Latin characters."""

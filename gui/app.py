@@ -123,6 +123,7 @@ class AlloyGUI(tk.Tk):
         view_menu.add_command(label="Split View", command=lambda: self._set_view("split"))
         view_menu.add_separator()
         view_menu.add_command(label="Settings", command=self._open_settings, accelerator="Ctrl+,")
+        view_menu.add_command(label="Model Builder...", command=lambda: __import__("gui.builder_view", fromlist=["open_builder_window"]).open_builder_window(self, self.config_path))
         menubar.add_cascade(label="View", menu=view_menu)
 
         # Mode menu
