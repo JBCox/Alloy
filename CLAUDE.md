@@ -2992,5 +2992,8 @@ its review gate; regenerate it with the same recipe when the read model changes)
 `python -m pytest tests/builder -q -m blender -p no:cacheprovider` (24 tests plus the fixture-creation
 session test, about 5 minutes on this machine; run it before committing builder changes). `ALLOY_LIVE=1
 python -m pytest tests/builder -q -m live` spends provider usage: owner's say-so only, with the cost stated
-(about 0.5-0.8 USD per claude probe). Whole gate: `python tests/run_all.py` measured at 84 suites /
-3,237 tests / 0 failed in 598 s on 2026-09-08 (restart.py's gate budget is 900 s).
+(about 0.5-0.8 USD per claude probe). Whole gate: `python tests/run_all.py` measured on 2026-09-08 at 85 suites / 3,259 tests / 0 failed in
+598 s and, on a second clean run of the same tree, 956 s (the builder wrapper alone swung from 98 s to
+235 s). restart.py's gate budget is 900 s, so a slow machine can push a wave restart past it: if that
+bites, run the wrapper with `ALLOY_BUILDER_PYTEST="-m not cli"` or raise the budget, rather than
+dropping tests.
