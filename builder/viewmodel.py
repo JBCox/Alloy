@@ -62,7 +62,7 @@ def snapshot(engine: Engine) -> dict[str, Any]:
         "agents": agents,
         "image_seat": _image_seat(engine, status),
         "components": status["components"],
-        "references": [_reference(r) for r in References(prj).current()],
+        "references": [_reference(r, store) for r in References(prj).current()],
         "revisions": [{"id": r.id, "parent_revision_id": r.data.get("parent_revision_id"), "note": r.data.get("note"),
                        "created_at": r.created_at, "sha256": r.data.get("sha256"), "file": r.data.get("file"),
                        "created_by_op_id": r.data.get("created_by_op_id")} for r in store.list("revision")],
@@ -175,12 +175,16 @@ def _stage(engine: Engine, status: dict[str, Any]) -> dict[str, Any]:
             "stage": status["stage"], "attended": status["attended"], "task": task, "active_operations": active,
             "ownership": ownership, "last_note": (status["notes"][-1] if status["notes"] else None),
             "handoffs": len(store.list("handoff")), "plan": (run.data.get("plan") if run else None),
-            "component_id": run.data.get("component_id") if run else None}
+            "component_id": run.data.get("component_id") if run else None,
+            "assignment_overrides": engine.assignment_overrides()}
 
 
-def _reference(r: Record) -> dict[str, Any]:
+def _reference(r: Record, store: Any | None = None) -> dict[str, Any]:
     d = r.data
-    return {"id": r.id, "file": d.get("file"), "labels": d.get("labels") or [], "kind": d.get("kind"), "notes": d.get("notes"),
+    regions = [{"id": g.id, "name": g.data.get("name"), "bbox": list(g.data.get("bbox") or []), "purpose": g.data.get("purpose"),
+                "space": g.data.get("space", "original_pixels")}
+               for g in (store.list("reference_region", parent_id=r.id) if store is not None else [])]
+    return {"regions": regions,"id": r.id, "file": d.get("file"), "labels": d.get("labels") or [], "kind": d.get("kind"), "notes": d.get("notes"),
             "width": d.get("width"), "height": d.get("height"), "version": d.get("version"),
             "canon_state": d.get("canon_state", "approved"), "precedence_label": d.get("precedence_label", "owner_target"),
             "evidence_of_original": bool(d.get("evidence_of_original", d.get("kind") == "target")),
@@ -281,12 +285,12 @@ def _concept(engine: Engine) -> dict[str, Any]:
         r = refs.get(c["id"])
         if r is None:
             continue
-        cands.append({**_reference(r), "summary": c["summary"]})
+        cands.append({**_reference(r, engine.store), "summary": c["summary"]})
     conflicts = [{"id": c.id, "state": c.state, "reference_ids": c.data.get("reference_ids"), "region": c.data.get("region"),
                   "what_differs": c.data.get("what_differs"), "reported_by": c.data.get("reported_by")} for c in concept.open_conflicts()]
     cov = st["coverage"]
     return {"plan_id": st["plan_id"], "mode": st["mode"], "mode_text": st["mode_text"], "canon_state": st["canon_state"],
-            "anchor": _reference(anchor) if anchor else None, "prompts": concept.prompts(), "candidates": cands,
+            "anchor": _reference(anchor, engine.store) if anchor else None, "prompts": concept.prompts(), "candidates": cands,
             "coverage": cov.get("views") or {}, "parts": cov.get("parts") or {}, "missing": cov.get("missing") or [],
             "complete": cov.get("complete"), "conflicts": conflicts, "escalations": st["escalations"], "images": st["images"],
             "proceeded_partial": cov.get("proceeded_partial"), "seat": st["seat"], "cost": st["cost"],
@@ -453,6 +457,27 @@ class BuilderSession:
             return {"reference_id": rec.id}
         self.submit("add_reference", job)
 
+    def add_region(self, reference_id: str, name: str, bbox: list[int], *, purpose: str = "target_region", user: str = "user") -> None:
+        """A target region or detail crop in ORIGINAL pixels (R-26, R-27); the view converts from canvas pixels first."""
+        def job() -> dict[str, Any]:
+            eng = self._require_engine()
+            rec = References(eng.project).add_region(reference_id, name, [int(v) for v in bbox], purpose=purpose, actor=f"user:{user}")
+            return {"region_id": rec.id, "bbox": rec.data["bbox"]}
+        self.submit("add_region", job)
+
+    def set_limits(self, changes: dict[str, Any], *, user: str = "user") -> None:
+        """Edit limits (R-85, R-89). Recorded at once as a control request so a run in progress applies it at its next
+        safe boundary; the worker job applies it directly when no run is consuming controls."""
+        eng = self._require_engine()
+        eng.store.push_control("limits", {"changes": dict(changes), "by": user})
+
+        def job() -> dict[str, Any]:
+            applied = self._require_engine().consume_controls(kinds=("limits",))
+            if applied.get("errors"):
+                raise RuntimeError("; ".join(applied["errors"]))
+            return {"applied": applied.get("limits") or {}, "note": "applied by the running engine at its boundary" if not applied.get("limits") else ""}
+        self.submit("set_limits", job)
+
     # --- preflight and runs ----------------------------------------------------------------------------------
 
     def preflight(self, *, live: bool = False, labels: list[str] | None = None) -> None:
@@ -464,9 +489,10 @@ class BuilderSession:
 
     def _ensure_preflight(self, eng: Engine) -> None:
         loaded = eng.load_preflight()
-        if len(loaded) >= len(self.adapters):
+        local_only = {label for label, r in loaded.items() if not r.get("live") and not isinstance(self.adapters.get(label), ScriptedAdapter)}
+        if len(loaded) >= len(self.adapters) and not local_only:
             return
-        missing = ", ".join(sorted(set(self.adapters) - set(loaded)))
+        missing = ", ".join(sorted((set(self.adapters) - set(loaded)) | local_only))
         if all(isinstance(a, ScriptedAdapter) for a in self.adapters.values()):
             eng.preflight(live=True)
             return
@@ -488,13 +514,42 @@ class BuilderSession:
         eng.cancel_event.clear()
         return {"execution": status["execution"], "stop_reason": status["stop_reason"], "stage": status["stage"]}
 
-    def start_run(self, *, attended: bool | None = None, component_name: str | None = None) -> None:
+    def start_run(self, *, attended: bool | None = None, component_name: str | None = None,
+                  assignments: dict[str, str] | None = None) -> None:
+        """``assignments`` are per-run role overrides (``{"build": "B"}``); the engine validates them and R-107 still
+        bars a seat from judging its own operation."""
         def job() -> dict[str, Any]:
             eng = self._require_engine()
             self._ensure_preflight(eng)
-            eng.start(attended=attended, component_name=component_name)
+            eng.start(attended=attended, component_name=component_name, assignment_overrides=assignments)
             return self._run_loop(eng)
         self.submit("start_run", job)
+
+    # --- revision 0 (R-93: never done by opening or creating the project) -----------------------------------------
+
+    def register_source(self, path: Path, *, user: str = "user", note: str = "") -> None:
+        """The owner's .blend validated in separate Blender processes and copied unmodified as revision 0."""
+        def job() -> dict[str, Any]:
+            from .source import register_source
+
+            eng = self._require_engine()
+            if self.runner is None:
+                raise RuntimeError("Blender was not found; set builder.blender.executable to register a source")
+            rev = register_source(eng.project, self.runner, path, actor=f"user:{user}", note=note)
+            return {"revision_id": rev.id, "unmapped": (rev.data.get("source") or {}).get("unmapped_geometry") or []}
+        self.submit("register_source", job)
+
+    def register_empty_source(self, *, user: str = "user", note: str = "") -> None:
+        """An empty scene built through the runner as revision 0."""
+        def job() -> dict[str, Any]:
+            from .source import register_empty
+
+            eng = self._require_engine()
+            if self.runner is None:
+                raise RuntimeError("Blender was not found; set builder.blender.executable to build the empty scene")
+            rev = register_empty(eng.project, self.runner, actor=f"user:{user}", note=note)
+            return {"revision_id": rev.id}
+        self.submit("register_empty_source", job)
 
     def resume_run(self, *, user: str = "user") -> None:
         def job() -> dict[str, Any]:

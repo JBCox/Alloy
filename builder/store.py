@@ -320,13 +320,17 @@ class Store:
                                     (utc_now(), kind, json.dumps(payload or {}, ensure_ascii=False)))
             return int(cur.lastrowid)
 
-    def pop_controls(self) -> list[ControlRequest]:
+    def pop_controls(self, kinds: tuple[str, ...] | None = None) -> list[ControlRequest]:
+        """Consume pending control requests, all kinds or only ``kinds`` (a limits edit applied while no run loop is
+        polling must not swallow a queued pause or cancel)."""
         with self._lock:
             rows = list(self.conn.execute(
                 "SELECT * FROM control_requests WHERE consumed_at IS NULL ORDER BY seq"))
             now = utc_now()
             out = []
             for r in rows:
+                if kinds is not None and r["kind"] not in kinds:
+                    continue
                 self.conn.execute("UPDATE control_requests SET consumed_at=? WHERE seq=?", (now, r["seq"]))
                 out.append(ControlRequest(seq=r["seq"], ts=r["ts"], kind=r["kind"], payload=json.loads(r["payload"])))
             return out

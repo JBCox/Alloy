@@ -1,0 +1,8 @@
+12-region-drag-rubber-band.png: 1560x940 mean 54.1
+13-region-stored-in-original-pixels.png: 1560x940 mean 54.6
+regions: [{"id": "reg_01M1Z7QTMA23DX6KFR", "name": "lower-left humanoid", "bbox": [59, 80, 271, 340], "purpose": "target_region", "space": "original_pixels"}]
+14-run-tab-limits-card.png: 1560x940 mean 56.6
+15-limits-applied.png: 1560x940 mean 56.6
+limits after apply: {"wall_clock_minutes": 0, "max_cost_usd": 0.0, "max_requests": 40, "max_renders": 0, "attempts_per_finding": 2, "stall_steps": 20}
+16-concept-tab-wider-panes.png: 1560x940 mean 55.1
+17-activity-with-limits-event.png: 1560x940 mean 56.8

@@ -1,0 +1,700 @@
+{
+ "fixture": "Fixture lamp",
+ "workflow_dir": "C:\\Users\\joshu\\AppData\\Local\\Temp\\claude\\C--Alloy\\dd4dcd36-1b6e-4fbd-81bb-9b99894a7f41\\scratchpad\\hx2\\workflow",
+ "run_id": "run_01M1Z7HFZSS5GQ601F",
+ "stop_reason": "ready_for_user_review",
+ "agents": {
+  "A": {
+   "provider": "mock",
+   "model": "fable"
+  },
+  "B": {
+   "provider": "mock",
+   "model": "gpt-6-astra"
+  }
+ },
+ "packet_delivery": {
+  "strategy": "packet delivery",
+  "invocations": 9,
+  "bytes_total": 17779786,
+  "bytes_text": 94845,
+  "bytes_images": 17674916,
+  "bytes_other": 10025,
+  "images_delivered": 128,
+  "reply_bytes": 7651,
+  "tokens": {
+   "input": {
+    "kind": "unknown"
+   },
+   "output": {
+    "kind": "unknown"
+   },
+   "cached_input": {
+    "kind": "unknown"
+   },
+   "reasoning": {
+    "kind": "unknown"
+   },
+   "unknown_invocations": 9,
+   "note": "token counts are the providers' own measurements where reported; invocations that reported none are counted as unknown, never as zero"
+  },
+  "turns": [
+   {
+    "invocation_id": "inv_01M1Z7HG2CYRJC8HBF",
+    "packet_id": "pk_01M1Z7HFZTA0HGV9ER",
+    "agent_id": "ag_A",
+    "purpose": "intake_observation",
+    "kind": "intake_observation",
+    "outcome": "ok",
+    "bytes_text": 10246,
+    "bytes_images": 902655,
+    "bytes_other": 0,
+    "bytes": 912901,
+    "images": 6,
+    "image_hashes": [
+     "33a0de3e57e907a067d935b3af562bae9aaf1c5975e9d84961506796462b0943",
+     "c267209c28c899f89738a13a6a3347b01d96d75acb202af38ee898010bfb933c",
+     "6eeb19b462ec09ca1880721a4c768a9f3ce027aaaa9e5021b6bdde1b24ad313d",
+     "b3107919e5fc0f28ef4e33b9a3f6a96117854c09508222e003beeb4e40dedae7",
+     "cb8e945ef85b651977ab84b4797ddc682aa427fca38c27fd6588364692388995",
+     "fa556341132332d1248df9573939582a315d66f7fa3394731f68a2904441a05e"
+    ],
+    "reply_bytes": 1052,
+    "withheld": [
+     {
+      "what": "the other agent's observations",
+      "why": "R-11: independent observation at intake"
+     }
+    ],
+    "usage": {
+     "input": {
+      "kind": "unknown"
+     },
+     "output": {
+      "kind": "unknown"
+     },
+     "cached_input": {
+      "kind": "unknown"
+     },
+     "image": {
+      "kind": "unknown"
+     },
+     "reasoning": {
+      "kind": "unknown"
+     },
+     "cost_usd": {
+      "kind": "unknown"
+     }
+    }
+   },
+   {
+    "invocation_id": "inv_01M1Z7HG4ZKKME0QM9",
+    "packet_id": "pk_01M1Z7HG2HAHZT6Z71",
+    "agent_id": "ag_B",
+    "purpose": "intake_observation",
+    "kind": "intake_observation",
+    "outcome": "ok",
+    "bytes_text": 10246,
+    "bytes_images": 902655,
+    "bytes_other": 0,
+    "bytes": 912901,
+    "images": 6,
+    "image_hashes": [
+     "33a0de3e57e907a067d935b3af562bae9aaf1c5975e9d84961506796462b0943",
+     "c267209c28c899f89738a13a6a3347b01d96d75acb202af38ee898010bfb933c",
+     "6eeb19b462ec09ca1880721a4c768a9f3ce027aaaa9e5021b6bdde1b24ad313d",
+     "b3107919e5fc0f28ef4e33b9a3f6a96117854c09508222e003beeb4e40dedae7",
+     "cb8e945ef85b651977ab84b4797ddc682aa427fca38c27fd6588364692388995",
+     "fa556341132332d1248df9573939582a315d66f7fa3394731f68a2904441a05e"
+    ],
+    "reply_bytes": 1052,
+    "withheld": [
+     {
+      "what": "the other agent's observations",
+      "why": "R-11: independent observation at intake"
+     }
+    ],
+    "usage": {
+     "input": {
+      "kind": "unknown"
+     },
+     "output": {
+      "kind": "unknown"
+     },
+     "cached_input": {
+      "kind": "unknown"
+     },
+     "image": {
+      "kind": "unknown"
+     },
+     "reasoning": {
+      "kind": "unknown"
+     },
+     "cost_usd": {
+      "kind": "unknown"
+     }
+    }
+   },
+   {
+    "invocation_id": "inv_01M1Z7HG7ECSH6WSYD",
+    "packet_id": "pk_01M1Z7HG555P2YKSCS",
+    "agent_id": "ag_A",
+    "purpose": "brief_draft",
+    "kind": "brief_draft",
+    "outcome": "ok",
+    "bytes_text": 9743,
+    "bytes_images": 902655,
+    "bytes_other": 0,
+    "bytes": 912398,
+    "images": 6,
+    "image_hashes": [
+     "33a0de3e57e907a067d935b3af562bae9aaf1c5975e9d84961506796462b0943",
+     "c267209c28c899f89738a13a6a3347b01d96d75acb202af38ee898010bfb933c",
+     "6eeb19b462ec09ca1880721a4c768a9f3ce027aaaa9e5021b6bdde1b24ad313d",
+     "b3107919e5fc0f28ef4e33b9a3f6a96117854c09508222e003beeb4e40dedae7",
+     "cb8e945ef85b651977ab84b4797ddc682aa427fca38c27fd6588364692388995",
+     "fa556341132332d1248df9573939582a315d66f7fa3394731f68a2904441a05e"
+    ],
+    "reply_bytes": 509,
+    "withheld": [],
+    "usage": {
+     "input": {
+      "kind": "unknown"
+     },
+     "output": {
+      "kind": "unknown"
+     },
+     "cached_input": {
+      "kind": "unknown"
+     },
+     "image": {
+      "kind": "unknown"
+     },
+     "reasoning": {
+      "kind": "unknown"
+     },
+     "cost_usd": {
+      "kind": "unknown"
+     }
+    }
+   },
+   {
+    "invocation_id": "inv_01M1Z7HGA4SGYNVMZ1",
+    "packet_id": "pk_01M1Z7HG7NVGSV7TA0",
+    "agent_id": "ag_A",
+    "purpose": "construction_plan",
+    "kind": "construction_plan",
+    "outcome": "ok",
+    "bytes_text": 8858,
+    "bytes_images": 902655,
+    "bytes_other": 0,
+    "bytes": 911513,
+    "images": 6,
+    "image_hashes": [
+     "33a0de3e57e907a067d935b3af562bae9aaf1c5975e9d84961506796462b0943",
+     "c267209c28c899f89738a13a6a3347b01d96d75acb202af38ee898010bfb933c",
+     "6eeb19b462ec09ca1880721a4c768a9f3ce027aaaa9e5021b6bdde1b24ad313d",
+     "b3107919e5fc0f28ef4e33b9a3f6a96117854c09508222e003beeb4e40dedae7",
+     "cb8e945ef85b651977ab84b4797ddc682aa427fca38c27fd6588364692388995",
+     "fa556341132332d1248df9573939582a315d66f7fa3394731f68a2904441a05e"
+    ],
+    "reply_bytes": 1753,
+    "withheld": [],
+    "usage": {
+     "input": {
+      "kind": "unknown"
+     },
+     "output": {
+      "kind": "unknown"
+     },
+     "cached_input": {
+      "kind": "unknown"
+     },
+     "image": {
+      "kind": "unknown"
+     },
+     "reasoning": {
+      "kind": "unknown"
+     },
+     "cost_usd": {
+      "kind": "unknown"
+     }
+    }
+   },
+   {
+    "invocation_id": "inv_01M1Z7JV7FEBG6CMAY",
+    "packet_id": "pk_01M1Z7JTZ2NX5SPZ4K",
+    "agent_id": "ag_A",
+    "purpose": "build_task",
+    "kind": "build_task",
+    "outcome": "ok",
+    "bytes_text": 10634,
+    "bytes_images": 2355098,
+    "bytes_other": 2511,
+    "bytes": 2368243,
+    "images": 15,
+    "image_hashes": [
+     "33a0de3e57e907a067d935b3af562bae9aaf1c5975e9d84961506796462b0943",
+     "c267209c28c899f89738a13a6a3347b01d96d75acb202af38ee898010bfb933c",
+     "6eeb19b462ec09ca1880721a4c768a9f3ce027aaaa9e5021b6bdde1b24ad313d",
+     "b3107919e5fc0f28ef4e33b9a3f6a96117854c09508222e003beeb4e40dedae7",
+     "cb8e945ef85b651977ab84b4797ddc682aa427fca38c27fd6588364692388995",
+     "fa556341132332d1248df9573939582a315d66f7fa3394731f68a2904441a05e",
+     "c5d2da4aa4d6df4d307dab0470d495b1cb0b1a56593eb39dd4cdccddb978a21f",
+     "df80758d43498fc2d74d078391909788beaa1555e586cda34f8b96223160e281",
+     "6d32eae336aec7e4eb665986bc75a644be465b0d1271fab5b443e2b634046628",
+     "e2f603707c408c74bd0fb992fddc4236feddc2e81f48cdcd92de63e4921f237d",
+     "a345dd25d5a565483d57653bab1b445ad9e51fc66f347d48b0264d7939ba2ef3",
+     "66329f132e1bf07d023889c2fcd562d42fe1e48a1d5c8ee269ac2581e29e22a4",
+     "d201c871a55d5b89ff62f0cc70dfb4d1360cbcebe59e7b774d3b2a7eafe0b23b",
+     "5d3349160e198a23fb40bd2d163d5cbaa65f55664dc9ff4cee98292ebeadb7fc",
+     "c53f765d677176d66c12ed2cb9bf3f64cb47343e50ccd99431171f12ef5fb966"
+    ],
+    "reply_bytes": 355,
+    "withheld": [],
+    "usage": {
+     "input": {
+      "kind": "unknown"
+     },
+     "output": {
+      "kind": "unknown"
+     },
+     "cached_input": {
+      "kind": "unknown"
+     },
+     "image": {
+      "kind": "unknown"
+     },
+     "reasoning": {
+      "kind": "unknown"
+     },
+     "cost_usd": {
+      "kind": "unknown"
+     }
+    }
+   },
+   {
+    "invocation_id": "inv_01M1Z7MBPJX0S4SQQ1",
+    "packet_id": "pk_01M1Z7MBB5MRPAFK3E",
+    "agent_id": "ag_B",
+    "purpose": "review_task",
+    "kind": "review_task",
+    "outcome": "ok",
+    "bytes_text": 14222,
+    "bytes_images": 2662044,
+    "bytes_other": 2510,
+    "bytes": 2678776,
+    "images": 24,
+    "image_hashes": [
+     "33a0de3e57e907a067d935b3af562bae9aaf1c5975e9d84961506796462b0943",
+     "c267209c28c899f89738a13a6a3347b01d96d75acb202af38ee898010bfb933c",
+     "6eeb19b462ec09ca1880721a4c768a9f3ce027aaaa9e5021b6bdde1b24ad313d",
+     "b3107919e5fc0f28ef4e33b9a3f6a96117854c09508222e003beeb4e40dedae7",
+     "cb8e945ef85b651977ab84b4797ddc682aa427fca38c27fd6588364692388995",
+     "fa556341132332d1248df9573939582a315d66f7fa3394731f68a2904441a05e",
+     "b97ba9234253ec27e2fe94c660c02811ee7e6e44e147ed4c42996921a28547cc",
+     "d73d990e1decbbbab8a4f970b8fc95360562cc0509b3716924f808d067b6c0aa",
+     "f8d9bc9cd49f6fe6d37c28607e7201e7048783ab5060fa6d55ec93d549ef098d",
+     "2f82b768cc9d94d33e3100f0f3e9997bcd4e040210e550edf8eeb86f86dc64c7",
+     "d3a761cbd2b36d5c2f456b811918e174b438c78d87287bff24794354f555693d",
+     "8c5541e4097820aa6e5633b40cd8742ae41e1a394474fb50c0a58813fa93ed49",
+     "c1332e8ced0a7c105e03b851e50167b89f39b0f33eb8b1211c98f666a04b4883",
+     "ebe311c949f51668d5d06a1ef5d55efbbd94dbbf8e1ad49f47f9592cf5b8f5eb",
+     "9c7dcb7204f7cc1a0aedb0b09f231cf53f218272d4955bd044072714f44e03ef",
+     "4cf2d4b2cc4af761eca6c193305ca34c4feadf2cf977bf1c96f9ec9eb2f17e0c",
+     "b8c0b0c94d16cc7d628e37d957077724a0c23066fed075422c1a75341663bc93",
+     "c024d37769901aadc2a34499c80759118070e34a4544db234a6a7c37e17f7bec",
+     "873a485840c29acd2e4238a33f2b255e822975210aec499f880bf40dff5fef8f",
+     "944f12a5b1cf8cbefd7c796a15bc9b61e2fd330a7a42b0be0d4cf148e9eae218",
+     "274aaa7ae4e6fd5f6e5b6b2f11532cb9a93e61dd4406ca54d79bdde606f8d0aa",
+     "9731a08b61ea86a829610a893b7310d067937dcf04aff50c3db61bcfe4b66b53",
+     "d34afc4dbe4a5a1bf8e87c64ea47f8ac0ac2d0b7f121e9c967a577a6e0b40de3",
+     "17793c83d3ed1227852b2754b4287ee5c77bb3bb63d9d7073eb674012ddee6fc"
+    ],
+    "reply_bytes": 2372,
+    "withheld": [
+     {
+      "what": "builder self-assessment",
+      "why": "R-11: your initial findings are recorded before reconciliation"
+     }
+    ],
+    "usage": {
+     "input": {
+      "kind": "unknown"
+     },
+     "output": {
+      "kind": "unknown"
+     },
+     "cached_input": {
+      "kind": "unknown"
+     },
+     "image": {
+      "kind": "unknown"
+     },
+     "reasoning": {
+      "kind": "unknown"
+     },
+     "cost_usd": {
+      "kind": "unknown"
+     }
+    }
+   },
+   {
+    "invocation_id": "inv_01M1Z7MBWZ5J903FGA",
+    "packet_id": "pk_01M1Z7MBQM0KZD8S6Z",
+    "agent_id": "ag_B",
+    "purpose": "review_reconcile",
+    "kind": "review_reconcile",
+    "outcome": "ok",
+    "bytes_text": 8317,
+    "bytes_images": 2393547,
+    "bytes_other": 0,
+    "bytes": 2401864,
+    "images": 15,
+    "image_hashes": [
+     "33a0de3e57e907a067d935b3af562bae9aaf1c5975e9d84961506796462b0943",
+     "c267209c28c899f89738a13a6a3347b01d96d75acb202af38ee898010bfb933c",
+     "6eeb19b462ec09ca1880721a4c768a9f3ce027aaaa9e5021b6bdde1b24ad313d",
+     "b3107919e5fc0f28ef4e33b9a3f6a96117854c09508222e003beeb4e40dedae7",
+     "cb8e945ef85b651977ab84b4797ddc682aa427fca38c27fd6588364692388995",
+     "fa556341132332d1248df9573939582a315d66f7fa3394731f68a2904441a05e",
+     "b97ba9234253ec27e2fe94c660c02811ee7e6e44e147ed4c42996921a28547cc",
+     "d73d990e1decbbbab8a4f970b8fc95360562cc0509b3716924f808d067b6c0aa",
+     "f8d9bc9cd49f6fe6d37c28607e7201e7048783ab5060fa6d55ec93d549ef098d",
+     "2f82b768cc9d94d33e3100f0f3e9997bcd4e040210e550edf8eeb86f86dc64c7",
+     "d3a761cbd2b36d5c2f456b811918e174b438c78d87287bff24794354f555693d",
+     "8c5541e4097820aa6e5633b40cd8742ae41e1a394474fb50c0a58813fa93ed49",
+     "c1332e8ced0a7c105e03b851e50167b89f39b0f33eb8b1211c98f666a04b4883",
+     "ebe311c949f51668d5d06a1ef5d55efbbd94dbbf8e1ad49f47f9592cf5b8f5eb",
+     "9c7dcb7204f7cc1a0aedb0b09f231cf53f218272d4955bd044072714f44e03ef"
+    ],
+    "reply_bytes": 96,
+    "withheld": [],
+    "usage": {
+     "input": {
+      "kind": "unknown"
+     },
+     "output": {
+      "kind": "unknown"
+     },
+     "cached_input": {
+      "kind": "unknown"
+     },
+     "image": {
+      "kind": "unknown"
+     },
+     "reasoning": {
+      "kind": "unknown"
+     },
+     "cost_usd": {
+      "kind": "unknown"
+     }
+    }
+   },
+   {
+    "invocation_id": "inv_01M1Z7MF7VYQZ17E6W",
+    "packet_id": "pk_01M1Z7MF1PBM99RJFR",
+    "agent_id": "ag_B",
+    "purpose": "correction_task",
+    "kind": "correction_task",
+    "outcome": "ok",
+    "bytes_text": 10586,
+    "bytes_images": 2412120,
+    "bytes_other": 2510,
+    "bytes": 2425216,
+    "images": 18,
+    "image_hashes": [
+     "33a0de3e57e907a067d935b3af562bae9aaf1c5975e9d84961506796462b0943",
+     "c267209c28c899f89738a13a6a3347b01d96d75acb202af38ee898010bfb933c",
+     "6eeb19b462ec09ca1880721a4c768a9f3ce027aaaa9e5021b6bdde1b24ad313d",
+     "b3107919e5fc0f28ef4e33b9a3f6a96117854c09508222e003beeb4e40dedae7",
+     "cb8e945ef85b651977ab84b4797ddc682aa427fca38c27fd6588364692388995",
+     "fa556341132332d1248df9573939582a315d66f7fa3394731f68a2904441a05e",
+     "b97ba9234253ec27e2fe94c660c02811ee7e6e44e147ed4c42996921a28547cc",
+     "d73d990e1decbbbab8a4f970b8fc95360562cc0509b3716924f808d067b6c0aa",
+     "f8d9bc9cd49f6fe6d37c28607e7201e7048783ab5060fa6d55ec93d549ef098d",
+     "2f82b768cc9d94d33e3100f0f3e9997bcd4e040210e550edf8eeb86f86dc64c7",
+     "d3a761cbd2b36d5c2f456b811918e174b438c78d87287bff24794354f555693d",
+     "8c5541e4097820aa6e5633b40cd8742ae41e1a394474fb50c0a58813fa93ed49",
+     "c1332e8ced0a7c105e03b851e50167b89f39b0f33eb8b1211c98f666a04b4883",
+     "ebe311c949f51668d5d06a1ef5d55efbbd94dbbf8e1ad49f47f9592cf5b8f5eb",
+     "9c7dcb7204f7cc1a0aedb0b09f231cf53f218272d4955bd044072714f44e03ef",
+     "b8c0b0c94d16cc7d628e37d957077724a0c23066fed075422c1a75341663bc93",
+     "944f12a5b1cf8cbefd7c796a15bc9b61e2fd330a7a42b0be0d4cf148e9eae218",
+     "d34afc4dbe4a5a1bf8e87c64ea47f8ac0ac2d0b7f121e9c967a577a6e0b40de3"
+    ],
+    "reply_bytes": 342,
+    "withheld": [],
+    "usage": {
+     "input": {
+      "kind": "unknown"
+     },
+     "output": {
+      "kind": "unknown"
+     },
+     "cached_input": {
+      "kind": "unknown"
+     },
+     "image": {
+      "kind": "unknown"
+     },
+     "reasoning": {
+      "kind": "unknown"
+     },
+     "cost_usd": {
+      "kind": "unknown"
+     }
+    }
+   },
+   {
+    "invocation_id": "inv_01M1Z7P5D1FF4K189H",
+    "packet_id": "pk_01M1Z7P52X63GZX86E",
+    "agent_id": "ag_A",
+    "purpose": "verification",
+    "kind": "verification",
+    "outcome": "ok",
+    "bytes_text": 11993,
+    "bytes_images": 4241487,
+    "bytes_other": 2494,
+    "bytes": 4255974,
+    "images": 32,
+    "image_hashes": [
+     "33a0de3e57e907a067d935b3af562bae9aaf1c5975e9d84961506796462b0943",
+     "c267209c28c899f89738a13a6a3347b01d96d75acb202af38ee898010bfb933c",
+     "6eeb19b462ec09ca1880721a4c768a9f3ce027aaaa9e5021b6bdde1b24ad313d",
+     "b3107919e5fc0f28ef4e33b9a3f6a96117854c09508222e003beeb4e40dedae7",
+     "cb8e945ef85b651977ab84b4797ddc682aa427fca38c27fd6588364692388995",
+     "fa556341132332d1248df9573939582a315d66f7fa3394731f68a2904441a05e",
+     "b97ba9234253ec27e2fe94c660c02811ee7e6e44e147ed4c42996921a28547cc",
+     "d73d990e1decbbbab8a4f970b8fc95360562cc0509b3716924f808d067b6c0aa",
+     "f8d9bc9cd49f6fe6d37c28607e7201e7048783ab5060fa6d55ec93d549ef098d",
+     "2f82b768cc9d94d33e3100f0f3e9997bcd4e040210e550edf8eeb86f86dc64c7",
+     "d3a761cbd2b36d5c2f456b811918e174b438c78d87287bff24794354f555693d",
+     "8c5541e4097820aa6e5633b40cd8742ae41e1a394474fb50c0a58813fa93ed49",
+     "c1332e8ced0a7c105e03b851e50167b89f39b0f33eb8b1211c98f666a04b4883",
+     "ebe311c949f51668d5d06a1ef5d55efbbd94dbbf8e1ad49f47f9592cf5b8f5eb",
+     "9c7dcb7204f7cc1a0aedb0b09f231cf53f218272d4955bd044072714f44e03ef",
+     "801637d344a00bf1d28fcdea431512ef11446efadbdf7f8be627545ef9b03921",
+     "b8c0b0c94d16cc7d628e37d957077724a0c23066fed075422c1a75341663bc93",
+     "944f12a5b1cf8cbefd7c796a15bc9b61e2fd330a7a42b0be0d4cf148e9eae218",
+     "d34afc4dbe4a5a1bf8e87c64ea47f8ac0ac2d0b7f121e9c967a577a6e0b40de3",
+     "da79d246fe2fd4c55230aae8a9f6592502e52265196e7e6d80eed522a4617a2f",
+     "c7204e210e83053b948c78dfbb45c3b88f7e9818daad4880e085d702e142721c",
+     "e6e630e520867b6078b05755234641582431c6bd16c0c5d867826a059dedaee1",
+     "c2facc126795577ead85de89bdfc0695c1fc4606daed2c70d02c3b371237eded",
+     "afdeeea18f374722722e96fdf11c3f4a0b73842c1bb87b7b67ba81d3d263c6d1",
+     "612a233d1e204e6d6c82fdc3acc9e45849d1726afbf2c91609a43e55da71d1c9",
+     "e00712789cb549949dc5471502dd75d84c9a47318cff13acfe82858923be4fc1",
+     "50daddacd9612d8eb6031194fc2e2dd35cefda367f560cab1d77dc1dedf56eda",
+     "01bb825e112e8c86c0ae694e9342ea361be1593645c47f4a34c7e10d50c930a0",
+     "60143bec57339adc4dd83de7b2ba817dd6630c977179a4b35cf6e6d5084f1537",
+     "cd31847182420e6f94b09a5504b3a9197cd38114b5f11a08c8a90ee602a29099",
+     "4359766c400b0a82d6ebd4c8606872d0ad32eedc6d1a79e192bd2276dbe5a7f1",
+     "7de99448602b563dae5670a40945f46922c6edc5c0f12d432bad251e581fa1a9"
+    ],
+    "reply_bytes": 120,
+    "withheld": [
+     {
+      "what": "corrector self-assessment",
+      "why": "R-74: closure is verified on renders, never on claims"
+     }
+    ],
+    "usage": {
+     "input": {
+      "kind": "unknown"
+     },
+     "output": {
+      "kind": "unknown"
+     },
+     "cached_input": {
+      "kind": "unknown"
+     },
+     "image": {
+      "kind": "unknown"
+     },
+     "reasoning": {
+      "kind": "unknown"
+     },
+     "cost_usd": {
+      "kind": "unknown"
+     }
+    }
+   }
+  ],
+  "method": "measured from the packet manifests (file bytes) and the invocation records (prompt, working agreement, reply bytes recorded at dispatch); preflight probes are reported apart",
+  "probes": {
+   "invocations": 10,
+   "bytes_total": 49590,
+   "note": "preflight probes run in their own sessions; excluded from both deliveries above"
+  }
+ },
+ "transcript_replay": {
+  "strategy": "transcript replay",
+  "simulated": true,
+  "invocations": 9,
+  "bytes_total": 66280167,
+  "images_delivered": 464,
+  "tokens": {
+   "input": {
+    "kind": "unknown"
+   },
+   "output": {
+    "kind": "unknown"
+   },
+   "cached_input": {
+    "kind": "unknown"
+   },
+   "reasoning": {
+    "kind": "unknown"
+   },
+   "unknown_invocations": 9,
+   "note": "never estimated: the simulated transcript was not sent to any provider, so no token count exists"
+  },
+  "withheld_exposed": [
+   {
+    "packet_id": "pk_01M1Z7HG2HAHZT6Z71",
+    "invocation_id": "inv_01M1Z7HG4ZKKME0QM9",
+    "purpose": "intake_observation",
+    "what": "the other agent's observations",
+    "why": "R-11: independent observation at intake",
+    "exposed_by": [
+     "inv_01M1Z7HG2CYRJC8HBF"
+    ]
+   },
+   {
+    "packet_id": "pk_01M1Z7MBB5MRPAFK3E",
+    "invocation_id": "inv_01M1Z7MBPJX0S4SQQ1",
+    "purpose": "review_task",
+    "what": "builder self-assessment",
+    "why": "R-11: your initial findings are recorded before reconciliation",
+    "exposed_by": [
+     "inv_01M1Z7HG2CYRJC8HBF",
+     "inv_01M1Z7HG7ECSH6WSYD",
+     "inv_01M1Z7HGA4SGYNVMZ1",
+     "inv_01M1Z7JV7FEBG6CMAY"
+    ]
+   },
+   {
+    "packet_id": "pk_01M1Z7P52X63GZX86E",
+    "invocation_id": "inv_01M1Z7P5D1FF4K189H",
+    "purpose": "verification",
+    "what": "corrector self-assessment",
+    "why": "R-74: closure is verified on renders, never on claims",
+    "exposed_by": [
+     "inv_01M1Z7HG4ZKKME0QM9",
+     "inv_01M1Z7MBPJX0S4SQQ1",
+     "inv_01M1Z7MBWZ5J903FGA",
+     "inv_01M1Z7MF7VYQZ17E6W"
+    ]
+   }
+  ],
+  "turns": [
+   {
+    "invocation_id": "inv_01M1Z7HG2CYRJC8HBF",
+    "purpose": "intake_observation",
+    "agent_id": "ag_A",
+    "bytes": 912901,
+    "bytes_own_packet": 912901,
+    "bytes_replayed_text": 0,
+    "bytes_replayed_images": 0,
+    "images_replayed": 0
+   },
+   {
+    "invocation_id": "inv_01M1Z7HG4ZKKME0QM9",
+    "purpose": "intake_observation",
+    "agent_id": "ag_B",
+    "bytes": 1826854,
+    "bytes_own_packet": 912901,
+    "bytes_replayed_text": 11298,
+    "bytes_replayed_images": 902655,
+    "images_replayed": 6
+   },
+   {
+    "invocation_id": "inv_01M1Z7HG7ECSH6WSYD",
+    "purpose": "brief_draft",
+    "agent_id": "ag_A",
+    "bytes": 2740304,
+    "bytes_own_packet": 912398,
+    "bytes_replayed_text": 22596,
+    "bytes_replayed_images": 1805310,
+    "images_replayed": 12
+   },
+   {
+    "invocation_id": "inv_01M1Z7HGA4SGYNVMZ1",
+    "purpose": "construction_plan",
+    "agent_id": "ag_A",
+    "bytes": 3652326,
+    "bytes_own_packet": 911513,
+    "bytes_replayed_text": 32848,
+    "bytes_replayed_images": 2707965,
+    "images_replayed": 18
+   },
+   {
+    "invocation_id": "inv_01M1Z7JV7FEBG6CMAY",
+    "purpose": "build_task",
+    "agent_id": "ag_A",
+    "bytes": 6022322,
+    "bytes_own_packet": 2368243,
+    "bytes_replayed_text": 43459,
+    "bytes_replayed_images": 3610620,
+    "images_replayed": 24
+   },
+   {
+    "invocation_id": "inv_01M1Z7MBPJX0S4SQQ1",
+    "purpose": "review_task",
+    "agent_id": "ag_B",
+    "bytes": 8701453,
+    "bytes_own_packet": 2678776,
+    "bytes_replayed_text": 56959,
+    "bytes_replayed_images": 5965718,
+    "images_replayed": 39
+   },
+   {
+    "invocation_id": "inv_01M1Z7MBWZ5J903FGA",
+    "purpose": "review_reconcile",
+    "agent_id": "ag_B",
+    "bytes": 11105689,
+    "bytes_own_packet": 2401864,
+    "bytes_replayed_text": 76063,
+    "bytes_replayed_images": 8627762,
+    "images_replayed": 63
+   },
+   {
+    "invocation_id": "inv_01M1Z7MF7VYQZ17E6W",
+    "purpose": "correction_task",
+    "agent_id": "ag_B",
+    "bytes": 13531001,
+    "bytes_own_packet": 2425216,
+    "bytes_replayed_text": 84476,
+    "bytes_replayed_images": 11021309,
+    "images_replayed": 78
+   },
+   {
+    "invocation_id": "inv_01M1Z7P5D1FF4K189H",
+    "purpose": "verification",
+    "agent_id": "ag_A",
+    "bytes": 17787317,
+    "bytes_own_packet": 4255974,
+    "bytes_replayed_text": 97914,
+    "bytes_replayed_images": 13433429,
+    "images_replayed": 96
+   }
+  ],
+  "method": "simulated from the same invocation sequence: each turn re-delivers every earlier packet text and reply and every image delivered before, plus its own packet, the way a single shared chat transcript grows; nothing was sent to a provider"
+ },
+ "preserved": {
+  "unique_evidence_files": 48,
+  "coverage_rows": 30,
+  "findings_total": 1,
+  "findings_closed_on_verified_renders": 1,
+  "packets_with_withheld_material": 4,
+  "revisions": 3,
+  "renders_ok": 31,
+  "note": "identical under both deliveries by construction: the harness measures the same run twice; packet delivery honours the withheld material, the replayed transcript would not"
+ },
+ "caveats": [
+  "bytes are measured; tokens are reported only where the provider measured them and are unknown otherwise",
+  "transcript replay is simulated from the same turns; nothing was sent, so it has no token count",
+  "no reduction percentage is computed and no quality equivalence is claimed: the two deliveries carry the same evidence files and coverage rows, and only packet delivery honours the withheld material (R-11)"
+ ]
+}

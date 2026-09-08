@@ -25,6 +25,7 @@ from .project import Project
 from .providers import make_adapter
 from .providers.mock import ScriptedAdapter
 from .references import References
+from .source import SourceError, register_empty, register_source
 
 RunnerFactory = Callable[[BuilderConfig, Project], Any]
 AdaptersFactory = Callable[[BuilderConfig, argparse.Namespace], dict[str, Any]]
@@ -220,16 +221,34 @@ def _ensure_preflight(eng: Engine, adapters: dict[str, Any], args: argparse.Name
     """Real adapters spend money: a current live preflight report is required and never produced implicitly (R-18,
     R-21); scripted mocks are probed on the spot."""
     loaded = eng.load_preflight()
-    if len(loaded) < len(adapters):
-        missing = ", ".join(sorted(set(adapters) - set(loaded)))
+    # a local-only report (live tiers never run) is not a live preflight for a real adapter (R-18, R-21)
+    local_only = {label for label, r in loaded.items() if not r.get("live") and not isinstance(adapters.get(label), ScriptedAdapter)}
+    if len(loaded) < len(adapters) or local_only:
+        missing = ", ".join(sorted((set(adapters) - set(loaded)) | local_only))
         if all(isinstance(a, ScriptedAdapter) for a in adapters.values()):
             ctx.say(f"preflight: no current report for {missing}; running preflight (live) on the scripted agents")
             report = eng.preflight(live=True)
             _print_preflight(report, ctx)
         else:
-            raise CliError(f"no current live preflight report for agent(s) {missing} (never run, or the CLI path, version, "
-                           f"model, or settings changed since; R-18). Run `preflight {args.workflow_dir} --live` first: it spends "
-                           "provider usage and is never started implicitly.")
+            raise CliError(f"no current live preflight report for agent(s) {missing} (never run, only a local report, or the CLI "
+                           f"path, version, model, or settings changed since; R-18). Run `preflight {args.workflow_dir} --live` "
+                           "first: it spends provider usage and is never started implicitly.")
+
+
+def interrupt_handler(eng: Any, say: Callable[[str], None]) -> Callable[[int, Any], None]:
+    """Design 9.1: the first Ctrl+C requests a pause at the next safe boundary; the second requests cancel (the
+    in-flight provider or Blender process is killed and confirmed, the run reconciled)."""
+    state = {"count": 0}
+
+    def handler(signum: int, frame: Any) -> None:
+        state["count"] += 1
+        if state["count"] == 1:
+            eng.pause()
+            say("Ctrl+C: pause requested; the engine stops at the next safe boundary (Ctrl+C again to cancel)")
+        else:
+            eng.cancel_event.set()
+            say("Ctrl+C again: cancel requested; killing the in-flight process and reconciling")
+    return handler
 
 
 def cmd_preflight(args: argparse.Namespace, ctx: Ctx) -> int:
@@ -251,6 +270,8 @@ def cmd_preflight(args: argparse.Namespace, ctx: Ctx) -> int:
 
 def _print_status(status: dict[str, Any], ctx: Ctx) -> None:
     ctx.say(f"execution: {status['execution']}  stop reason: {status.get('stop_reason') or '-'}  stage: {status.get('stage') or '-'}")
+    if status.get("revision_id"):
+        ctx.say(f"revision: {status['revision_id']} (latest immutable revision)")
     for c in status["components"]:
         ctx.say(f"component {c['id']} {c['name']}: review={c['review_state']} acceptance={c['acceptance_state']} "
                 f"open findings={c['open_findings']} revision={c.get('revision_id')}")
@@ -263,6 +284,8 @@ def _print_status(status: dict[str, Any], ctx: Ctx) -> None:
     for name, lim in cons["limits"].items():
         if not lim.get("unlimited"):
             ctx.say(f"  limit {name}={lim['value']} enforceable={lim.get('enforceable')} {lim.get('note', '')}")
+    for o in status.get("assignment_overrides") or []:
+        ctx.say(f"assignment override {o['role']}={o['seat']} ({o['source']}): {o['rationale']}")
     ctx.say(f"contributions (committed operations): {status['contributions']}")
     for a in status["agents"]:
         ctx.say(f"agent {a['label']}: {a['provider']} model={a['model']} reasoning={a['reasoning'] or 'not exposed'} "
@@ -324,9 +347,23 @@ def _run_engine(args: argparse.Namespace, ctx: Ctx, *, resume: bool) -> int:
             eng.resume(user=f"user:{args.user}")
         else:
             attended = not getattr(args, "unattended", False)
-            eng.start(attended=attended, component_name=getattr(args, "component", None))
+            overrides = _parse_assignments(getattr(args, "assign", None))
+            eng.start(attended=attended, component_name=getattr(args, "component", None), assignment_overrides=overrides)
             ctx.say(f"run {eng.run.id} started ({'attended' if attended else 'unattended'})")
-        status = eng.run_until_stop(max_steps=args.max_steps)
+            for o in eng.assignment_overrides():
+                ctx.say(f"assignment override {o['role']}={o['seat']} ({o['source']}): {o['rationale']}")
+        import signal
+
+        previous = signal.getsignal(signal.SIGINT)
+        try:
+            signal.signal(signal.SIGINT, interrupt_handler(eng, ctx.say))
+        except (ValueError, OSError):      # not the main thread: no handler, the default KeyboardInterrupt stays
+            previous = None
+        try:
+            status = eng.run_until_stop(max_steps=args.max_steps)
+        finally:
+            if previous is not None:
+                signal.signal(signal.SIGINT, previous)
         _print_status(status, ctx)
         return 0 if status["stop_reason"] in ("ready_for_user_review", "user_pause", None) else 1
     except EngineFailure as exc:
@@ -335,8 +372,45 @@ def _run_engine(args: argparse.Namespace, ctx: Ctx, *, resume: bool) -> int:
         prj.close()
 
 
+def _parse_assignments(items: list[str] | None) -> dict[str, str]:
+    """``--assign role=SEAT`` (repeatable). Roles and seats are validated by the engine against the configured seats."""
+    out: dict[str, str] = {}
+    for item in items or []:
+        if "=" not in item:
+            raise CliError(f"--assign expects role=SEAT (for example build=B), got {item!r}")
+        role, seat = item.split("=", 1)
+        out[role.strip()] = seat.strip()
+    return out
+
+
 def cmd_start(args: argparse.Namespace, ctx: Ctx) -> int:
     return _run_engine(args, ctx, resume=False)
+
+
+def cmd_source(args: argparse.Namespace, ctx: Ctx) -> int:
+    """Revision 0 for a project created with `new` (R-93: creating the project never opened the source)."""
+    cfg = ctx.config(args)
+    prj = ctx.project(args)
+    try:
+        runner = ctx.runner(cfg, prj)
+        user = f"user:{args.user}"
+        if args.source_cmd == "register":
+            rev = register_source(prj, runner, Path(args.file), actor=user, note=args.note or "")
+            src = rev.data.get("source") or {}
+            ctx.say(f"registered {rev.id} from {src.get('path')} (sha256 {rev.data['sha256'][:12]}..., validated in separate "
+                    f"Blender processes: identities, reopen; the source file is unmodified)")
+            unmapped = src.get("unmapped_geometry") or []
+            ctx.say(f"  identities: {len(rev.data.get('identity_map') or [])} tagged datablock(s); "
+                    f"{len(unmapped)} object(s) without alloy_id" + (f": {', '.join(unmapped[:12])}" if unmapped else ""))
+        else:
+            rev = register_empty(prj, runner, actor=user, note=args.note or "")
+            ctx.say(f"registered {rev.id}: empty scene built through the runner (validated: identities, reopen)")
+        ctx.say(f"  revision file: {rev.data['file']} (immutable, R-40)")
+        return 0
+    except SourceError as exc:
+        raise CliError(str(exc)) from exc
+    finally:
+        prj.close()
 
 
 def cmd_resume(args: argparse.Namespace, ctx: Ctx) -> int:
@@ -445,6 +519,53 @@ def cmd_checkpoint(args: argparse.Namespace, ctx: Ctx) -> int:
         prj.close()
 
 
+ACTIVE_RUN_STATES = ("running", "waiting_for_provider", "rendering", "recovering")
+
+
+def _parse_limit_settings(items: list[str] | None) -> dict[str, str]:
+    changes: dict[str, str] = {}
+    for item in items or []:
+        if "=" not in item:
+            raise CliError(f"--set expects name=value, got {item!r}")
+        name, value = item.split("=", 1)
+        changes[name.strip()] = value.strip()
+    return changes
+
+
+def cmd_limits(args: argparse.Namespace, ctx: Ctx) -> int:
+    """Show the limits in force and, with ``--set``, change them (R-85, R-89). A stopped run takes the change at once;
+    a run that is active in another process takes it at its next safe boundary through a control request."""
+    cfg = ctx.config(args)
+    prj = ctx.project(args)
+    try:
+        changes = _parse_limit_settings(getattr(args, "set", None))
+        eng = Engine(prj, cfg, adapters={}, runner=None)
+        run = eng.attach()
+        if changes:
+            if run is not None and run.state in ACTIVE_RUN_STATES:
+                prj.store.push_control("limits", {"changes": changes, "by": args.user})
+                ctx.say(f"run {run.id} is {run.state}: limit change {changes} queued; the engine applies it at its next safe boundary")
+            else:
+                try:
+                    applied = eng.apply_limits(changes, actor=f"user:{args.user}")
+                except EngineFailure as exc:
+                    raise CliError(str(exc)) from exc
+                ctx.say(f"applied {applied}" + (f" to run {run.id} ({run.state})" if run else " (no run yet; the next start uses them)"))
+        cons = eng.limits.status()
+        ctx.say("limits in force (zero means unlimited):")
+        for name, lim in cons["limits"].items():
+            ctx.say(f"  {name} = {lim['value']}" + (" (unlimited)" if lim.get("unlimited") else "") + f"  enforceable={lim.get('enforceable')}"
+                    + (f"  {lim['note']}" if lim.get("note") else ""))
+        ctx.say(f"consumption: requests {cons['requests']['completed']} completed, renders {cons['renders']['completed']} completed, "
+                f"elapsed {cons['elapsed_s']} s, steps_without_progress {cons['steps_without_progress']}, "
+                f"correction attempts {cons['correction_attempts']}")
+        if getattr(args, "json", False):
+            ctx.say(json.dumps(cons, ensure_ascii=False, indent=1, default=str))
+        return 0
+    finally:
+        prj.close()
+
+
 def cmd_journal(args: argparse.Namespace, ctx: Ctx) -> int:
     prj = ctx.project(args)
     try:
@@ -469,6 +590,38 @@ def cmd_fixture(args: argparse.Namespace, ctx: Ctx) -> int:
     try:
         ctx.say(f"fixture project {project.record.id} at {info['workflow_dir']}; defects: {', '.join(info['defects'])}")
         ctx.say(f"revision 0: {info['revision_id']}; references: {', '.join(info['references'])}")
+    finally:
+        project.close()
+    return 0
+
+
+def cmd_harness(args: argparse.Namespace, ctx: Ctx) -> int:
+    """R-84: ``harness run <dir>`` creates the fixture, runs it with scripted seats (Blender real, agents scripted,
+    nothing spent), and measures packet delivery against a simulated transcript replay; ``harness report <wf>``
+    measures any existing workflow (a live run's records carry the providers' own token counts)."""
+    from . import harness
+
+    cfg = ctx.config(args)
+    if args.harness_cmd == "run":
+        scratch = Project.__new__(Project)
+        scratch.workflow_dir = Path(args.directory)
+        scratch.path = lambda *parts: Path(args.directory).joinpath(*parts)  # type: ignore[method-assign]
+        runner = ctx.runner(cfg, scratch)
+        play = None
+        if getattr(args, "mock", None):
+            with open(args.mock, "r", encoding="utf-8") as f:
+                play = json.load(f)
+        project, cmp = harness.run_fixture(args.directory, runner, screenplay=play, config=cfg, max_steps=args.max_steps)
+    else:
+        project = ctx.project(args)
+        cmp = harness.compare(project)
+        harness.write_report(project, cmp)
+    try:
+        if getattr(args, "json", False):
+            ctx.say(json.dumps(cmp, ensure_ascii=False, indent=1, default=str))
+        else:
+            ctx.say(harness.render_report(cmp))
+            ctx.say(f"written: {project.workflow_dir / 'harness-report.json'} and harness-report.txt")
     finally:
         project.close()
     return 0
@@ -729,8 +882,8 @@ def _concept_failed(args, ctx, prj, eng, concept) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m builder", description=(
         "Collaborative Model Builder (two AI agents reconstruct a concept design as an editable Blender model; Alloy owns "
-        "the state). Verbs: new, open, intake, preset, preflight, start, resume, pause, cancel, feedback, status, findings, "
-        "accept, reopen, waive, checkpoint, journal, concept, fixture."))
+        "the state). Verbs: new, open, intake, source, preset, preflight, start, resume, pause, cancel, feedback, status, "
+        "findings, accept, reopen, waive, checkpoint, limits, journal, concept, fixture, harness."))
     sub = p.add_subparsers(dest="verb", required=True)
 
     def wf(sp: argparse.ArgumentParser) -> None:
@@ -765,6 +918,22 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--region", action="append", help="<reference_id>:<name>:x,y,w,h in original pixels")
     sp.set_defaults(func=cmd_intake)
 
+    sp = sub.add_parser("source", help="register revision 0: the owner's .blend validated in Blender and copied unmodified, "
+                                       "or an empty scene built through the runner (never done by `new`, R-93)")
+    ssub = sp.add_subparsers(dest="source_cmd", required=True)
+    q = ssub.add_parser("register", help="validate <file.blend> in separate Blender processes (identities, reopen) and copy it "
+                                         "unmodified into revisions/ as immutable revision 0")
+    wf(q)
+    q.add_argument("file", help="the .blend to register; read only, never modified")
+    q.add_argument("--note", default="")
+    q.add_argument("--user", default="cli")
+    q.set_defaults(func=cmd_source)
+    q = ssub.add_parser("empty", help="build an empty scene (one tagged collection) through the runner as revision 0")
+    wf(q)
+    q.add_argument("--note", default="")
+    q.add_argument("--user", default="cli")
+    q.set_defaults(func=cmd_source)
+
     sp = sub.add_parser("preset", help="list, show, or create a project from a builder preset")
     psub = sp.add_subparsers(dest="preset_cmd", required=True)
     for name in ("list", "show", "create"):
@@ -794,6 +963,10 @@ def build_parser() -> argparse.ArgumentParser:
         if verb == "start":
             sp.add_argument("--unattended", action="store_true", help="advance within limits; components stay unaccepted")
             sp.add_argument("--component", help="name of the first detailed component")
+            sp.add_argument("--assign", action="append", metavar="ROLE=SEAT",
+                            help="pre-assign a role to a seat for this run (repeatable; roles: brief, plan, build, corrector, "
+                                 "reviewer, verifier, reassessor; overrides builder.assignments). A seat never reviews, "
+                                 "verifies, or reassesses its own operation, even under an override (R-107)")
         sp.set_defaults(func=func)
 
     for verb in ("pause", "cancel", "feedback"):
@@ -845,6 +1018,14 @@ def build_parser() -> argparse.ArgumentParser:
             q.add_argument("checkpoint_id")
             q.add_argument("--user", default="cli")
     sp.set_defaults(func=cmd_checkpoint)
+
+    sp = sub.add_parser("limits", help="show the limits in force; --set name=value changes them (zero means unlimited)")
+    wf(sp)
+    sp.add_argument("--set", action="append", help="name=value, repeatable: wall_clock_minutes, max_cost_usd, max_requests, "
+                                                  "max_renders, attempts_per_finding, stall_steps")
+    sp.add_argument("--user", default="cli")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_limits)
 
     sp = sub.add_parser("journal", help="print the tail of the journal")
     wf(sp)
@@ -917,6 +1098,19 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("request_id")
     q.add_argument("--reason", required=True)
     sp.set_defaults(func=cmd_concept)
+
+    sp = sub.add_parser("harness", help="R-84 efficiency comparison: run the fixture with scripted seats, or report an existing workflow")
+    hsub = sp.add_subparsers(dest="harness_cmd", required=True)
+    q = hsub.add_parser("run", help="create the fixture (needs Blender), run it with scripted seats (nothing spent), measure")
+    q.add_argument("directory")
+    q.add_argument("--mock", help="screenplay JSON (default: the built-in fixture screenplay)")
+    q.add_argument("--max-steps", type=int, default=60)
+    q.add_argument("--config")
+    q.add_argument("--json", action="store_true")
+    q = hsub.add_parser("report", help="measure an existing workflow's invocations (live runs carry measured tokens)")
+    wf(q)
+    q.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_harness)
 
     sp = sub.add_parser("fixture", help="create the disposable fixture project (needs Blender)")
     fsub = sp.add_subparsers(dest="fixture_cmd", required=True)

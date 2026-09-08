@@ -285,3 +285,110 @@ def test_concept_panel_shows_mode_prompts_candidates_and_verdicts(window, snap, 
     assert ("concept_reject", (["ref_CAND"],), {"reason": "wrong toe count", "user": win.user_var.get()}) in sess.calls
     assert ("concept_regenerate", ("gen_REQ0",), {"note": "two toes", "user": win.user_var.get()}) in sess.calls
     assert "front" in panel.coverage_var.get() and "candidates" in panel.coverage_var.get()
+
+
+# --- Phase 4: target regions by dragging (R-26, R-27), editable limits (R-85), concept pane width -------------------
+
+def _drag(canvas, x0, y0, x1, y1):
+    canvas.event_generate("<ButtonPress-1>", x=x0, y=y0)
+    canvas.event_generate("<B1-Motion>", x=(x0 + x1) // 2, y=(y0 + y1) // 2)
+    canvas.event_generate("<B1-Motion>", x=x1, y=y1)
+    canvas.event_generate("<ButtonRelease-1>", x=x1, y=y1)
+
+
+def test_dragging_a_region_on_the_reference_pane_submits_it_in_original_pixels(window, snap):
+    win, sess = window
+    win.apply_snapshot(snap)
+    ref = snap["references"][0]                       # 120x90 image
+    pane = win.compare.left
+    pane.show_reference(ref["id"])
+    win.deiconify()                                   # Tk drops synthetic pointer events on an unmapped window
+    win.update()
+    win.region_name.set("lower-left humanoid")
+    win.region_purpose.set("target_region")
+    win.buttons["draw_region"].invoke()               # arms one drag on the reference pane
+    assert pane.region_mode is True
+    ox, oy = pane._origin
+    s = pane._scale
+    # a drag from image pixel (12, 9) to (60, 45), expressed in canvas pixels, crossing back to test normalisation
+    x0, y0 = ox + round(12 * s), oy + round(9 * s)
+    x1, y1 = ox + round(60 * s), oy + round(45 * s)
+    _drag(pane.canvas, x1, y1, x0, y0)
+    win.update()
+    calls = [c for c in sess.calls if c[0] == "add_region"]
+    assert len(calls) == 1
+    args, kwargs = calls[0][1], calls[0][2]
+    assert args[0] == ref["id"] and args[1] == "lower-left humanoid"
+    x, y, w, h = args[2]
+    assert abs(x - 12) <= 1 and abs(y - 9) <= 1 and abs(w - 48) <= 2 and abs(h - 36) <= 2      # original pixels, not canvas
+    assert kwargs == {"purpose": "target_region", "user": win.user_var.get()}
+    assert pane.region_mode is False                  # one region per arming; the next drag does nothing
+    _drag(pane.canvas, x0, y0, x1, y1)
+    assert len([c for c in sess.calls if c[0] == "add_region"]) == 1
+    # a drag that leaves the image is clamped to it, never a region outside the original
+    win.buttons["draw_region"].invoke()
+    _drag(pane.canvas, ox - 30, oy - 30, ox + round(20 * s), oy + round(20 * s))
+    x, y, w, h = [c for c in sess.calls if c[0] == "add_region"][-1][1][2]
+    assert (x, y) == (0, 0) and abs(w - 20) <= 1 and abs(h - 20) <= 1
+    win.withdraw()
+
+
+def test_existing_regions_are_drawn_on_the_reference_and_listed(window, snap):
+    win, _ = window
+    ref = dict(snap["references"][0])
+    ref["regions"] = [{"id": "reg_1", "name": "lower-left", "bbox": [10, 10, 40, 30], "purpose": "target_region", "space": "original_pixels"}]
+    snap2 = {**snap, "references": [ref] + snap["references"][1:]}
+    win.apply_snapshot(snap2)
+    pane = win.compare.left
+    pane.show_reference(ref["id"])
+    win.update_idletasks()
+    assert pane.canvas.find_withtag("region")
+    assert "lower-left" in pane.label_var.get() and "original pixels" in pane.label_var.get()
+    rows = [win.references_tree.item(i, "values") for i in win.references_tree.get_children(ref["id"])]
+    assert rows and "lower-left" in str(rows[0]) and "[10, 10, 40, 30]" in str(rows[0])
+
+
+def test_limits_card_shows_the_limits_in_force_and_apply_submits_only_the_changes(window, snap):
+    win, sess = window
+    win.apply_snapshot(snap)
+    lim = snap["consumption"]["limits"]
+    assert win.limit_vars["attempts_per_finding"].get() == str(lim["attempts_per_finding"]["value"])
+    assert win.limit_vars["stall_steps"].get() == str(lim["stall_steps"]["value"])
+    assert "enforceable" in win.limits_note_var.get()
+    win.limit_vars["max_requests"].set("5")
+    win.limit_vars["stall_steps"].set("20")
+    win.buttons["apply_limits"].invoke()
+    assert sess.calls[-1] == ("set_limits", ({"max_requests": "5", "stall_steps": "20"},), {"user": win.user_var.get()})
+
+
+def test_concept_image_pair_has_a_wider_default(window):
+    win, _ = window
+    panel = win.concept_panel
+    assert int(panel.anchor_pane.canvas["width"]) >= 300 and int(panel.candidate_pane.canvas["width"]) >= 300
+    assert win._sash_fractions(concept=True)[1] <= 0.42 < win._sash_fractions(concept=False)[1]
+
+
+def test_stage_card_shows_assignment_overrides_with_their_rationale(window, snap):
+    win, sess = window
+    s = dict(snap)
+    s["stage"] = dict(snap["stage"], assignment_overrides=[
+        {"role": "build", "seat": "B", "source": "cli",
+         "rationale": "user override (cli: build=B); R-107 still applies: B never reviews, verifies, or reassesses its own operation"}])
+    win.apply_snapshot(s)
+    text = win.stage_text.get("1.0", "end")
+    assert "assignment override build=B (cli)" in text and "user override" in text and "R-107" in text
+
+
+def test_start_passes_the_assignments_entry_as_overrides(window, snap):
+    win, sess = window
+    win.apply_snapshot(snap)
+    win.assign_var.set("build=B plan=A")
+    win.buttons["start"].invoke()
+    assert sess.calls[-1] == ("start_run", (), {"attended": True, "component_name": None, "assignments": {"build": "B", "plan": "A"}})
+
+
+def test_project_tab_offers_source_registration(window, snap):
+    win, sess = window
+    win.apply_snapshot(snap)
+    win.buttons["source_empty"].invoke()
+    assert sess.calls[-1][0] == "register_empty_source"

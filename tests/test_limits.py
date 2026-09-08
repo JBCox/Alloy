@@ -105,3 +105,45 @@ def test_zero_limits_mean_unlimited_and_status_lists_them():
         t.note_dispatch("request", agent_id="ag_A")
     assert t.can_dispatch()[0]
     assert t.status()["limits"]["max_requests"]["value"] == 0 and t.status()["limits"]["max_requests"]["unlimited"]
+
+
+# --- R-85 stalls, R-88 no endless oscillation, R-89 editable limits ------------------------------------------------
+
+def test_steps_without_progress_reach_the_stall_limit_and_restore_across_processes():
+    t = LimitTracker({"stall_steps": 3})
+    assert t.note_step(("a", 1)) is False          # first observation is progress by definition
+    assert t.note_step(("a", 1)) is False          # 1 step without progress
+    assert t.note_step(("a", 1)) is False          # 2
+    assert t.status()["steps_without_progress"] == 2
+    assert t.note_step(("a", 2)) is False          # progress resets the counter
+    assert t.status()["steps_without_progress"] == 0
+    for _ in range(2):
+        assert t.note_step(("a", 2)) is False
+    assert t.note_step(("a", 2)) is True           # 3 consecutive steps without progress: stalled
+    ok, reason, msg = t.can_dispatch()
+    assert not ok and reason == "stalled" and "progress" in msg
+    t2 = LimitTracker({"stall_steps": 3})
+    t2.restore(t.status())
+    assert t2.status()["steps_without_progress"] == 3 and not t2.can_dispatch()[0]
+    t3 = LimitTracker({"stall_steps": 0})          # zero means no stall limit
+    for _ in range(50):
+        assert t3.note_step(("same",)) is False
+    assert t3.can_dispatch()[0]
+
+
+def test_limits_are_editable_with_validation_and_the_status_reflects_the_change():
+    t = LimitTracker({"max_requests": 2})
+    t.note_dispatch("request", agent_id="ag_A")
+    t.note_dispatch("request", agent_id="ag_A")
+    assert t.can_dispatch()[1] == "budget_limit"
+    applied = t.apply_limits({"max_requests": 10, "max_cost_usd": "12.5", "stall_steps": 20})
+    assert applied == {"max_requests": 10, "max_cost_usd": 12.5, "stall_steps": 20}
+    assert t.can_dispatch()[0]
+    assert t.status()["limits"]["max_requests"]["value"] == 10 and t.status()["limits"]["max_cost_usd"]["value"] == 12.5
+    with pytest.raises(ValueError, match="unknown limit"):
+        t.apply_limits({"max_tokens": 5})
+    with pytest.raises(ValueError, match="negative"):
+        t.apply_limits({"max_renders": -1})
+    with pytest.raises(ValueError, match="number"):
+        t.apply_limits({"wall_clock_minutes": "soon"})
+    assert t.limits["max_requests"] == 10     # a rejected batch changes nothing

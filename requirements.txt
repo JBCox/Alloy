@@ -1,5 +1,7 @@
 rich>=13.0.0
 prompt_toolkit>=3.0.0
 pyyaml>=6.0
+# Optional: preserves config.yaml comments when saving from the GUI settings editor
+ruamel.yaml>=0.17
 # Collaborative Model Builder: reference intake, evidence crops, render manifests
 Pillow>=10.0

@@ -16,7 +16,10 @@ import yaml
 DEFAULT_DEADLINES: dict[str, int] = {"validate": 120, "apply": 600, "render": 900, "measure": 120, "fixture": 300}
 DEFAULT_PROVIDER_TIMEOUTS: dict[str, int] = {"response": 900, "inactivity": 180, "cancel_probe_after": 8}
 DEFAULT_LIMITS: dict[str, Any] = {"wall_clock_minutes": 0, "max_cost_usd": 0.0, "max_requests": 0,
-                                  "max_renders": 0, "attempts_per_finding": 2}
+                                  "max_renders": 0, "attempts_per_finding": 2,
+                                  # consecutive loop steps without evidence-supported progress before the run stops
+                                  # with stop reason ``stalled`` (R-85, R-88); zero disables the check
+                                  "stall_steps": 12}
 DEFAULT_AGENTS: dict[str, dict[str, str]] = {
     # Owner guidance 2026-09-07: GPT 6 and Fable 5.1. `fable` is an alias listed in `claude --help`;
     # `gpt-6-astra` is the model configured in the owner's ~/.codex/config.toml. Nothing else is assumed.
@@ -29,6 +32,10 @@ APPROVAL_MODES = ("each", "anchor_only", "auto")
 DEFAULT_CONCEPT_VIEWS = ["front", "side", "rear", "top", "underside", "three-quarter"]
 DEFAULT_CONCEPT: dict[str, Any] = {"approval": "each", "anchor_candidates": 4, "views": list(DEFAULT_CONCEPT_VIEWS),
                                    "max_images": 40, "max_regenerations_per_view": 3, "import_dir": ""}
+# Roles a user may pre-assign to a seat for a run (R-8 user override; R-107 still bars a seat from reviewing,
+# verifying, or reassessing its own operation). ``brief``, ``plan``, ``build`` are the task kinds the engine assigns
+# through ``_assign``; the others are the judging and correcting roles assigned through ``_role_of``.
+ASSIGNABLE_ROLES = ("brief", "plan", "build", "corrector", "reviewer", "verifier", "reassessor")
 IMAGE_SEATS = ("manual",)       # an API seat may be added later (keys from the environment only, D12)
 DEFAULT_IMAGE_GENERATION: dict[str, str] = {"seat": "manual", "vendor": "chatgpt", "model": ""}
 BLENDER_SEARCH_ROOTS = (Path(r"C:\Program Files\Blender Foundation"),)
@@ -60,6 +67,7 @@ class BuilderConfig:
     presets: dict[str, dict[str, Any]] = field(default_factory=dict)
     concept: dict[str, Any] = field(default_factory=lambda: _copy_concept(DEFAULT_CONCEPT))
     image_generation: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_IMAGE_GENERATION))
+    assignments: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -114,6 +122,7 @@ class BuilderConfig:
             if isinstance(presets_raw, dict) else {}
         cfg.concept = _parse_concept(section.get("concept"), warnings)
         cfg.image_generation = _parse_image_generation(section.get("image_generation"), warnings)
+        cfg.assignments = parse_assignments(section.get("assignments"), list(cfg.agents), warnings)
         return cfg
 
     @classmethod
@@ -139,7 +148,28 @@ class BuilderConfig:
             "provider_timeouts": dict(self.provider_timeouts), "limits": dict(self.limits),
             "presets": {k: dict(v) for k, v in self.presets.items()},
             "concept": _copy_concept(self.concept), "image_generation": dict(self.image_generation),
+            "assignments": dict(self.assignments),
         }
+
+
+def parse_assignments(given: Any, seats: list[str], warnings: list[str], *, source: str = "assignments") -> dict[str, str]:
+    """``{role: seat}`` with unknown roles and seats dropped and reported (never guessed)."""
+    out: dict[str, str] = {}
+    if given is None:
+        return out
+    if not isinstance(given, dict):
+        warnings.append(f"{source}: expected a mapping of role to seat (one of {ASSIGNABLE_ROLES}); got {given!r}; ignored")
+        return out
+    for role, seat in given.items():
+        role_s, seat_s = str(role), str(seat)
+        if role_s not in ASSIGNABLE_ROLES:
+            warnings.append(f"{source}.{role_s}: unknown role; expected one of {ASSIGNABLE_ROLES}; ignored")
+            continue
+        if seat_s not in seats:
+            warnings.append(f"{source}.{role_s}={seat_s!r}: not a configured seat ({', '.join(seats)}); ignored")
+            continue
+        out[role_s] = seat_s
+    return out
 
 
 def _copy_concept(d: dict[str, Any]) -> dict[str, Any]:

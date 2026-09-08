@@ -77,7 +77,8 @@ class BlenderRunner:
     def run_script(self, script: str | Path, args: dict[str, Any], *, op_id: str, blend: str | Path | None = None,
                    deadline_s: float | None = None, work_dir: str | Path | None = None,
                    cancel_event: threading.Event | None = None,
-                   on_output: Callable[[str, str], None] | None = None) -> BlenderResult:
+                   on_output: Callable[[str, str], None] | None = None,
+                   on_spawn: Callable[[int], None] | None = None) -> BlenderResult:
         wd = Path(work_dir) if work_dir is not None else self.logs_dir / op_id
         wd.mkdir(parents=True, exist_ok=True)
         args_path = wd / "args.json"
@@ -91,7 +92,7 @@ class BlenderRunner:
             json.dump(full_args, f, ensure_ascii=False, indent=1)
         pr = run_process(self.argv(script, args_path, blend), cwd=wd, stdout_path=wd / "stdout.log",
                          stderr_path=wd / "stderr.log", response_s=deadline_s, inactivity_s=None,
-                         cancel_event=cancel_event, on_output=on_output)
+                         cancel_event=cancel_event, on_output=on_output, on_spawn=on_spawn)
         res = BlenderResult(op_id=op_id, outcome="uncertain", exit_code=pr.exit_code, result=None, error="",
                             stdout_path=pr.stdout_path, stderr_path=pr.stderr_path, elapsed_s=pr.elapsed_s,
                             kill_confirmed=pr.kill_confirmed, work_dir=str(wd), process=pr)
@@ -186,11 +187,12 @@ class BlenderRunner:
 
     def apply(self, base_blend: str | Path, out_blend: str | Path, script_path: str | Path, *, op_id: str,
               declared_effects: dict[str, Any], deadline_s: float | None = None,
-              work_dir: str | Path | None = None, cancel_event: threading.Event | None = None) -> BlenderResult:
+              work_dir: str | Path | None = None, cancel_event: threading.Event | None = None,
+              on_spawn: Callable[[int], None] | None = None) -> BlenderResult:
         args = {"script_path": str(script_path), "out_blend": str(out_blend), "declared_effects": declared_effects}
         return self.run_script(SCRIPTS_DIR / "apply_operation.py", args, op_id=op_id, blend=base_blend,
                                deadline_s=deadline_s or self.deadlines["apply"], work_dir=work_dir,
-                               cancel_event=cancel_event)
+                               cancel_event=cancel_event, on_spawn=on_spawn)
 
     def render(self, blend: str | Path, view: dict[str, Any], out_png: str | Path, *, op_id: str,
                deadline_s: float | None = None, work_dir: str | Path | None = None,

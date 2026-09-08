@@ -247,6 +247,12 @@ def codex(argv: list[str], stdin: str, mode: str) -> int:
         print(json.dumps({"type": "thread.started", "thread_id": thread_id}))
         print(json.dumps({"type": "turn.failed", "error": {"message": "model nope-1 not found"}}))
         return 1
+    if mode == "error_event_only":
+        # an `error` event with no completed turn afterwards: the reply never came (observed shape, 2026-09-08)
+        print(json.dumps({"type": "thread.started", "thread_id": thread_id}))
+        print(json.dumps({"type": "error", "message": "Reconnecting... 1/5 (stream disconnected before completion: "
+                                                     "websocket closed by server before response.completed)"}))
+        return 0
     schema = _opt(argv, "--output-schema")
     if schema:
         with open(schema, "r", encoding="utf-8") as f:
@@ -255,6 +261,14 @@ def codex(argv: list[str], stdin: str, mode: str) -> int:
     text = reply if mode != "text_only" else f"Final answer below.\n{reply}"
     print(json.dumps({"type": "thread.started", "thread_id": thread_id}))
     print(json.dumps({"type": "turn.started"}))
+    if mode == "reconnect_then_ok":
+        # the live shape of 2026-09-08: the CLI's stream dropped, it reconnected (repeated `error` events, then an
+        # `item` of type error announcing the HTTPS fallback) and the turn still completed with a full reply
+        for n in (2, 3):
+            print(json.dumps({"type": "error", "message": f"Reconnecting... {n}/5 (stream disconnected before completion: "
+                                                         "websocket closed by server before response.completed)"}))
+        print(json.dumps({"type": "item.completed", "item": {"id": "item_0", "type": "error", "message":
+                          "Falling back from WebSockets to HTTPS transport. stream disconnected before completion"}}))
     print(json.dumps({"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": text}}, ensure_ascii=False))
     if mode != "no_usage":
         print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 200, "cached_input_tokens": 80,

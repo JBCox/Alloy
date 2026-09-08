@@ -192,6 +192,22 @@ def descendants(pid: int, timeout_s: float = 20.0) -> list[int]:
     return found
 
 
+def command_line(pid: int, timeout_s: float = 20.0) -> str | None:
+    """The command line of a live process (Windows: CIM query through PowerShell), or None when unknown. Recovery
+    uses it to make sure a recorded pid still belongs to the operation before killing anything (pids are reused)."""
+    if pid <= 0 or not IS_WINDOWS:
+        return None
+    cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+           f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CommandLine"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             timeout=timeout_s, creationflags=CREATE_NO_WINDOW).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = out.strip()
+    return text or None
+
+
 def kill_tree(pid: int, job: JobObject | None = None, grace_s: float = 10.0) -> dict[str, Any]:
     """Kill ``pid`` and everything below it, then confirm every known PID is gone."""
     details: dict[str, Any] = {"pid": pid, "descendants": [], "job_terminated": False, "taskkill_rc": None}
@@ -262,7 +278,10 @@ def run_process(argv: list[str], *, cwd: str | Path, stdout_path: str | Path, st
                 response_s: float | None = None, inactivity_s: float | None = None,
                 cancel_event: threading.Event | None = None,
                 on_output: Callable[[str, str], None] | None = None,
+                on_spawn: Callable[[int], None] | None = None,
                 poll_s: float = 0.05, kill_grace_s: float = 10.0) -> ProcessResult:
+    """``on_spawn(pid)`` is called on the calling thread right after the process exists (and after the Job Object
+    assignment), so a caller can record the pid durably while the process runs (R-47 live-process recovery)."""
     if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(a, str) for a in argv):
         raise ValueError("argv must be a non-empty list of strings")
     argv = [str(a) for a in argv]
@@ -294,6 +313,11 @@ def run_process(argv: list[str], *, cwd: str | Path, stdout_path: str | Path, st
     if IS_WINDOWS:
         job = JobObject()
         result.job_assigned = job.assign(proc._handle)  # type: ignore[attr-defined]
+    if on_spawn is not None:
+        try:
+            on_spawn(proc.pid)
+        except Exception:  # noqa: BLE001 - a recording failure must never orphan the process we just started
+            pass
 
     state = _DrainState()
     readers = [

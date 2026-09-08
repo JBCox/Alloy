@@ -491,7 +491,14 @@ class Engine:
                 max_cost_usd=self.limits.remaining_budget_usd(), extra=dict(extra or {}))
             if count_toward_limits:
                 self.limits.note_dispatch("request", agent_id=agent.id)
+            # measured at dispatch for the efficiency harness (R-84): what this call delivered besides the packet files
+            delivered = inv.data.setdefault("delivered", {"prompt_bytes": 0, "framing_bytes": 0, "images": 0, "reply_bytes": 0, "rounds": 0})
+            delivered["prompt_bytes"] += len(req.prompt_text.encode("utf-8"))
+            delivered["framing_bytes"] += len((req.framing_text or "").encode("utf-8"))
+            delivered["images"] += len(req.images)
+            delivered["rounds"] += 1
             res = adapter.invoke(req, cancel_event=cancel_event or self.cancel_event)
+            delivered["reply_bytes"] += len((res.raw_text or "").encode("utf-8"))
             if count_toward_limits:
                 self.limits.note_complete("request", agent_id=agent.id, usage=res.usage)
             else:
@@ -562,13 +569,42 @@ class Engine:
         except IllegalTransition:
             pass
 
-    def start(self, *, attended: bool | None = None, component_name: str | None = None) -> Record:
+    def resolve_assignments(self, overrides: dict[str, str] | None = None) -> tuple[dict[str, str], dict[str, str]]:
+        """Merge the config key ``builder.assignments`` with explicit overrides (which win); validate roles and seats
+        strictly (an explicit override that names an unknown role or seat is an error, never guessed)."""
+        from .config import ASSIGNABLE_ROLES
+
+        merged = dict(self.config.assignments)
+        sources = {role: "config" for role in merged}
+        for role, seat in (overrides or {}).items():
+            if role not in ASSIGNABLE_ROLES:
+                raise EngineFailure(f"unknown assignment role {role!r}; expected one of {', '.join(ASSIGNABLE_ROLES)}")
+            if seat not in self._labels():
+                raise EngineFailure(f"assignment {role}={seat!r}: not a configured seat ({', '.join(self._labels())})")
+            merged[role] = seat
+            sources[role] = "cli"
+        return merged, sources
+
+    @staticmethod
+    def override_rationale(role: str, seat: str, source: str) -> str:
+        return (f"user override ({source}: {role}={seat}) (R-8); R-107 still applies: {seat} never reviews, verifies, "
+                f"or reassesses its own operation")
+
+    def start(self, *, attended: bool | None = None, component_name: str | None = None,
+              assignment_overrides: dict[str, str] | None = None) -> Record:
         if not self.preflight_reports:
             raise RuntimeError("preflight has not been run; run preflight before start (R-21)")
         blockers = {label: r["blockers"] for label, r in self.preflight_reports.items() if not r["ok"] and label != "I"}
         if blockers:
             raise RuntimeError("preflight blocks the run: " + json.dumps(blockers, ensure_ascii=False))
+        local_only = [label for label in self._labels()
+                      if not (self.preflight_reports.get(label) or {}).get("live") and getattr(self.adapters[label], "name", "") != "mock"]
+        if local_only:
+            raise EngineFailure(f"agent(s) {', '.join(local_only)} have only a local (free) preflight report: the live tiers were "
+                                "never run, so image reading, read-only enforcement, and sessions are unverified (R-21). "
+                                "Run `preflight --live` first; it spends provider usage and is never started implicitly.")
         attended = self.config.attended if attended is None else attended
+        overrides, override_sources = self.resolve_assignments(assignment_overrides)
         self.limits = LimitTracker(self.config.limits, cost_enforced_by_provider={
             label: self.adapters[label].declared_capabilities().get("cost_cap") == "yes" for label in self._labels()})
         self._seed_probe_spend(self.limits)
@@ -576,8 +612,10 @@ class Engine:
             "project_id": self.project.record.id, "attended": attended, "stage": "intake", "component_id": None,
             "stop_reason": None, "notes": [], "started_at": utc_now(), "limits": dict(self.config.limits),
             "blender_version": self.blender_version, "agents": {label: a.id for label, a in self.agents.items()},
+            "assignment_overrides": overrides, "assignment_override_sources": override_sources,
         })
-        run = self.store.upsert(run, actor="user", event="run.created")
+        run = self.store.upsert(run, actor="user", event="run.created",
+                                inputs={"assignment_overrides": overrides, "sources": override_sources} if overrides else None)
         comp = self._component(create=True, name=component_name)
         run.data["component_id"] = comp.id
         self.run = transition(self.store, run, "running", actor="engine", reason="start", context={"preflight_ok": True})
@@ -615,8 +653,10 @@ class Engine:
         return loaded
 
     def recover(self) -> dict[str, Any]:
-        """R-47: classify in-flight operations from records and files; never replay; stop if anything is uncertain."""
+        """R-47: classify in-flight operations from records, files, and live processes; never replay; return tasks and
+        findings the interruption left mid-flight to a state the loop can resume from; stop if anything is uncertain."""
         report = self.operations.reconcile_all(actor="engine:recovery")
+        tasks_reset, findings_reset = self._reset_interrupted(actor="engine:recovery", reason="restart")
         uncertain = [r for r in report if r["classification"] == "uncertain"]
         if self.run is not None and self.run.state in ("running", "waiting_for_provider", "rendering", "waiting_for_user", "paused"):
             if self.run.state != "paused":
@@ -629,7 +669,77 @@ class Engine:
             else:
                 self.run = transition(self.store, self.run, "paused", actor="engine:recovery",
                                       reason="recovered; resume to continue", stop_reason="user_pause")
-        return {"operations": report, "uncertain": len(uncertain)}
+        return {"operations": report, "uncertain": len(uncertain), "tasks_reset": tasks_reset, "findings_reset": findings_reset}
+
+    def _reset_interrupted(self, *, actor: str, reason: str) -> tuple[list[str], list[str]]:
+        """Tasks still ``in_progress`` and findings still ``correcting`` after an interruption (a crash, a failed or
+        uncertain operation) return to a resumable state with a recovery note, so the loop retries the work as a new
+        attempt against the unchanged base revision instead of assuming it happened (R-23, R-47)."""
+        tasks_reset: list[str] = []
+        for task in self.store.list("task", state="in_progress"):
+            ops = [self.store.get("operation", oid) for oid in task.data.get("op_ids") or []]
+            states = {o.state for o in ops if o is not None}
+            note = (f"interrupted ({reason}) while in progress; operations {sorted(states) or 'none'}; nothing from this task "
+                    "is assumed to have applied")
+            self._finish_task(task, "blocked", error=note, interrupted=True)
+            tasks_reset.append(task.id)
+        # R-44: an interrupted holder's pending writes are cancelled (quarantined above), so its grant is released and
+        # the retry acquires a fresh token bound to the unchanged base revision
+        holder = self.ownership.current("assembly")
+        if holder is not None:
+            owner_tasks = [t for t in self.store.list("task") if t.data.get("owner_agent_id") == holder.data["holder"]]
+            inflight = any(o.state in IN_FLIGHT_STATES for o in self.store.list("operation"))
+            if owner_tasks and owner_tasks[-1].state == "blocked" and not inflight:
+                self.ownership.release(holder.data["token"], actor=actor,
+                                       reason=f"holder's task {owner_tasks[-1].id} was interrupted ({reason}); released for the retry")
+        findings_reset: list[str] = []
+        for f in self.store.list("finding", state="correcting"):
+            attempt_id = (f.data.get("attempts") or [None])[-1]
+            attempt = self.store.get("correction_attempt", attempt_id) if attempt_id else None
+            op_ids: list[str] = []
+            if attempt is not None:
+                task = self.store.get("task", attempt.data.get("task_id", ""))
+                op_ids = list((task.data.get("op_ids") if task else None) or attempt.data.get("op_ids") or [])
+                if attempt.state in ("started", "uncertain") or attempt.state not in ("improved", "unchanged", "regressed"):
+                    attempt.state = "uncertain"
+                    attempt.data["op_ids"] = op_ids
+                    attempt.data["interrupted"] = reason
+                    self.store.upsert(attempt, actor=actor, event="correction_attempt.uncertain", run_id=self._run_id())
+                if task is not None and task.state == "in_progress":
+                    self._finish_task(task, "blocked", error=f"interrupted ({reason}) during correction of {f.id}", interrupted=True)
+                    tasks_reset.append(task.id)
+            ops = [self.store.get("operation", oid) for oid in op_ids]
+            outcomes = ", ".join(f"{o.id} {o.state}" for o in ops if o is not None) or "no operation was recorded"
+            note = {"at": utc_now(), "reason": reason, "task_id": attempt.data.get("task_id") if attempt else None,
+                    "attempt_id": attempt_id, "op_ids": op_ids,
+                    "note": f"correction attempt interrupted or uncertain ({outcomes}); the base revision is unchanged and "
+                            "the next attempt starts from it; nothing from the interrupted attempt is assumed to exist"}
+            f.state = "open"
+            f.data.setdefault("recovery_notes", []).append(note)
+            self.store.upsert(f, actor=actor, event="finding.reset_after_interruption", run_id=self._run_id(),
+                              inputs={"attempt_id": attempt_id, "op_ids": op_ids, "reason": reason})
+            findings_reset.append(f.id)
+        return tasks_reset, findings_reset
+
+    def _interrupted_ops_section(self, base_rev: Record) -> dict[str, str]:
+        """Packet section naming every operation attempted against ``base_rev`` that ended uncertain, cancelled, or
+        interrupted: never promoted, so the agent must not assume its edits exist (R-47)."""
+        lines: list[str] = []
+        for o in self.store.list("operation"):
+            if o.data.get("expected_base_revision_id") != base_rev.id:
+                continue
+            interrupted = o.state in ("uncertain", "cancelled") or (o.state == "failed" and o.data.get("recovery") == "interrupted")
+            if not interrupted:
+                continue
+            agent = o.data.get("agent_id")
+            label = next((lab for lab, a in self.agents.items() if a.id == agent), agent)
+            where = o.data.get("quarantine_dir")
+            lines.append(f"- {o.id} by agent {label}, intent: {o.data.get('intent')}; ended {o.state}: {o.data.get('error')}. "
+                         f"Staged output {'quarantined at ' + str(where) if where else 'none'}; never promoted; the base revision "
+                         f"{base_rev.id} is unchanged. Do not assume any of its edits exist; start from the evidence in this packet.")
+        if not lines:
+            return {}
+        return {"Interrupted operations against the current base revision (never applied)": "\n".join(lines)}
 
     def pause(self, user: str = "user") -> None:
         self._pause_requested = True
@@ -655,9 +765,67 @@ class Engine:
         rec = Record.new("feedback", {"text": text, "user": user, "received_at": utc_now(), "applied_at": None})
         return self.store.upsert(rec, actor=user, event="feedback.received")
 
+    def apply_limits(self, changes: dict[str, Any], *, actor: str) -> dict[str, Any]:
+        """Edit the configured limits (R-85, R-89): validated by the tracker, mirrored on the run record so a later
+        process continues with them, and journaled. Applied between steps or while the run is stopped."""
+        try:
+            applied = self.limits.apply_limits(changes)
+        except ValueError as exc:
+            raise EngineFailure(str(exc)) from None
+        self.config.limits.update(applied)
+        if self.run is not None:
+            self.run.data["limits"] = dict(self.limits.limits)
+            self.run.data["consumption"] = self.limits.status()
+            self.run = self.store.upsert(self.run, actor=actor, event="run.limits_changed", inputs={"changes": applied},
+                                         run_id=self._run_id())
+        else:
+            self.store.append_journal(actor=actor, event="limits.changed", inputs={"changes": applied})
+        self._emit("limits", changes=applied)
+        return applied
+
+    def _progress_key(self) -> tuple[Any, ...]:
+        """What counts as evidence-supported progress (R-88): completed pipeline stages, findings recorded, findings
+        closed or waived, reassessments done, a component ready for review. A correction that never verifies changes
+        nothing here; renders and committed revisions alone are not progress ("increasing detail is not progress")."""
+        tasks = self.store.list("task")
+        findings = self.store.list("finding")
+        comps = self.store.list("component")
+        return (
+            len([o for o in self.store.list("observation", state="valid")]),
+            len(self.store.list("brief")),
+            bool(self.run.data.get("plan_done")) if self.run else False,
+            len([t for t in tasks if t.data.get("kind") == "build" and t.state == "done"]),
+            len([t for t in tasks if t.data.get("kind") == "review" and t.state == "done"]),
+            len(findings),
+            len([f for f in findings if f.state in ("closed", "waived")]),
+            len([f for f in findings if f.data.get("reassessed")]),
+            len([c for c in comps if c.state == "ready_for_user_review"]),
+            len(self.store.list("acceptance", state="accepted_at_revision")),
+        )
+
+    def consume_controls(self, kinds: tuple[str, ...] = ("limits",)) -> dict[str, Any]:
+        """Apply queued limit changes outside the run loop (a stopped run, or the GUI while nothing runs)."""
+        out: dict[str, Any] = {"limits": {}, "errors": []}
+        for control in self.store.pop_controls(kinds=kinds):
+            if control.kind == "limits":
+                try:
+                    out["limits"].update(self.apply_limits(dict(control.payload.get("changes") or {}),
+                                                           actor=f"user:{control.payload.get('by', 'user')}"))
+                except EngineFailure as exc:
+                    out["errors"].append(str(exc))
+                    self.store.append_journal(actor="engine", event="limits.rejected", inputs={"error": str(exc),
+                                              "payload": control.payload}, run_id=self._run_id())
+        return out
+
     def _poll_controls(self) -> None:
         for control in self.store.pop_controls():
-            if control.kind == "pause":
+            if control.kind == "limits":
+                try:
+                    self.apply_limits(dict(control.payload.get("changes") or {}), actor=f"user:{control.payload.get('by', 'user')}")
+                except EngineFailure as exc:
+                    self.store.append_journal(actor="engine", event="limits.rejected", inputs={"error": str(exc),
+                                              "payload": control.payload}, run_id=self._run_id())
+            elif control.kind == "pause":
                 self._pause_requested = True
             elif control.kind == "cancel":
                 self.cancel_event.set()
@@ -698,6 +866,9 @@ class Engine:
                 break
             try:
                 self.step()
+                if self.run.state == "running" and self.limits.note_step(self._progress_key()):
+                    ok, reason, msg = self.limits.can_dispatch()
+                    raise LimitReached(reason or "stalled", msg)
             except LimitReached as exc:
                 self._stop("paused", exc.reason, exc.message)
                 break
@@ -810,17 +981,34 @@ class Engine:
     def _overrides(self) -> dict[str, str]:
         return dict((self.run.data.get("assignment_overrides") or {}) if self.run else {})
 
+    def _override_rationale(self, key: str, seat: str) -> str:
+        sources = (self.run.data.get("assignment_override_sources") or {}) if self.run else {}
+        return self.override_rationale(key, seat, sources.get(key, "user"))
+
+    def assignment_overrides(self) -> list[dict[str, str]]:
+        """Every override in force on the run, with its source and rationale (shown by status and the Stage card)."""
+        overrides = self._overrides()
+        sources = (self.run.data.get("assignment_override_sources") or {}) if self.run else {}
+        return [{"role": role, "seat": seat, "source": sources.get(role, "user"),
+                 "rationale": self.override_rationale(role, seat, sources.get(role, "user"))}
+                for role, seat in overrides.items()]
+
     def _assign(self, kind: str, *, exclude: str | None = None) -> tuple[str, str]:
         """Role assignment is code (R-8, R-12): the rules live in ``builder.roles``."""
         role = {"brief": "planner", "plan": "planner", "build": "builder"}.get(kind, "builder")
         overrides = self._overrides()
         labels = [x for x in self._labels() if x != exclude]
-        builds = [t for t in self.store.list("task") if t.data.get("kind") == "build"]
+        # an interrupted build (blocked task, nothing promoted) is retried by the same seat: it does not advance the
+        # alternation, and its retry packet names the interruption (R-47, R-57)
+        builds = [t for t in self.store.list("task") if t.data.get("kind") == "build"
+                  and not (t.state == "blocked" and t.data.get("interrupted"))]
         try:
             a = assign_role(role, seats=labels, overrides={role: overrides[kind]} if kind in overrides else None,
                             build_count=len(builds))
         except RoleConflict as exc:
             raise EngineFailure(str(exc)) from None
+        if a.rationale == "user override":
+            return a.seat, self._override_rationale(kind, a.seat)
         return a.seat, a.rationale
 
     def _role_of(self, role: str, *, author: str | None = None, proposer: str | None = None,
@@ -831,7 +1019,9 @@ class Engine:
             a = assign_role(role, seats=self._labels(), overrides={role: overrides[role]} if role in overrides else None,
                             author=author, proposer=proposer, reassigned_to=reassigned_to)
         except RoleConflict as exc:
-            raise EngineFailure(str(exc)) from None
+            raise EngineFailure(f"{exc}; assignment override {role}={overrides.get(role)} cannot be honoured for this task") from None
+        if a.rationale == "user override":
+            return a.seat, self._override_rationale(role, a.seat)
         return a.seat, a.rationale
 
     def _bboxes(self, rev: Record) -> dict[str, Any]:
@@ -1248,6 +1438,7 @@ class Engine:
     def _stage_build(self) -> None:
         comp = self._component()
         rev = self._latest_revision()
+        self._reset_interrupted(actor="engine", reason="build retried")   # a blocked holder releases its grant (R-44, R-47)
         label, rationale = self._assign("build")
         agent = self.agents[label]
         task = self._new_task("build", comp, label, rationale,
@@ -1268,20 +1459,22 @@ class Engine:
             brief_text=self._brief_text(), evidence=evidence, open_findings=self._open_findings(comp),
             constraints=list(comp.data.get("interfaces") or []) + [f"User feedback: {t}" for t in self.run.data.get("user_feedback", [])],
             withheld=[], schema_name="task_result", schema=SCHEMAS["task_result"], changed=changed,
-            extra_sections={"Construction plan hypotheses": json.dumps(comp.data.get("hypotheses") or [], ensure_ascii=False)},
+            extra_sections={"Construction plan hypotheses": json.dumps(comp.data.get("hypotheses") or [], ensure_ascii=False),
+                            **self._interrupted_ops_section(rev)},
             records={"parts": [p for p in self.store.list("part") if p.id in (comp.data.get("part_ids") or [])]})
         task = self._finish_task(task, "in_progress", packet_id=packet.id)
         outcome, inv = self._invoke(label, "build_task", packet=packet, pdir=pdir, schema_name="task_result",
                                     images=self._images_of(packet, pdir),
                                     extra={"task_id": task.id, "component_id": comp.id, "part_ids": comp.data.get("part_ids")})
         if not outcome.ok:
-            self._finish_task(task, "blocked", error=f"malformed build output: {outcome.errors}", invocation_id=inv.id)
+            self._finish_task(task, "blocked", error=f"malformed build output: {outcome.errors}", invocation_id=inv.id, interrupted=True)
             raise EngineFailure(f"build task {task.id}: agent {label} returned malformed output ({inv.data['outcome']})")
         result = outcome.value
         ops = self._execute_operations(task, result.get("operations") or [], label, own.data["token"])
         failed = [o for o in ops if o.state != "committed"]
         if failed:
-            self._finish_task(task, "blocked", result=result, error=f"operation {failed[0].id} {failed[0].state}: {failed[0].data.get('error')}")
+            self._finish_task(task, "blocked", result=result, interrupted=True,
+                              error=f"operation {failed[0].id} {failed[0].state}: {failed[0].data.get('error')}")
             raise EngineFailure(f"build task {task.id}: operation {failed[0].id} {failed[0].state}: {failed[0].data.get('error')}")
         self._finish_task(task, "done", result=result, invocation_id=inv.id, committed_ops=[o.id for o in ops])
         self._tag(label, f"self_assessment:{comp.id}:{task.id}")
@@ -1421,13 +1614,18 @@ class Engine:
         if reassess and not reassess[0].data.get("reassessed"):
             self._set_stage("reassess")
             return
+        if any(f.state == "correcting" for f in open_findings):
+            # a correction the loop never verified (failed or uncertain operation, malformed output, restart): the
+            # finding returns to open with a note and the next attempt starts from the unchanged base (R-23, R-47)
+            self._reset_interrupted(actor="engine", reason="correction interrupted")
+            open_findings = self._open_findings(comp)
         candidates = [f for f in open_findings if f.state in ("open", "reassess")]
         if not candidates:
             self._set_stage("gate")
             return
         finding = candidates[0]
         if not self.limits.correction_allowed(finding.id):
-            self._set_stage("done")
+            # the stage stays at correct: raising attempts_per_finding and resuming retries with the reassessed approach
             self._stop("paused", "attempt_limit",
                        f"finding {finding.id} reached attempts_per_finding={self.limits.limits.get('attempts_per_finding')} "
                        f"(reassessment: {finding.data.get('reassessment')}); raise the limit and resume to try the "
@@ -1481,6 +1679,7 @@ class Engine:
             open_findings=[finding], constraints=list(comp.data.get("interfaces") or []), withheld=[],
             schema_name="task_result", schema=SCHEMAS["task_result"],
             changed=changed_since(self.store, int(self.sessions.persistent(agent.id, provider=agent.data["provider"]).data.get("last_journal_seq") or 0)),
+            extra_sections=self._interrupted_ops_section(rev) or None,
             records={"findings": [finding]})
         task = self._finish_task(task, "in_progress", packet_id=packet.id)
         outcome, inv = self._invoke(corrector, "correction_task", packet=packet, pdir=pdir, schema_name="task_result",
@@ -1864,6 +2063,8 @@ class Engine:
             "stop_reason": self.run.data.get("stop_reason") if self.run else None,
             "stage": self.run.data.get("stage") if self.run else None,
             "attended": self.run.data.get("attended") if self.run else self.config.attended,
+            "assignment_overrides": self.assignment_overrides(),
+            "revision_id": self.operations.latest_revision().id if self.operations.latest_revision() else None,
             "components": comps, "consumption": self.limits.status(), "agents": agents, "contributions": contributions,
             "findings": self.findings(), "remaining_discrepancies": open_findings, "uncertainties": uncertainties,
             "questions_for_user": (self.run.data.get("questions_for_user") if self.run else []) or [],

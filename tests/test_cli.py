@@ -233,3 +233,89 @@ def test_help_lists_every_r90_verb():
     for verb in ("new", "open", "preflight", "start", "pause", "resume", "cancel", "findings", "accept", "reopen",
                  "checkpoint", "status", "intake", "preset", "journal"):
         assert verb in text, verb
+
+
+def test_limits_verb_shows_and_edits_limits_on_a_stopped_run(workdir, refs):
+    wf = workdir / "wf"
+    runner = FakeRunner()
+    runner.identity_map = [{"alloy_id": p, "type": "OBJECT"} for p in PARTS]
+    assert run_cli("new", "--workflow-dir", wf, "--name", "Lamp", "--asset", "Lamp", "--first-component", "Head")[0] == 0
+    assert run_cli("intake", wf, "--ref", refs[0], "--labels", "front")[0] == 0
+    _seed_revision(wf, runner)
+    play = write_screenplay(workdir / "play.json")
+    cfg = workdir / "limits.yaml"
+    cfg.write_text("builder:\n  limits: {max_requests: 2}\n", encoding="utf-8")
+    assert run_cli("preflight", wf, "--live", "--mock", play, "--config", cfg, runner=runner)[0] == 0
+    code, out = run_cli("start", wf, "--mock", play, "--max-steps", "60", "--config", cfg, runner=runner)
+    assert code == 1 and "budget_limit" in out
+    code, out = run_cli("limits", wf, "--config", cfg)
+    assert code == 0 and "max_requests = 2" in out and "steps_without_progress" in out
+    code, out = run_cli("limits", wf, "--set", "max_requests=0", "--set", "stall_steps=30", "--config", cfg)
+    assert code == 0 and "max_requests = 0" in out and "applied" in out
+    code, out = run_cli("limits", wf, "--set", "max_tokens=1", "--config", cfg)
+    assert code == 2 and "unknown limit" in out
+    code, out = run_cli("resume", wf, "--mock", play, "--max-steps", "60", "--config", cfg, runner=runner)
+    assert code == 0 and "ready_for_user_review" in out, out
+
+
+def test_local_only_preflight_report_never_satisfies_start_with_real_adapters(workdir, refs, monkeypatch):
+    """R-18/R-21: a report whose live tiers were never run is not a live preflight; `start` with real adapters must
+    still point at `preflight --live` (found while writing the docs: the cache-key match alone accepted it)."""
+    import sys
+
+    from builder.providers.claude import ClaudeAdapter
+    from builder.providers.codex import CodexAdapter
+
+    fake = Path(__file__).with_name("_fake_cli.py")
+    monkeypatch.setenv("ALLOY_FAKE_CLI_RECORD", str(workdir / "calls.jsonl"))
+    made = {}
+
+    def factory(cfg, args):
+        if not made:
+            made["A"] = ClaudeAdapter(argv_head=[sys.executable, str(fake), "claude"])
+            made["B"] = CodexAdapter(argv_head=[sys.executable, str(fake), "codex"])
+        return dict(made)
+
+    def run(*argv):
+        out = io.StringIO()
+        code = cli.main([str(a) for a in argv], runner_factory=lambda cfg, project: runner, adapters_factory=factory, stdout=out)
+        return code, out.getvalue()
+
+    wf = workdir / "wf"
+    runner = FakeRunner()
+    runner.identity_map = [{"alloy_id": p, "type": "OBJECT"} for p in PARTS]
+    cfg = workdir / "config.yaml"
+    cfg.write_text("default_ai: claude\nais: {}\nbuilder:\n  agents:\n"
+                   "    A: {provider: claude, model: fable, reasoning: max}\n"
+                   "    B: {provider: codex, model: gpt-6-astra, reasoning: xhigh}\n", encoding="utf-8")
+    assert run("new", "--workflow-dir", wf, "--name", "Lamp", "--asset", "Lamp")[0] == 0
+    assert run("intake", wf, "--ref", refs[0], "--labels", "front")[0] == 0
+    _seed_revision(wf, runner)
+    code, out = run("preflight", wf, "--config", cfg)                 # local tiers only: free
+    assert code == 0 and "not_run" in out
+    code, out = run("start", wf, "--config", cfg)
+    assert code == 2 and "--live" in out and "spends" in out
+    with Project.open(wf) as prj:
+        assert prj.store.list("run") == []
+
+
+def test_interrupt_handler_pauses_first_and_cancels_second():
+    """Design 9.1: Ctrl+C requests a pause at the next safe boundary; a second Ctrl+C requests cancel."""
+    from builder.cli import interrupt_handler
+
+    class Eng:
+        def __init__(self):
+            self.paused = 0
+            import threading
+            self.cancel_event = threading.Event()
+
+        def pause(self, user="user"):
+            self.paused += 1
+
+    said = []
+    eng = Eng()
+    handler = interrupt_handler(eng, said.append)
+    handler(2, None)
+    assert eng.paused == 1 and not eng.cancel_event.is_set() and "pause" in said[-1]
+    handler(2, None)
+    assert eng.cancel_event.is_set() and "cancel" in said[-1]

@@ -37,6 +37,7 @@ builder:
     max_regenerations_per_view: 3
     import_dir: ""
   image_generation: {seat: manual, vendor: chatgpt, model: ""}
+  assignments: {build: B}
   presets:
     demo:
       name: "Demo"
@@ -101,6 +102,7 @@ def test_builder_key_survives_a_settings_editor_save(root, config_path):
     assert b["presets"]["demo"]["target_region"] == {"name": "lower-left", "bbox": None}
     assert b["provider_timeouts"]["cancel_probe_after"] == 8 and b["blender"]["deadlines"]["fixture"] == 300
     assert b["workflow_root"] == ""
+    assert b["assignments"] == {"build": "B"}          # per-run role overrides (R-8) survive too
     assert "keep this comment" in text
     assert saved["ais"]["claude"]["command"] == "claude -p {message}" and saved["default_ai"] == "claude"
     # the builder loader reads the saved file as before

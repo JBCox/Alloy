@@ -1,5 +1,6 @@
 """Settings Editor for Alloy configuration."""
 
+import copy
 import os
 import subprocess
 import platform
@@ -11,12 +12,60 @@ from typing import Optional
 
 import yaml
 
+from config import Config
 from .styles import COLORS, FONTS, PAD, WINDOW_SIZES, apply_dark_theme
 from .widgets import (
     AIConfigCard, LabeledCheckbox, LabeledDropdown, LabeledSpinbox,
     LabeledEntry, LabeledFileEntry, ScrollableFrame, YAMLPreview
 )
 from .tooltips import ToolTip, TOOLTIPS
+
+# ruamel.yaml round-trips comments; plain PyYAML strips them. It is optional so
+# the CLI keeps working without it - the merge below is what actually protects
+# the user's data, comment preservation is a bonus when the library is present.
+try:
+    from ruamel.yaml import YAML as _RuamelYAML
+except ImportError:
+    _RuamelYAML = None
+
+# Top-level sections the editor owns completely: it can add, rename and delete
+# entries, so merging would resurrect the ones the user just deleted.
+REPLACE_SECTIONS = ("custom_templates",)
+
+
+def overwrite(base, value):
+    """Make ``base`` equal ``value``, reusing ``base``'s containers in place.
+
+    Used for sections the editor owns outright: entries missing from ``value``
+    are deleted rather than merged back in. Reusing the container instead of
+    assigning a new one keeps ruamel's comments attached to it.
+    """
+    if isinstance(base, dict) and isinstance(value, dict):
+        for stale in [k for k in base if k not in value]:
+            del base[stale]
+        for key, item in value.items():
+            base[key] = overwrite(base[key], item) if key in base else item
+        return base
+    return value
+
+
+def deep_merge(base: dict, updates: dict, replace_keys: tuple = ()) -> dict:
+    """Merge ``updates`` into ``base`` in place and return ``base``.
+
+    Keys present in ``base`` but absent from ``updates`` are kept, so sections
+    the settings editor doesn't expose (routing, per-AI profiles/weights, ...)
+    survive a save. ``replace_keys`` names sections that are overwritten rather
+    than merged, and applies to the top level only. Mutates in place so ruamel's
+    comment metadata on ``base`` is retained.
+    """
+    for key, value in updates.items():
+        if key in replace_keys:
+            base[key] = overwrite(base[key], value) if key in base else value
+        elif isinstance(value, dict) and isinstance(base.get(key), dict):
+            deep_merge(base[key], value)
+        else:
+            base[key] = value
+    return base
 
 
 class SettingsEditor(tk.Toplevel):
@@ -25,7 +74,7 @@ class SettingsEditor(tk.Toplevel):
     def __init__(self, parent=None, config_path: Path = None):
         super().__init__(parent)
 
-        self.config_path = config_path or Path.cwd() / "config.yaml"
+        self.config_path = config_path or Config.get_config_path()
         self.config_data = {}
         self.ai_cards = {}
         self.modified = False
@@ -394,7 +443,7 @@ class SettingsEditor(tk.Toplevel):
             content,
             label="Save directory:",
             default=context.get("save_path", ""),
-            mode="directory",
+            is_directory=True,
             on_change=self._mark_modified
         )
         self.save_path.pack(anchor="w", fill="x", pady=PAD["small"])
@@ -655,7 +704,7 @@ class SettingsEditor(tk.Toplevel):
         )
         if path:
             try:
-                config = self._collect_config()
+                config = self._merged_config()
                 with open(path, "w", encoding="utf-8") as f:
                     yaml.dump(config, f, default_flow_style=False, sort_keys=False)
                 tk.messagebox.showinfo("Export Complete", f"Configuration exported to:\n{path}")
@@ -1172,18 +1221,65 @@ class SettingsEditor(tk.Toplevel):
                 return error
         return None
 
+    def _merged_config(self, collected: Optional[dict] = None) -> dict:
+        """Widget values merged onto the config as loaded from disk.
+
+        The editor only exposes a subset of config.yaml. Building a fresh dict
+        from the widgets would drop everything else (routing rules, per-AI
+        weights/fallbacks/profiles, per-mode checkpoints), so merge instead.
+        """
+        if collected is None:
+            collected = self._collect_config()
+        base = copy.deepcopy(self.config_data) if isinstance(self.config_data, dict) else {}
+        return deep_merge(base, collected, REPLACE_SECTIONS)
+
     def _save_to_file(self):
-        """Save config to file."""
-        config = self._collect_config()
+        """Save config to file, preserving settings the editor doesn't expose."""
+        collected = self._collect_config()
+        merged = self._merged_config(collected)
 
         # Ensure directory exists
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(self.config_path, "w", encoding="utf-8") as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        if not self._save_preserving_comments(collected):
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                yaml.dump(merged, f, default_flow_style=False, sort_keys=False)
+
+        # Keep the in-memory copy in sync so a second save in the same session
+        # (Apply, then Save) merges onto what is now on disk.
+        self.config_data = merged
 
         self.modified = False
         self.title("Alloy Settings")
+
+    def _save_preserving_comments(self, collected: dict) -> bool:
+        """Round-trip the file through ruamel.yaml so its comments survive.
+
+        config.yaml ships with setup instructions for each AI; a plain dump
+        would delete them. Returns False when round-tripping isn't possible
+        (library missing, no existing file, unreadable file) so the caller
+        falls back to a plain dump.
+        """
+        if _RuamelYAML is None or not self.config_path.exists():
+            return False
+
+        try:
+            ruamel = _RuamelYAML()
+            ruamel.preserve_quotes = True
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                document = ruamel.load(f)
+
+            if not isinstance(document, dict):
+                return False
+
+            deep_merge(document, collected, REPLACE_SECTIONS)
+
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                ruamel.dump(document, f)
+            return True
+        except Exception:
+            # Never let comment preservation cost the user their settings.
+            return False
 
     def _apply(self):
         """Apply changes without closing."""

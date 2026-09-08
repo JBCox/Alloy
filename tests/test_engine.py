@@ -11,7 +11,7 @@ import pytest
 from PIL import Image
 
 from builder.config import BuilderConfig
-from builder.engine import Engine
+from builder.engine import Engine, EngineFailure
 from builder.operations import Operations
 from builder.ownership import OwnershipManager
 from builder.project import Project
@@ -383,3 +383,71 @@ def test_preflight_probe_spend_counts_toward_the_monetary_cap(project):
     eng2 = _engine(project, _adapters(), cfg=_config(limits={"max_cost_usd": 2.0}))
     eng2.load_preflight()
     assert abs(eng2.limits.status()["external"]["preflight_probe"]["measured"] - 2.3) < 1e-6
+
+
+def test_repeated_unverified_corrections_stop_as_stalled_not_forever(project):
+    """R-85/R-88: with unlimited attempts and a verifier that never sees improvement the loop must stop with the
+    ``stalled`` reason after ``stall_steps`` steps without evidence-supported progress, never run to max_steps."""
+    adapters = _adapters(a_extra={"verification": [verification("unchanged")] * 20},
+                         b_extra={"correction_task": [build_result("ALLOY.get('p_bracket').location.z -= 0.001", part="p_bracket")] * 20})
+    eng = _engine(project, adapters, cfg=_config(limits={"attempts_per_finding": 0, "stall_steps": 6, "max_requests": 0}))
+    eng.preflight(live=True)
+    eng.start()
+    status = eng.run_until_stop(max_steps=200)
+    assert status["stop_reason"] == "stalled" and status["execution"] == "paused"
+    assert "progress" in status["notes"][-1]["note"]
+    attempts = project.store.list("correction_attempt")
+    assert 2 <= len(attempts) <= 4                  # bounded by the stall limit, not by max_steps
+    assert status["consumption"]["steps_without_progress"] >= 6
+
+
+def test_limits_can_be_raised_after_a_stop_and_through_a_control_request(project):
+    adapters = _adapters()
+    eng = _engine(project, adapters, cfg=_config(limits={"max_requests": 2, "attempts_per_finding": 2}))
+    eng.preflight(live=True)
+    eng.start()
+    status = eng.run_until_stop(max_steps=40)
+    assert status["stop_reason"] == "budget_limit"
+    applied = eng.apply_limits({"max_requests": 3}, actor="user:josh")
+    assert applied == {"max_requests": 3}
+    assert eng.run.data["limits"]["max_requests"] == 3 and eng.limits.limits["max_requests"] == 3
+    assert any(e.event == "run.limits_changed" and e.inputs.get("changes") == {"max_requests": 3} for e in project.store.journal())
+    # a change queued from another process is applied at the next safe boundary (R-59, R-85)
+    project.store.push_control("limits", {"changes": {"max_requests": 0}, "by": "josh"})
+    eng.resume(user="user:josh")
+    status = eng.run_until_stop(max_steps=60)
+    assert status["stop_reason"] == "ready_for_user_review", status["notes"]
+    assert status["consumption"]["limits"]["max_requests"]["value"] == 0
+    with pytest.raises(EngineFailure, match="unknown limit"):
+        eng.apply_limits({"nope": 1}, actor="user:josh")
+
+
+def test_raising_the_attempt_limit_and_resuming_runs_the_materially_different_approach(project):
+    """R-88/R-89: the attempt_limit stop keeps the run at the correction stage so that raising the limit and resuming
+    tries the reassessed approach; found on real Blender when the stage had been set to done."""
+    adapters = _adapters(
+        a_extra={"verification": [verification("unchanged"), verification("unchanged")],
+                 "reassessment": [{"cause": "geometry", "materially_different_approach": "seat the bracket on the housing top",
+                                   "evidence_gap": False}],
+                 "correction_task": [build_result("ALLOY.get('p_bracket').location.z -= 0.15", part="p_bracket")]},
+        b_extra={"correction_task": [build_result("ALLOY.get('p_bracket').location.z -= 0.01", part="p_bracket"),
+                                     build_result("ALLOY.get('p_bracket').location.z -= 0.01", part="p_bracket")],
+                 "verification": [verification("improved")]},        # B verifies A's reassigned correction (never the author)
+    )
+    eng = _engine(project, adapters)
+    eng.preflight(live=True)
+    eng.start()
+    status = eng.run_until_stop(max_steps=80)
+    assert status["stop_reason"] == "attempt_limit" and status["stage"] != "done"
+    f = project.store.list("finding")[0]
+    assert f.state == "reassess" and f.data["reassigned_to"] == "ag_A"
+    eng.apply_limits({"attempts_per_finding": 3}, actor="user:josh")
+    eng.resume(user="user:josh")
+    status = eng.run_until_stop(max_steps=80)
+    assert status["stop_reason"] == "ready_for_user_review", status["notes"]
+    f = project.store.get("finding", f.id)
+    assert f.state == "closed" and len(f.data["attempts"]) == 3
+    third = project.store.require("correction_attempt", f.data["attempts"][-1])
+    assert third.data["agent_id"] == "ag_A"          # the reassigned seat implemented the different approach
+    packet = next(i for i in adapters["A"].invocations if i.purpose == "correction_task")
+    assert "materially different approach" in (Path(packet.packet_dir) / "PACKET.md").read_text(encoding="utf-8")

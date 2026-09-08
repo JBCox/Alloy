@@ -15,6 +15,7 @@ class FakeRunner:
         self.calls: list[str] = []
         self.apply_outcome = "ok"
         self.validate_ok = True
+        self.validate_unmapped: list[str] = []      # geometry without alloy_id reported by validate (source register)
         self.render_outcome = "ok"
         self.identity_map = [{"alloy_id": "p_base", "type": "OBJECT"}, {"alloy_id": "p_cap", "type": "OBJECT"}]
         self.measure_data = {"bboxes": {}, "distances": [], "ratios": {}, "overlaps": [], "limitations": ["fake"]}
@@ -34,7 +35,7 @@ class FakeRunner:
                 "engines_listed": ["BLENDER_WORKBENCH", "BLENDER_EEVEE"], "executable": "fake"}
 
     def apply(self, base_blend, out_blend, script_path, *, op_id, declared_effects, deadline_s=None, work_dir=None,
-              cancel_event=None):
+              cancel_event=None, on_spawn=None):
         self.calls.append(f"apply:{op_id}")
         out = Path(out_blend)
         if self.apply_outcome == "ok":
@@ -54,8 +55,9 @@ class FakeRunner:
 
     def validate(self, blend, expectations, *, op_id, work_dir=None):
         self.calls.append(f"validate:{op_id}")
-        data = {"identity_map": self.identity_map, "deleted": [], "duplicates": [], "unmapped": [], "orphans": [],
-                "missing_assets": [], "external_assets": [], "reopened": True}
+        data = {"identity_map": self.identity_map, "deleted": [], "duplicates": [], "unmapped": list(self.validate_unmapped),
+                "orphans": [], "missing_assets": [], "external_assets": [], "reopened": True,
+                "object_count": len(self.identity_map) + len(self.validate_unmapped)}
         if self.validate_ok:
             return self._result(op_id, "ok", data)
         data["duplicates"] = ["p_cap"]

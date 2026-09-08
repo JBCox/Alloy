@@ -36,6 +36,9 @@ class LimitTracker:
         self.max_invocation_cost: dict[str, float] = {}     # agent id -> largest single-invocation cost reported (measured or estimated)
         # spend outside the modeling requests (preflight probes) that still counts toward the monetary cap
         self.external_costs: dict[str, dict[str, float | int]] = {}
+        # stall detection (R-85, R-88): consecutive loop steps whose progress key did not change
+        self.steps_without_progress = 0
+        self.last_progress_key: Any = None
 
     def restore(self, snapshot: dict[str, Any] | None) -> None:
         """Continue counting from a persisted ``status()`` snapshot (restart, or a second process)."""
@@ -56,6 +59,46 @@ class LimitTracker:
                                    "unknown_invocations": int(v.get("unknown_invocations") or 0)}
                                for k, v in (snapshot.get("external") or {}).items()}
         self.started = self._now() - float(snapshot.get("elapsed_s") or 0.0)
+        self.steps_without_progress = int(snapshot.get("steps_without_progress") or 0)
+        key = snapshot.get("last_progress_key")
+        self.last_progress_key = tuple(key) if isinstance(key, list) else key
+
+    def apply_limits(self, changes: dict[str, Any]) -> dict[str, Any]:
+        """Edit limits while a run is stopped or between steps (R-85, R-89). Names must exist; values are numbers,
+        never negative; zero means unlimited. A rejected batch changes nothing. Returns the coerced changes."""
+        coerced: dict[str, Any] = {}
+        for name, value in (changes or {}).items():
+            if name not in DEFAULT_LIMITS:
+                raise ValueError(f"unknown limit {name!r}; known: {', '.join(DEFAULT_LIMITS)}")
+            default = DEFAULT_LIMITS[name]
+            if isinstance(value, bool):
+                raise ValueError(f"{name}: expected a number, got a boolean")
+            try:
+                num = float(value) if isinstance(default, float) else int(float(value)) if not isinstance(value, str) else int(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"{name}: expected a number, got {value!r}") from None
+            if num < 0:
+                raise ValueError(f"{name}: a negative limit is not allowed ({num}); zero means unlimited")
+            coerced[name] = num
+        self.limits.update(coerced)
+        return coerced
+
+    # --- stall detection --------------------------------------------------------
+
+    def note_step(self, progress_key: Any) -> bool:
+        """Record one loop step. ``progress_key`` summarises evidence-supported progress (findings closed, stages
+        completed); an unchanged key is a step without progress. Returns True when the stall limit is reached."""
+        key = tuple(progress_key) if isinstance(progress_key, (list, tuple)) else progress_key
+        if self.last_progress_key is None or key != self.last_progress_key:
+            self.last_progress_key = key
+            self.steps_without_progress = 0
+        else:
+            self.steps_without_progress += 1
+        return self.stalled()
+
+    def stalled(self) -> bool:
+        cap = int(self.limits.get("stall_steps") or 0)
+        return cap > 0 and self.steps_without_progress >= cap
 
     # --- accounting ---------------------------------------------------------------
 
@@ -137,6 +180,10 @@ class LimitTracker:
         minutes = float(self.limits.get("wall_clock_minutes") or 0)
         if minutes > 0 and self.elapsed_s() > minutes * 60:
             return False, "time_limit", f"wall clock limit of {minutes:g} min reached ({self.elapsed_s() / 60:.1f} min elapsed)"
+        if self.stalled():
+            return False, "stalled", (f"{self.steps_without_progress} consecutive step(s) without evidence-supported progress "
+                                      f"(no finding closed or waived, no stage completed) reached stall_steps="
+                                      f"{self.limits.get('stall_steps')}; increasing detail is not progress (R-88)")
         max_requests = int(self.limits.get("max_requests") or 0)
         total_requests = self.requests_inflight + self.requests_completed
         if kind != "render" and max_requests > 0 and total_requests >= max_requests:
@@ -211,4 +258,6 @@ class LimitTracker:
             "findings_at_attempt_limit": [f for f in self._correction_attempts if not self.correction_allowed(f)],
             "per_agent": dict(self.per_agent),
             "external": {k: dict(v) for k, v in self.external_costs.items()},
+            "steps_without_progress": self.steps_without_progress,
+            "last_progress_key": list(self.last_progress_key) if isinstance(self.last_progress_key, tuple) else self.last_progress_key,
         }

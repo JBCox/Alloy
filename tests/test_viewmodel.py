@@ -252,3 +252,45 @@ def test_session_concept_panel_data_prompts_candidates_and_both_verdicts(workdir
         assert cand["summary"] == "consistent" and snap["concept"]["coverage"]["front"]["status"] == "candidates"
     finally:
         sess.close(timeout=10)
+
+
+# --- Phase 4: reference regions and editable limits through the read model and session --------------------------------
+
+def test_snapshot_lists_reference_regions_in_original_pixels(project):
+    from builder.references import References
+
+    refs = References(project)
+    ref = refs.current()[0]
+    reg = refs.add_region(ref.id, "lower-left humanoid", [10, 12, 50, 40], purpose="target_region")
+    eng = Engine(project, _config(), adapters=_adapters(), runner=_runner())
+    snap = snapshot(eng)
+    entry = next(r for r in snap["references"] if r["id"] == ref.id)
+    assert entry["regions"] == [{"id": reg.id, "name": "lower-left humanoid", "bbox": [10, 12, 50, 40], "purpose": "target_region",
+                                 "space": "original_pixels"}]
+    other = next(r for r in snap["references"] if r["id"] != ref.id)
+    assert other["regions"] == []
+
+
+def test_session_add_region_and_set_limits_run_on_the_worker(session, workdir):
+    session.open(workdir / "wf")
+    snap = _drain(session.events, until="snapshot")[-1][1]
+    ref_id = snap["references"][0]["id"]
+    session.add_region(ref_id, "cap", [5, 5, 40, 30], purpose="detail_crop", user="josh")
+    msgs = _drain(session.events, until="snapshot")
+    assert msgs[1][0] == "done" and msgs[1][1] == "add_region" and msgs[1][2]["region_id"].startswith("reg_")
+    entry = next(r for r in msgs[-1][1]["references"] if r["id"] == ref_id)
+    assert entry["regions"][0]["bbox"] == [5, 5, 40, 30] and entry["regions"][0]["purpose"] == "detail_crop"
+    session.add_region(ref_id, "off", [500, 500, 10, 10], purpose="target_region", user="josh")
+    msgs = _drain(session.events, until="error")
+    assert msgs[-1][1] == "add_region" and "outside" in msgs[-1][2]
+    assert session.events.get(timeout=10)[0] == "snapshot"        # the snapshot published after the failed job
+    # limits: applied on the worker and visible in the next snapshot; a bad name is an error, never a silent default
+    session.set_limits({"max_requests": "7", "stall_steps": 3}, user="josh")
+    msgs = _drain(session.events, until="snapshot")
+    done = next(m for m in msgs if m[0] == "done")                 # the engine's "limits" event precedes it
+    assert done[2]["applied"] == {"max_requests": 7, "stall_steps": 3}
+    lim = msgs[-1][1]["consumption"]["limits"]
+    assert lim["max_requests"]["value"] == 7 and lim["stall_steps"]["value"] == 3
+    session.set_limits({"max_tokens": 1}, user="josh")
+    msgs = _drain(session.events, until="error")
+    assert "unknown limit" in msgs[-1][2]

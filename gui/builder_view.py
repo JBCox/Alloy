@@ -32,7 +32,7 @@ from typing import Any, Callable
 
 from PIL import Image, ImageTk
 
-from builder.config import BuilderConfig
+from builder.config import DEFAULT_LIMITS, BuilderConfig
 from builder.viewmodel import BuilderSession, overlay_rects
 
 from .styles import COLORS, FONTS, PAD, apply_dark_theme
@@ -41,6 +41,8 @@ from .tooltips import ToolTip
 POLL_MS = 50
 WINDOW_SIZE = (1560, 940)
 PANE_SIZE = (430, 320)
+CONCEPT_PANE_SIZE = (320, 240)          # the anchor/candidate pair: wide enough to compare silhouettes
+SASH_FRACTIONS = {"default": (0.28, 0.70), "concept": (0.16, 0.38)}   # left | centre | right column splits
 LIGHT = "Light.TFrame"
 ATTENDED_HELP = ("Attended (default): whole-model planning and blockout come first, then the run stops for your acceptance "
                  "before advancing past a detailed component (R-76). Unattended: advances within the configured limits and "
@@ -128,6 +130,37 @@ def _scrolled(parent: tk.Misc, widget_factory: Callable[[tk.Misc], Any]) -> Any:
     return widget
 
 
+def _scroll_frame(parent: tk.Misc) -> tuple[ttk.Frame, ttk.Frame]:
+    """A vertically scrollable container: returns (outer, inner). Cards pack into ``inner``; the outer frame is what the
+    caller packs. Used by tabs whose stacked cards can exceed the window height (the Run tab with its Limits card)."""
+    outer = ttk.Frame(parent)
+    canvas = tk.Canvas(outer, bg=COLORS["bg"], highlightthickness=0, bd=0)
+    vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=vsb.set)
+    canvas.grid(row=0, column=0, sticky="nsew")
+    vsb.grid(row=0, column=1, sticky="ns")
+    outer.rowconfigure(0, weight=1)
+    outer.columnconfigure(0, weight=1)
+    inner = ttk.Frame(canvas)
+    window = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+    def _inner_configured(event: Any = None) -> None:
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+    def _canvas_configured(event: Any) -> None:
+        canvas.itemconfigure(window, width=event.width)
+
+    def _wheel(event: Any) -> None:
+        canvas.yview_scroll(-int(event.delta / 120), "units")
+
+    inner.bind("<Configure>", _inner_configured)
+    canvas.bind("<Configure>", _canvas_configured)
+    for w in (canvas, inner):
+        w.bind("<MouseWheel>", _wheel)
+    outer.canvas = canvas  # type: ignore[attr-defined]
+    return outer, inner
+
+
 def _caption(parent: tk.Misc, textvariable: tk.StringVar, *, wraplength: int = 400) -> ttk.Label:
     return ttk.Label(parent, textvariable=textvariable, style="Builder.CardDim.TLabel", wraplength=wraplength, justify="left")
 
@@ -162,6 +195,11 @@ class ImagePane(ttk.Frame):
         self.source_size: tuple[int, int] = (0, 0)
         self._scale = 1.0
         self._origin = (0, 0)
+        # target-region selection by dragging (R-26, R-27): armed for one drag; the result is in ORIGINAL pixels
+        self.region_mode = False
+        self.on_region: Callable[[list[int]], None] | None = None
+        self._regions: list[dict[str, Any]] = []
+        self._drag_start: tuple[int, int] | None = None
         ttk.Label(self, textvariable=self.title_var, style="Builder.CardTitle.TLabel").pack(anchor="w")
         self._label = ttk.Label(self, textvariable=self.label_var, style="Builder.Card.TLabel", wraplength=size[0], justify="left")
         self._label.pack(anchor="w", pady=(0, PAD["xs"]))
@@ -170,6 +208,9 @@ class ImagePane(ttk.Frame):
         self._last_box: tuple[int, int] | None = None
         self._last_width: int | None = None
         self.canvas.bind("<Configure>", self._canvas_configured)
+        self.canvas.bind("<ButtonPress-1>", self._drag_begin)
+        self.canvas.bind("<B1-Motion>", self._drag_move)
+        self.canvas.bind("<ButtonRelease-1>", self._drag_end)
         # The caption sits in a strip of fixed height: its text depends on the scale, the scale on the canvas size,
         # and the canvas size must therefore never depend on the caption's line count (a Tk geometry loop otherwise).
         strip = ttk.Frame(self, style=LIGHT, height=(2 if compact else 4) * (FONTS["small"][1] + 6))
@@ -211,6 +252,7 @@ class ImagePane(ttk.Frame):
 
     def clear(self) -> None:
         self.current_render_id = self.current_reference_id = None
+        self._regions = []
         self._image = self._photo = None
         self.image_size = self.source_size = (0, 0)
         self.label_var.set("nothing selected")
@@ -223,6 +265,7 @@ class ImagePane(ttk.Frame):
             self.clear()
             return
         self.current_render_id, self.current_reference_id = render_id, None
+        self._regions = []
         label = (f"render {render['id']}  ·  revision {render['revision_id']}  ·  view {render['view_name']} ({render['mode']})  ·  "
                  f"evidence: {render['evidence_label']}")
         if render.get("part_id"):
@@ -245,12 +288,14 @@ class ImagePane(ttk.Frame):
             self.clear()
             return
         self.current_reference_id, self.current_render_id = reference_id, None
+        self._regions = list(ref.get("regions") or [])
         self.label_var.set(reference_label(ref))
         self._load(ref.get("file"))
 
     def show_reference_entry(self, ref: dict[str, Any]) -> None:
         """Show a reference dict directly (concept candidates and anchors)."""
         self.current_reference_id, self.current_render_id = ref["id"], None
+        self._regions = list(ref.get("regions") or [])
         self.label_var.set(reference_label(ref, compact=self.compact))
         self._load(ref.get("file"))
 
@@ -299,6 +344,66 @@ class ImagePane(ttk.Frame):
                                   f"the evidence file is unmodified")
         if self.measure_on:
             self._draw_measurements()
+        self._draw_regions()
+
+    # --- target regions (R-26, R-27) ------------------------------------------------------------------------
+
+    def canvas_to_original(self, x0: float, y0: float, x1: float, y1: float) -> list[int] | None:
+        """A canvas rectangle as ``[x, y, w, h]`` in the ORIGINAL image's pixels: the presentation scale and the
+        centring offset are undone and the result is clamped to the image. None when nothing is shown or empty."""
+        if self._image is None or self._scale <= 0:
+            return None
+        w, h = self._image.size
+        ox, oy = self._origin
+        ax, bx = sorted((x0, x1))
+        ay, by = sorted((y0, y1))
+        left = min(max(round((ax - ox) / self._scale), 0), w)
+        right = min(max(round((bx - ox) / self._scale), 0), w)
+        top = min(max(round((ay - oy) / self._scale), 0), h)
+        bottom = min(max(round((by - oy) / self._scale), 0), h)
+        if right - left <= 0 or bottom - top <= 0:
+            return None
+        return [int(left), int(top), int(right - left), int(bottom - top)]
+
+    def _drag_begin(self, event: Any) -> None:
+        if not self.region_mode or self._image is None:
+            return
+        self._drag_start = (int(event.x), int(event.y))
+        self.canvas.delete("rubber")
+
+    def _drag_move(self, event: Any) -> None:
+        if not self.region_mode or self._drag_start is None:
+            return
+        self.canvas.delete("rubber")
+        x0, y0 = self._drag_start
+        self.canvas.create_rectangle(x0, y0, int(event.x), int(event.y), outline=COLORS["accent"], width=2, dash=(4, 2), tags="rubber")
+
+    def _drag_end(self, event: Any) -> None:
+        if not self.region_mode or self._drag_start is None:
+            return
+        x0, y0 = self._drag_start
+        self._drag_start = None
+        self.canvas.delete("rubber")
+        bbox = self.canvas_to_original(x0, y0, int(event.x), int(event.y))
+        self.region_mode = False           # one region per arming
+        if bbox is not None and self.on_region is not None:
+            self.on_region(bbox)
+
+    def _draw_regions(self) -> None:
+        self.canvas.delete("region")
+        if self._image is None or not self._regions:
+            return
+        ox, oy = self._origin
+        for g in self._regions:
+            try:
+                x, y, w, h = (float(v) for v in g.get("bbox") or [])
+            except (TypeError, ValueError):
+                continue
+            x0, y0 = ox + x * self._scale, oy + y * self._scale
+            self.canvas.create_rectangle(x0, y0, x0 + w * self._scale, y0 + h * self._scale, outline=COLORS["accent"], width=2,
+                                         tags="region")
+            self.canvas.create_text(x0 + 3, y0 + 2, anchor="nw", text=f"{g.get('name')} ({g.get('purpose')})", fill=COLORS["accent"],
+                                    tags="region", font=FONTS["small"])
 
     def set_zoom(self, zoom: float) -> None:
         self.zoom = max(0.1, float(zoom))
@@ -340,6 +445,9 @@ def reference_label(ref: dict[str, Any], *, compact: bool = False) -> str:
         text += f"  ·  declared by owner: vendor={d.get('vendor') or '-'} model={d.get('model') or '-'} (not verified)"
     if ref.get("composite"):
         text += "  ·  composite sheet: target region required (R-27)"
+    regions = ref.get("regions") or []
+    if regions and not compact:
+        text += "  ·  regions (original pixels): " + "; ".join(f"{g.get('name')} {g.get('bbox')} [{g.get('purpose')}]" for g in regions)
     return text
 
 
@@ -563,8 +671,8 @@ class ConceptPanel(ttk.Frame):
         split.pack(fill="both", expand=True)
         panes = ttk.Frame(split, style=LIGHT)
         split.add(panes, weight=3)
-        self.anchor_pane = ImagePane(panes, "Anchor (approved canon)", size=(220, 165), compact=True)
-        self.candidate_pane = ImagePane(panes, "Candidate (hypothesis)", size=(220, 165), compact=True)
+        self.anchor_pane = ImagePane(panes, "Anchor (approved canon)", size=CONCEPT_PANE_SIZE, compact=True)
+        self.candidate_pane = ImagePane(panes, "Candidate (hypothesis)", size=CONCEPT_PANE_SIZE, compact=True)
         self.anchor_pane.grid(row=0, column=0, sticky="nsew", padx=(0, PAD["small"]))
         self.candidate_pane.grid(row=0, column=1, sticky="nsew")
         panes.columnconfigure(0, weight=1, uniform="pane")
@@ -848,12 +956,18 @@ class BuilderWindow(tk.Toplevel):
         self.components_var = tk.StringVar(value="")
         self.mode_var = tk.StringVar(value="approval mode: -")
         self.attended_var = tk.BooleanVar(value=self.config_builder.attended)
+        self.assign_var = tk.StringVar(value=" ".join(f"{k}={v}" for k, v in (self.config_builder.assignments or {}).items()))
         self.waive_rationale = tk.StringVar()
         self.reopen_reason = tk.StringVar()
         self.correction_note = tk.StringVar()
         self.feedback_var = tk.StringVar()
         self.checkpoint_var = tk.StringVar()
         self.component_var = tk.StringVar()
+        self.region_name = tk.StringVar(value="target")
+        self.region_purpose = tk.StringVar(value="target_region")
+        self.limit_vars: dict[str, tk.StringVar] = {name: tk.StringVar(value=str(self.config_builder.limits.get(name, ""))) for name in DEFAULT_LIMITS}
+        self.limits_note_var = tk.StringVar(value="")
+        self._limits_shown: dict[str, str] = {}
 
         self._build()
         if workflow_dir:
@@ -918,10 +1032,15 @@ class BuilderWindow(tk.Toplevel):
                 self.after(150, self._place_sashes)
                 return
             concept = self.right_notebook.select() == str(self.concept_panel)
-            self.main_pane.sashpos(0, int(w * (0.22 if concept else 0.28)))
-            self.main_pane.sashpos(1, int(w * (0.50 if concept else 0.70)))
+            first, second = self._sash_fractions(concept=concept)
+            self.main_pane.sashpos(0, int(w * first))
+            self.main_pane.sashpos(1, int(w * second))
         except (tk.TclError, AttributeError):
             pass
+
+    @staticmethod
+    def _sash_fractions(*, concept: bool) -> tuple[float, float]:
+        return SASH_FRACTIONS["concept" if concept else "default"]
 
     def _tab(self, parent: tk.Misc) -> ttk.Frame:
         tab = ttk.Frame(parent, padding=(0, PAD["small"], 0, 0))
@@ -953,6 +1072,28 @@ class BuilderWindow(tk.Toplevel):
         ttk.Checkbutton(row, text="composite sheet", variable=self.new_ref_composite, style="Builder.Card.TCheckbutton").pack(side="left", pady=(PAD["medium"], 0))
         self.buttons["add_reference"] = ttk.Button(row, text="Add image…", command=self._add_reference)
         self.buttons["add_reference"].pack(side="right", pady=(PAD["medium"], 0))
+        src = ttk.Frame(refs, style=LIGHT)
+        src.pack(fill="x", pady=(PAD["small"], 0))
+        ttk.Label(src, text="revision 0 (never registered by creating or opening the project, R-93)", style="Builder.CardDim.TLabel").pack(side="left")
+        self.buttons["source_empty"] = ttk.Button(src, text="Register empty scene", command=self._register_empty_source)
+        self.buttons["source_empty"].pack(side="right")
+        ToolTip(self.buttons["source_empty"], "Build an empty scene (one tagged collection) through Blender and register it as "
+                                              "revision 0. For a project that starts from references or a concept set only.")
+        self.buttons["source_register"] = ttk.Button(src, text="Register source .blend…", command=self._register_source)
+        self.buttons["source_register"].pack(side="right", padx=(0, PAD["xs"]))
+        ToolTip(self.buttons["source_register"], "Validate an existing .blend in separate Blender processes (identities, reopen) and copy "
+                                                 "it unmodified into revisions/ as immutable revision 0. The file you pick is only read.")
+        reg = ttk.Frame(refs, style=LIGHT)
+        reg.pack(fill="x", pady=(PAD["small"], 0))
+        _labelled_entry(reg, "region name", self.region_name, width=16).pack(side="left", padx=(0, PAD["small"]))
+        purpose = ttk.Frame(reg, style=LIGHT)
+        purpose.pack(side="left", padx=(0, PAD["small"]))
+        ttk.Label(purpose, text="purpose", style="Builder.CardDim.TLabel").pack(anchor="w")
+        ttk.Combobox(purpose, textvariable=self.region_purpose, values=["target_region", "detail_crop"], width=13, state="readonly").pack()
+        self.buttons["draw_region"] = ttk.Button(reg, text="Draw region on reference", command=self._arm_region)
+        self.buttons["draw_region"].pack(side="right", pady=(PAD["medium"], 0))
+        ToolTip(self.buttons["draw_region"], "Select the reference, then drag a rectangle on its preview. The region is stored in the "
+                                             "original image's pixels, whatever the zoom (R-26, R-27). A composite sheet needs a target region.")
         return tab
 
     def _build_agents_tab(self, parent: tk.Misc) -> ttk.Frame:
@@ -978,7 +1119,10 @@ class BuilderWindow(tk.Toplevel):
         return tab
 
     def _build_run_tab(self, parent: tk.Misc) -> ttk.Frame:
-        tab = self._tab(parent)
+        outer_tab = self._tab(parent)
+        scroll, tab = _scroll_frame(outer_tab)
+        scroll.pack(fill="both", expand=True)
+        self.run_tab_canvas = scroll.canvas  # type: ignore[attr-defined]
         stage = _card(tab, "Stage, task, ownership")
         stage.pack(fill="x", pady=(0, PAD["small"]))
         self.stage_text = _text(stage, height=8)
@@ -1003,6 +1147,13 @@ class BuilderWindow(tk.Toplevel):
                                    variable=self.attended_var, style="Builder.Card.TCheckbutton")
         attended.pack(side="left")
         ToolTip(attended, ATTENDED_HELP)
+        r1c = ttk.Frame(ctl, style=LIGHT)
+        r1c.pack(fill="x", pady=(PAD["xs"], 0))
+        assign = _labelled_entry(r1c, "assignments for this run (role=SEAT ...; overrides builder.assignments)", self.assign_var, width=40)
+        assign.pack(side="left", fill="x", expand=True)
+        ToolTip(assign, "Pre-assign roles to seats for the run, for example build=B plan=A. Roles: brief, plan, build, corrector, "
+                        "reviewer, verifier, reassessor. Recorded on the run with its rationale (R-8). A seat never reviews, verifies, "
+                        "or reassesses its own operation, even under an override: that stops the run with the R-107 reason.")
 
         ttk.Separator(ctl, orient="horizontal").pack(fill="x", pady=PAD["small"])
         r2 = ttk.Frame(ctl, style=LIGHT)
@@ -1050,12 +1201,26 @@ class BuilderWindow(tk.Toplevel):
         self.buttons["feedback"] = ttk.Button(r5, text="Send", command=self._feedback)
         self.buttons["feedback"].pack(side="left", padx=(PAD["small"], 0), pady=(PAD["medium"], 0))
 
+        lim = _card(tab, "Limits (zero means unlimited)", help_text="Changes apply at the next safe boundary of a running engine, or at once "
+                                                                    "when the run is stopped; every change is journaled (R-85, R-89).")
+        lim.pack(fill="x", pady=(0, PAD["small"]))
+        grid = ttk.Frame(lim, style=LIGHT)
+        grid.pack(fill="x")
+        for i, name in enumerate(DEFAULT_LIMITS):
+            ttk.Label(grid, text=name, style="Builder.CardDim.TLabel").grid(row=i // 3 * 2, column=i % 3, sticky="w", padx=(0, PAD["small"]))
+            ttk.Entry(grid, textvariable=self.limit_vars[name], width=10).grid(row=i // 3 * 2 + 1, column=i % 3, sticky="w", padx=(0, PAD["small"]), pady=(0, PAD["xs"]))
+        lrow = ttk.Frame(lim, style=LIGHT)
+        lrow.pack(fill="x", pady=(PAD["xs"], 0))
+        self.buttons["apply_limits"] = ttk.Button(lrow, text="Apply limits", command=self._apply_limits)
+        self.buttons["apply_limits"].pack(side="right")               # packed first so a long note never squeezes it
+        _caption(lrow, self.limits_note_var, wraplength=300).pack(side="left", fill="x", expand=True)
+
         cons = _card(tab, "Consumption and limits", help_text="Enforceable limits are labelled separately from estimates; an unknown cost is "
                                                               "never treated as zero and never as proof that a cap is enforced (R-85).")
         cons.pack(fill="both", expand=True)
         self.consumption_text = _scrolled(cons, lambda f: _text(f, height=10))
         self.consumption_text.frame.pack(fill="both", expand=True)
-        return tab
+        return outer_tab
 
     def _build_parts_tab(self, parent: tk.Misc) -> ttk.Frame:
         tab = self._tab(parent)
@@ -1176,7 +1341,22 @@ class BuilderWindow(tk.Toplevel):
         self.references_tree.delete(*self.references_tree.get_children())
         for r in snap.get("references", []):
             self.references_tree.insert("", "end", iid=r["id"], values=(r["id"], ",".join(r.get("labels") or []), r.get("kind"), r.get("canon_state"),
-                                                                      "yes" if r.get("evidence_of_original") else "no (hypothesis)", f"{r.get('width')}x{r.get('height')}"))
+                                                                      "yes" if r.get("evidence_of_original") else "no (hypothesis)", f"{r.get('width')}x{r.get('height')}"),
+                                        open=True)
+            for g in r.get("regions") or []:
+                self.references_tree.insert(r["id"], "end", iid=g["id"], values=(g["id"], g.get("name"), g.get("purpose"), "region", "original pixels", str(g.get("bbox"))))
+        limits = (snap.get("consumption") or {}).get("limits") or {}
+        if limits:
+            self._limits_shown = {}
+            notes = []
+            for name, lim in limits.items():
+                if name in self.limit_vars:
+                    value = str(lim.get("value"))
+                    self.limit_vars[name].set(value)
+                    self._limits_shown[name] = value
+                if name == "max_cost_usd":
+                    notes.append(f"max_cost_usd enforceable={lim.get('enforceable')}: {lim.get('note')}")
+            self.limits_note_var.set("; ".join(notes) or "limits in force")
         # agents
         self.agents_tree.delete(*self.agents_tree.get_children())
         for a in snap.get("agents", []):
@@ -1197,6 +1377,8 @@ class BuilderWindow(tk.Toplevel):
             lines.append(f"task {task.get('id')}  {task.get('kind')} [{task.get('state')}]  owner {task.get('owner')}  base {task.get('base_revision_id')}")
             lines.append(f"  rationale: {task.get('rationale')}")
             lines.append(f"  expected: {task.get('expected_outcome')}  ·  parts: {', '.join(task.get('part_ids') or [])}")
+        for o in st.get("assignment_overrides") or []:
+            lines.append(f"assignment override {o['role']}={o['seat']} ({o['source']}): {o['rationale']}")
         lines.append("ownership: " + (f"{own['holder']} holds {own['resource']} at {own['base_revision_id']} since {own['granted_at']}" if own else "free (no holder)"))
         for op in st.get("active_operations") or []:
             lines.append(f"active operation {op['id']} {op['kind']} [{op['state']}] by {op['agent']}: {op.get('intent')}")
@@ -1300,8 +1482,42 @@ class BuilderWindow(tk.Toplevel):
     def _reference_selected(self) -> None:
         sel = self.references_tree.selection()
         if sel:
+            iid = sel[0]
+            if self.references_tree.parent(iid):
+                iid = self.references_tree.parent(iid)          # a region row selects its reference
             self.compare.mode_var.set("reference/render")
-            self.compare.left.show_reference(sel[0])
+            self.compare.left.show_reference(iid)
+
+    def _arm_region(self) -> None:
+        pane = self.compare.left
+        if pane.current_reference_id is None or self.compare.mode_var.get() != "reference/render":
+            self.set_status("select a reference in the comparison panel first, then draw the region on it")
+            return
+        name = self.region_name.get().strip()
+        if not name:
+            self.set_status("give the region a name first")
+            return
+        ref_id = pane.current_reference_id
+        purpose = self.region_purpose.get()
+
+        def done(bbox: list[int]) -> None:
+            self.session.add_region(ref_id, name, bbox, purpose=purpose, user=self.user_var.get())
+            self.set_status(f"region {name!r} {bbox} (original pixels) submitted for {ref_id}")
+
+        pane.on_region = done
+        pane.region_mode = True
+        self.set_status(f"drag a rectangle on reference {ref_id} to record {purpose} {name!r}")
+
+    def _apply_limits(self) -> None:
+        changes = {name: var.get().strip() for name, var in self.limit_vars.items()
+                   if var.get().strip() != self._limits_shown.get(name, var.get().strip() if not self._limits_shown else None)}
+        if not self._limits_shown:
+            changes = {name: var.get().strip() for name, var in self.limit_vars.items() if var.get().strip()}
+        if not changes:
+            self.set_status("no limit changed")
+            return
+        self.session.set_limits(changes, user=self.user_var.get())
+        self.set_status(f"limit change submitted: {changes}")
 
     def _agent_selected(self) -> None:
         sel = self.agents_tree.selection()
@@ -1397,7 +1613,23 @@ class BuilderWindow(tk.Toplevel):
             self.session.preflight(live=True)
 
     def _start(self) -> None:
-        self.session.start_run(attended=bool(self.attended_var.get()), component_name=None)
+        assignments = parse_assignment_text(self.assign_var.get())
+        if assignments is None:
+            messagebox.showinfo("Assignments", "Assignments are role=SEAT pairs separated by spaces, for example build=B plan=A.", parent=self)
+            return
+        if assignments:
+            self.session.start_run(attended=bool(self.attended_var.get()), component_name=None, assignments=assignments)
+        else:
+            self.session.start_run(attended=bool(self.attended_var.get()), component_name=None)
+
+    def _register_source(self) -> None:
+        f = filedialog.askopenfilename(parent=self, title="Source .blend to register as revision 0 (read only, copied unmodified)",
+                                       filetypes=[("Blender files", "*.blend"), ("All files", "*.*")])
+        if f:
+            self.session.register_source(Path(f), user=self.user_var.get())
+
+    def _register_empty_source(self) -> None:
+        self.session.register_empty_source(user=self.user_var.get())
 
     def _cancel(self) -> None:
         if messagebox.askyesno("Cancel run", "Cancel the run? In-flight provider and Blender processes are killed and the run is "
@@ -1464,6 +1696,20 @@ def _default_user() -> str:
 def _short(value: Any, limit: int = 160) -> str:
     text = str(value)
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+def parse_assignment_text(text: str) -> dict[str, str] | None:
+    """``build=B plan=A`` (space or comma separated) to ``{"build": "B", "plan": "A"}``; ``None`` when malformed.
+    Roles and seats are validated by the engine (R-8, R-107)."""
+    out: dict[str, str] = {}
+    for item in text.replace(",", " ").split():
+        if "=" not in item:
+            return None
+        role, seat = item.split("=", 1)
+        if not role.strip() or not seat.strip():
+            return None
+        out[role.strip()] = seat.strip()
+    return out
 
 
 def _format_event(ev: dict[str, Any]) -> str:

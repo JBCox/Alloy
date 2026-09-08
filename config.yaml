@@ -31,9 +31,9 @@ ais:
     enabled: true
     description: "Anthropic's Claude Code CLI"
     timeout: 0
-    retry_count: 0
+    retry_count: 1           # Retry once on failure
     weight: 1
-    fallback_ai: ""
+    fallback_ai: "gemini"    # Fall back to Gemini if Claude fails
 
   gemini:
     command: "gemini -p {message}"
@@ -41,9 +41,9 @@ ais:
     enabled: true
     description: "Google's Gemini CLI"
     timeout: 0
-    retry_count: 0
+    retry_count: 1           # Retry once on failure
     weight: 1
-    fallback_ai: ""
+    fallback_ai: "claude"    # Fall back to Claude if Gemini fails
 
   codex:
     command: "codex exec {message}"
@@ -51,9 +51,9 @@ ais:
     enabled: true
     description: "OpenAI Codex CLI"
     timeout: 0
-    retry_count: 0
+    retry_count: 1
     weight: 1
-    fallback_ai: ""
+    fallback_ai: "claude"    # Fall back to Claude if Codex fails
 
   # GitHub Copilot CLI (install with: gh extension install github/gh-copilot)
   # copilot:
@@ -89,6 +89,82 @@ ais:
     retry_count: 1
     weight: 1
     fallback_ai: ""
+
+  # -------------------------------------------------------------------------
+  # OpenCode Zen models (https://opencode.ai) - FREE tier needs NO API key
+  # -------------------------------------------------------------------------
+  # Install once:  npm install -g opencode-ai
+  # List models:   opencode models
+  # The "*-free" / preview models below work with zero credentials.
+  #
+  # NOTE: `--agent plan` = read-only (safe for discussion/review). Swap it for
+  #       `--agent build` if you want this AI to actually edit files, like codex.
+  # NOTE: opencode's --continue flag must come AFTER `run`, which Alloy's
+  #       continue_flag insertion can't do - so leave continue_flag unset and
+  #       Alloy will pass full conversation context in each prompt instead.
+
+  # Ox Alpha - stealth model on OpenCode Zen: 1M context, multi-modal, free
+  ox:
+    command: "opencode run --agent plan -m opencode/x-preview-f-free {message}"
+    color: "magenta"
+    enabled: true
+    description: "Ox Alpha via OpenCode Zen (FREE, 1M context)"
+    timeout: 300
+    retry_count: 1
+    weight: 1
+    fallback_ai: ""
+
+  # Other free OpenCode Zen models - flip enabled: true to use them.
+  # Heads-up: every enabled AI joins @all and the collaboration modes.
+  pickle:
+    command: "opencode run --agent plan -m opencode/big-pickle {message}"
+    color: "yellow"
+    enabled: false
+    description: "Big Pickle via OpenCode Zen (FREE)"
+    timeout: 300
+
+  nemotron:
+    command: "opencode run --agent plan -m opencode/nemotron-3-ultra-free {message}"
+    color: "green"
+    enabled: false
+    description: "Nemotron 3 Ultra via OpenCode Zen (FREE)"
+    timeout: 300
+
+  nemotron-lite:
+    command: "opencode run --agent plan -m opencode/nemotron-3.5-lightning-free {message}"
+    color: "green"
+    enabled: false
+    description: "Nemotron 3.5 Lightning via OpenCode Zen (FREE, fast)"
+    timeout: 300
+
+  mimo:
+    command: "opencode run --agent plan -m opencode/mimo-v2.5-free {message}"
+    color: "blue"
+    enabled: false
+    description: "MiMo-V2.5 via OpenCode Zen (FREE)"
+    timeout: 300
+
+  hy3:
+    command: "opencode run --agent plan -m opencode/hy3-free {message}"
+    color: "red"
+    enabled: false
+    description: "Hy3 via OpenCode Zen (FREE)"
+    timeout: 300
+
+  muse:
+    command: "opencode run --agent plan -m opencode/muse-spark-1.2-contributor-free {message}"
+    color: "white"
+    enabled: false
+    description: "Muse Spark 1.2 via OpenCode Zen (FREE, contributor tier)"
+    timeout: 300
+
+  # Paid OpenCode Zen models need a key: run `opencode auth login` once.
+  # Then any curated model works the same way, e.g.:
+  # zen-gpt:
+  #   command: "opencode run --agent plan -m opencode/gpt-5.6-sol {message}"
+  #   color: "green"
+  #   enabled: false
+  #   description: "GPT-5.6 Sol via OpenCode Zen (paid)"
 
 # ============================================================================
 # Collaboration Modes
@@ -211,6 +287,31 @@ execution:
   retry_delay: 2
 
 # ============================================================================
+# Smart AI Routing
+# ============================================================================
+# Assign specific AIs to task types. If not set, falls back to default_ai.
+# This optimizes each phase by using the AI best suited for that task type.
+#
+# Example: Gemini has 2M context → great for analysis
+#          Claude excels at code → use for implementation
+
+routing:
+  # Code review tasks
+  code_review: ""
+
+  # Research/analysis tasks (understanding, planning)
+  analysis: ""
+
+  # Code writing/implementation tasks
+  implementation: ""
+
+  # Creative/brainstorming tasks
+  creative: ""
+
+  # Judging/synthesis/verdict tasks
+  judge: ""
+
+# ============================================================================
 # Legacy Settings (for backwards compatibility)
 # ============================================================================
 
@@ -238,7 +339,7 @@ builder:
     A: {provider: claude, model: fable, reasoning: max, executable: ""}
     B: {provider: codex, model: gpt-6-astra, reasoning: xhigh, executable: ""}
   provider_timeouts: {response: 900, inactivity: 180, cancel_probe_after: 8}   # seconds; cancel_probe_after = preflight --live cancellation probe
-  limits: {wall_clock_minutes: 0, max_cost_usd: 0, max_requests: 0, max_renders: 0, attempts_per_finding: 2}
+  limits: {wall_clock_minutes: 0, max_cost_usd: 0, max_requests: 0, max_renders: 0, attempts_per_finding: 2, stall_steps: 12}
   # Concept stage (addendum A). approval: each | anchor_only | auto (D11), shown by every `concept` verb.
   # max_images and max_regenerations_per_view count imported and generated images alike (R-105).
   concept:

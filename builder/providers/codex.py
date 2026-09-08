@@ -118,6 +118,7 @@ class CodexAdapter(CliAdapter):
         messages: list[str] = []
         item_errors: list[str] = []
         usage_raw: dict[str, Any] | None = None
+        turn_failed = False
         for ev in events:
             kind = ev.get("type")
             if kind == "thread.started" and isinstance(ev.get("thread_id"), str):
@@ -127,6 +128,7 @@ class CodexAdapter(CliAdapter):
             elif kind == "turn.failed":
                 e = ev.get("error")
                 errors.append(str(e.get("message") if isinstance(e, dict) else e))
+                turn_failed = True
             elif kind == "error":
                 errors.append(str(ev.get("message") or ev))
             elif kind == "item.completed":
@@ -136,6 +138,12 @@ class CodexAdapter(CliAdapter):
                 elif item.get("type") == "error" and item.get("message"):
                     item_errors.append(str(item["message"]))     # e.g. "Model metadata ... not found"; kept as a warning
         effective["event_types"] = sorted({str(e.get("type")) for e in events})
+        stream_notices: list[str] = []
+        if errors and usage_raw is not None and not turn_failed:
+            # Observed live (2026-09-08): the CLI's stream dropped and it printed `error` events ("Reconnecting... n/5
+            # ... websocket closed by server") before completing the turn with a full reply and usage. A completed
+            # turn is the reply; the notices are reported as warnings, never as a failure that discards the reply.
+            stream_notices, errors = list(dict.fromkeys(errors)), []
         if errors:
             unique = list(dict.fromkeys(errors))    # the CLI repeats an `error` event; report each text once
             res = self._failure(req, proc, OUTCOME_PROVIDER_ERROR, "; ".join(unique), **effective)
@@ -165,5 +173,6 @@ class CodexAdapter(CliAdapter):
                                reported_session_id=thread_id, usage=usage, argv=list(proc.argv), effective_settings=effective)
         if req.session.kind == "resume" and thread_id and thread_id != req.session.uuid:
             res.warnings.append(f"codex resumed thread {thread_id}, not the requested {req.session.uuid}")
+        res.warnings.extend(f"codex stream notice (turn completed afterwards): {m}" for m in stream_notices)
         res.warnings.extend(f"codex item error: {m}" for m in item_errors)
         return res

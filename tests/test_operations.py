@@ -32,7 +32,7 @@ class FakeRunner:
                              error=error, stdout_path="", stderr_path="", elapsed_s=0.01, kill_confirmed=None, work_dir="")
 
     def apply(self, base_blend, out_blend, script_path, *, op_id, declared_effects, deadline_s=None, work_dir=None,
-              cancel_event=None):
+              cancel_event=None, on_spawn=None):
         self.calls.append(f"apply:{op_id}")
         out = Path(out_blend)
         if self.apply_outcome == "ok":

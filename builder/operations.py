@@ -19,6 +19,7 @@ from typing import Any
 from .ids import new_id, sha256_file, utc_now
 from .ownership import OwnershipError, OwnershipManager
 from .project import Project
+from .providers.process import command_line, kill_tree, pid_alive
 from .records import Record
 
 IN_FLIGHT_STATES = ("created", "staged", "running", "validating", "promoting")
@@ -96,7 +97,8 @@ class Operations:
     def register_revision(self, source_file: str | Path, *, parent_revision_id: str | None, created_by_op_id: str | None,
                           actor: str, identity_map: list[dict[str, Any]] | None = None,
                           asset_dependencies: dict[str, str] | None = None, note: str = "",
-                          revision_id: str | None = None, move: bool = False) -> Record:
+                          revision_id: str | None = None, move: bool = False,
+                          extra: dict[str, Any] | None = None) -> Record:
         rev_id = revision_id or new_id("rev")
         dest = self.revisions_dir / f"{rev_id}.blend"
         if dest.exists():
@@ -108,11 +110,11 @@ class Operations:
             shutil.copyfile(source_file, dest)
         return self._finalize_revision(dest, rev_id, parent_revision_id=parent_revision_id, created_by_op_id=created_by_op_id,
                                        actor=actor, identity_map=identity_map or [], asset_dependencies=asset_dependencies or {},
-                                       note=note)
+                                       note=note, extra=extra)
 
     def _finalize_revision(self, dest: Path, rev_id: str, *, parent_revision_id: str | None, created_by_op_id: str | None,
                            actor: str, identity_map: list[dict[str, Any]], asset_dependencies: dict[str, str],
-                           note: str, expected_sha256: str | None = None) -> Record:
+                           note: str, expected_sha256: str | None = None, extra: dict[str, Any] | None = None) -> Record:
         os.chmod(dest, stat.S_IREAD)  # immutable revision (R-40)
         digest = sha256_file(dest)
         if expected_sha256 is not None and digest != expected_sha256:
@@ -121,6 +123,7 @@ class Operations:
             "file": str(dest), "sha256": digest, "size": dest.stat().st_size, "parent_revision_id": parent_revision_id,
             "created_by_op_id": created_by_op_id, "identity_map": identity_map,
             "asset_dependencies": asset_dependencies, "note": note, "immutable": True, "created_at": utc_now(),
+            **(extra or {}),
         }, id=rev_id)
         rec = self.store.upsert(rec, actor=actor, event="revision.created", op_id=created_by_op_id, run_id=self.run_id)
         self.store.register_file(dest, kind="revision", record_id=rev_id)
@@ -210,9 +213,17 @@ class Operations:
         out = stage_dir / "out.blend"
         logs = self.logs_dir / op.id
         op = self._set_state(op, "running", actor=actor)
+
+        def on_spawn(pid: int) -> None:
+            # durable while Blender runs, so a restart can find, kill, and confirm an orphan (R-47)
+            op.data["pid"] = int(pid)
+            self.store.upsert(op, actor=actor, event="op.spawned", inputs={"pid": int(pid)}, op_id=op.id, run_id=self.run_id)
+
         res = self.runner.apply(base_copy, out, op.data["script_path"], op_id=op.id,
                                 declared_effects=op.data.get("declared_effects") or {},
-                                deadline_s=op.data.get("deadline_s"), work_dir=logs, cancel_event=cancel_event)
+                                deadline_s=op.data.get("deadline_s"), work_dir=logs, cancel_event=cancel_event,
+                                on_spawn=on_spawn)
+        op.data["pid"] = None                     # the process is gone once apply returns (killed and confirmed, or exited)
         op.data["apply"] = {"outcome": res.outcome, "exit_code": res.exit_code, "error": res.error,
                             "stdout_path": res.stdout_path, "stderr_path": res.stderr_path, "elapsed_s": res.elapsed_s,
                             "kill_confirmed": res.kill_confirmed}
@@ -305,19 +316,57 @@ class Operations:
                     self._fail(op, "promotion did not complete: announced revision file missing or hash mismatch", actor=actor)
                     report.append({"op_id": op.id, "classification": "failed", "note": op.data["error"]})
                 continue
+            orphan = self._reap_orphan(op, actor=actor)
+            interrupted_state = op.state
             if out.exists():
                 self._quarantine(op)
-                self._fail(op, f"interrupted while {op.state}: staged output exists without a verified result; "
+                self._fail(op, f"interrupted while {interrupted_state}: staged output exists without a verified result; "
                                "quarantined, never replayed", actor=actor, state="uncertain")
-                report.append({"op_id": op.id, "classification": "uncertain", "note": op.data["error"]})
+                report.append({"op_id": op.id, "classification": "uncertain", "note": op.data["error"], "orphan": orphan})
+            elif op.data.get("pid") or op.state in ("running", "validating"):
+                # the process had been spawned (or the state says so) and died without writing an output: interrupted
+                # work with nothing to promote; the base revision is untouched, so the task may be redone
+                if stage_dir.exists():
+                    shutil.rmtree(stage_dir, ignore_errors=True)
+                op.data["recovery"] = "interrupted"
+                self._fail(op, f"interrupted while {interrupted_state} before any output was written (pid {op.data.get('pid')}); "
+                               "nothing was promoted; the base revision is unchanged", actor=actor)
+                report.append({"op_id": op.id, "classification": "failed", "note": op.data["error"], "orphan": orphan})
             else:
                 if stage_dir.exists():
                     shutil.rmtree(stage_dir, ignore_errors=True)
                 op.data["error"] = "never started (no staged output); safe to recreate"
                 op.data["recovery"] = "never_started"
                 self._set_state(op, "cancelled", actor=actor, event="op.recovered", classification="never_started")
-                report.append({"op_id": op.id, "classification": "never_started", "note": op.data["error"]})
+                report.append({"op_id": op.id, "classification": "never_started", "note": op.data["error"], "orphan": orphan})
         return report
+
+    def _reap_orphan(self, op: Record, *, actor: str) -> dict[str, Any]:
+        """Kill a Blender process the previous engine left behind, but only when its command line still names this
+        operation (pids are reused); confirm it is gone (R-22, R-47)."""
+        pid = int(op.data.get("pid") or 0)
+        info: dict[str, Any] = {"pid": pid or None, "alive": False, "killed": False, "confirmed": None, "note": ""}
+        if not pid:
+            info["note"] = "no pid recorded"
+            return info
+        if not pid_alive(pid):
+            info["note"] = "process already gone"
+            return info
+        info["alive"] = True
+        cmdline = command_line(pid) or ""
+        if op.id not in cmdline:
+            info["note"] = (f"pid {pid} is alive but its command line does not name {op.id}: it belongs to another program "
+                            "(pid reuse); not killed")
+            self.store.append_journal(actor=actor, event="op.orphan_not_killed", op_id=op.id,
+                                      inputs={"pid": pid, "command_line": cmdline[:300]}, run_id=self.run_id)
+            return info
+        details = kill_tree(pid)
+        info.update({"killed": True, "confirmed": bool(details.get("confirmed")), "note": "orphaned process killed",
+                     "details": {k: details.get(k) for k in ("descendants", "job_terminated", "taskkill_rc", "survivors")}})
+        self.store.append_journal(actor=actor, event="op.orphan_killed", op_id=op.id,
+                                  inputs={"pid": pid, "confirmed": info["confirmed"], "survivors": details.get("survivors")},
+                                  run_id=self.run_id)
+        return info
 
 
 def _asset_hashes(assets: list[dict[str, Any]]) -> dict[str, str]:

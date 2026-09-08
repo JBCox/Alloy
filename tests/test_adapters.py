@@ -320,6 +320,25 @@ def test_codex_turn_failed_is_a_provider_error(workdir, monkeypatch):
     assert res.outcome == "provider_error" and "not found" in res.error
 
 
+def test_codex_stream_reconnect_notices_before_a_completed_turn_are_warnings_not_a_failure(workdir, monkeypatch):
+    """Live 2026-09-08 (E11 build, 18 min): the CLI reported `error` events ("Reconnecting... n/5 ... websocket closed
+    by server") and then completed the turn with a full reply and usage. A completed turn is the reply; the notices
+    are kept as warnings and the reply is never discarded."""
+    monkeypatch.setenv("ALLOY_FAKE_CLI_MODE", "reconnect_then_ok")
+    monkeypatch.setenv("ALLOY_FAKE_CLI_REPLY", json.dumps({"nonce": "rc"}))
+    res = _fake("codex").invoke(_req(workdir, model="gpt-6-astra", reasoning="high", schema="session_probe_report"))
+    assert res.outcome == "ok", res.error
+    assert res.structured == {"nonce": "rc"}
+    assert res.usage.output == Measured(40, "codex:turn.completed.usage.output_tokens")
+    assert sum("Reconnecting" in w for w in res.warnings) == 2 and any("HTTPS" in w for w in res.warnings)
+
+
+def test_codex_error_event_without_a_completed_turn_is_still_a_provider_error(workdir, monkeypatch):
+    monkeypatch.setenv("ALLOY_FAKE_CLI_MODE", "error_event_only")
+    res = _fake("codex").invoke(_req(workdir, model="gpt-6-astra", reasoning="high", schema="session_probe_report"))
+    assert res.outcome == "provider_error" and "Reconnecting" in res.error
+
+
 def test_codex_never_downgrades_a_level_without_a_documented_fallback(workdir, monkeypatch):
     monkeypatch.setenv("ALLOY_FAKE_CLI_MODE", "reject_xhigh")
     a = CodexAdapter(argv_head=[sys.executable, str(FAKE), "codex"], reasoning_fallbacks={})

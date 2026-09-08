@@ -21,6 +21,10 @@ a = Analysis(
         (os.path.join(ALLOY_DIR, 'config.yaml'), '.'),
         # Include all GUI files
         (os.path.join(ALLOY_DIR, 'gui'), 'gui'),
+        # Collaborative Model Builder: the package as data too (its in-Blender scripts run from FILES inside Blender's
+        # own Python, never from the PYZ archive), plus the scripts directory explicitly
+        (os.path.join(ALLOY_DIR, 'builder'), 'builder'),
+        (os.path.join(ALLOY_DIR, 'builder', 'blender', 'scripts'), os.path.join('builder', 'blender', 'scripts')),
     ],
     hiddenimports=[
         # Tkinter
@@ -45,6 +49,19 @@ a = Analysis(
         'prompt_toolkit.key_binding',
         # YAML
         'yaml',
+        # Collaborative Model Builder (builder/ package; imported lazily from main.py and gui/app.py)
+        'builder',
+        'builder.cli',
+        'builder.harness',
+        'builder.viewmodel',
+        'builder.providers.claude',
+        'builder.providers.codex',
+        'builder.providers.gemini',
+        'builder.providers.imagegen.manual',
+        'gui.builder_view',
+        'PIL.Image',
+        'PIL.ImageTk',
+        'sqlite3',
         # Standard library
         'concurrent.futures',
         'threading',
@@ -68,7 +85,6 @@ a = Analysis(
         'numpy',
         'pandas',
         'scipy',
-        'PIL',
         'cv2',
         'tensorflow',
         'torch',
