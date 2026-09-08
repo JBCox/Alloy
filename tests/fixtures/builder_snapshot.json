@@ -1,0 +1,3240 @@
+{
+ "project": {
+  "id": "prj_01M1ZJEFRV3DDKJC45",
+  "name": "Lamp",
+  "asset_name": "Lamp",
+  "workflow_dir": "WORKFLOW",
+  "first_component": "Head",
+  "preset_id": null,
+  "fixture": false,
+  "target_reference": null,
+  "existing_source": null,
+  "status_note": null
+ },
+ "blender": {
+  "version": "fake-1.0",
+  "executable": "fake",
+  "available": true
+ },
+ "stage": {
+  "run_id": "run_01M1ZJEG34XTTW01GR",
+  "execution": "waiting_for_user",
+  "stop_reason": "ready_for_user_review",
+  "stage": "done",
+  "attended": true,
+  "task": {
+   "id": "t_01M1ZJEH0W4ABDRCQ7",
+   "kind": "verify",
+   "state": "done",
+   "owner": "A",
+   "rationale": "the non-corrector verifies on renders (R-74)",
+   "expected_outcome": "verdict on the expected improvement with regressions checked",
+   "part_ids": [
+    "p_bracket"
+   ],
+   "base_revision_id": "rev_01M1ZJEGX4H2Q3THPM",
+   "session_kind": null
+  },
+  "active_operations": [],
+  "ownership": null,
+  "last_note": {
+   "at": "2026-09-08T03:54:35.098985Z",
+   "stop_reason": "ready_for_user_review",
+   "note": "component Head is ready for user review at rev_01M1ZJEGX4H2Q3THPM; it is not accepted"
+  },
+  "handoffs": 1,
+  "plan": {
+   "by": "A",
+   "rationale": "first agent by configuration order; both agents' independent observations are included",
+   "invocation_id": "inv_01M1ZJEG725H0MW68J",
+   "blockout_note": "revision 0 serves as the coarse whole-model blockout (R-33)"
+  },
+  "component_id": "cmp_01M1ZJEG353RGY67FJ",
+  "assignment_overrides": []
+ },
+ "agents": [
+  {
+   "label": "A",
+   "id": "ag_A",
+   "provider": "mock",
+   "model": "fable",
+   "model_effective": "fable",
+   "reasoning_requested": "max",
+   "reasoning_effective": "max",
+   "reasoning_note": "confirmed by the provider's own output",
+   "reasoning_fallbacks": [],
+   "executable": "",
+   "invocations": 10,
+   "preflight": {
+    "ok": true,
+    "live": true,
+    "at": "2026-09-08T03:54:33.826000Z",
+    "blockers": [],
+    "cli_path": "mock-cli",
+    "cli_version": "mock-1.0",
+    "capabilities": {
+     "image_reading": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "verified",
+      "evidence": "probe reported {'shape': 'triangle', 'color': 'red', 'number': 7}"
+     },
+     "evidence_dir_access": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "verified",
+      "evidence": "probe reported {'shape': 'triangle', 'color': 'red', 'number': 7}"
+     },
+     "read_only_enforcement": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "verified",
+      "evidence": "attempted_and_refused: 'denied'; file absent"
+     },
+     "session_create": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "verified",
+      "evidence": "first reply {'nonce': '50b2927fcf86'}"
+     },
+     "session_resume": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "verified",
+      "evidence": "second reply {'nonce': '50b2927fcf86'} via resume session"
+     },
+     "structured_output": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "verified",
+      "evidence": "probe outputs validated against schema"
+     },
+     "model_settings_applied": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "verified",
+      "evidence": "model requested None, reported 'unknown'; reasoning requested None, effective None (unknown)"
+     },
+     "usage_reporting": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "not_verified",
+      "evidence": "no usage field recognised in the CLI output; consumption recorded as unknown"
+     },
+     "cancellation": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "verified",
+      "evidence": "cancelled after 8s; process tree confirmed gone"
+     }
+    },
+    "probe_cost": {
+     "measured": 0.0,
+     "estimated": 0.0,
+     "unknown_invocations": 5
+    }
+   }
+  },
+  {
+   "label": "B",
+   "id": "ag_B",
+   "provider": "mock",
+   "model": "gpt-6-astra",
+   "model_effective": "gpt-6-astra",
+   "reasoning_requested": "xhigh",
+   "reasoning_effective": "xhigh",
+   "reasoning_note": "confirmed by the provider's own output",
+   "reasoning_fallbacks": [],
+   "executable": "",
+   "invocations": 9,
+   "preflight": {
+    "ok": true,
+    "live": true,
+    "at": "2026-09-08T03:54:33.948733Z",
+    "blockers": [],
+    "cli_path": "mock-cli",
+    "cli_version": "mock-1.0",
+    "capabilities": {
+     "image_reading": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "verified",
+      "evidence": "probe reported {'shape': 'triangle', 'color': 'red', 'number': 7}"
+     },
+     "evidence_dir_access": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "verified",
+      "evidence": "probe reported {'shape': 'triangle', 'color': 'red', 'number': 7}"
+     },
+     "read_only_enforcement": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "verified",
+      "evidence": "attempted_and_refused: 'denied'; file absent"
+     },
+     "session_create": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "verified",
+      "evidence": "first reply {'nonce': '49a4bc2396f5'}"
+     },
+     "session_resume": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "verified",
+      "evidence": "second reply {'nonce': '49a4bc2396f5'} via resume session"
+     },
+     "structured_output": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "verified",
+      "evidence": "probe outputs validated against schema"
+     },
+     "model_settings_applied": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "verified",
+      "evidence": "model requested None, reported 'unknown'; reasoning requested None, effective None (unknown)"
+     },
+     "usage_reporting": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "not_verified",
+      "evidence": "no usage field recognised in the CLI output; consumption recorded as unknown"
+     },
+     "cancellation": {
+      "declared": "yes",
+      "local": "ok",
+      "live": "verified",
+      "evidence": "cancelled after 8s; process tree confirmed gone"
+     }
+    },
+    "probe_cost": {
+     "measured": 0.0,
+     "estimated": 0.0,
+     "unknown_invocations": 5
+    }
+   }
+  }
+ ],
+ "image_seat": {
+  "declared": {
+   "seat": "manual",
+   "label": "I",
+   "vendor": "chatgpt",
+   "model": "as declared by the owner at import (per request)",
+   "mode": "the owner generates in the vendor's app from the prompt Alloy wrote and imports the files",
+   "provenance": "declared by the owner at import; Alloy cannot verify the vendor or model and records both as declarations",
+   "cost": "not applicable (no vendor cost accounting for a manual seat, R-105)"
+  },
+  "preflight": {
+   "declared": {
+    "seat": "manual",
+    "label": "I",
+    "vendor": "chatgpt",
+    "model": "as declared by the owner at import (per request)",
+    "mode": "the owner generates in the vendor's app from the prompt Alloy wrote and imports the files",
+    "provenance": "declared by the owner at import; Alloy cannot verify the vendor or model and records both as declarations",
+    "cost": "not applicable (no vendor cost accounting for a manual seat, R-105)"
+   },
+   "local": {
+    "import_dir": "WORKFLOW\\concept\\imports",
+    "import_dir_writable": true,
+    "flow_confirmed": false,
+    "evidence": "import directory writable; the generate-and-import flow has not been confirmed once (run `concept prompts`, generate, then `concept import` for one request)"
+   },
+   "live": {
+    "evidence": "not applicable for the manual seat: provenance is as declared by the owner; consistency of every generated image is checked independently by both LLM seats (R-102, R-109)"
+   },
+   "ok": true,
+   "blockers": [],
+   "at": "2026-09-08T03:54:33.955078Z"
+  }
+ },
+ "components": [
+  {
+   "id": "cmp_01M1ZJEG353RGY67FJ",
+   "name": "Head",
+   "review_state": "ready_for_user_review",
+   "acceptance_state": "unaccepted",
+   "open_findings": 0,
+   "part_ids": [
+    "p_base",
+    "p_post",
+    "p_housing",
+    "p_bracket",
+    "p_lens",
+    "p_bolt"
+   ],
+   "revision_id": "rev_01M1ZJEGX4H2Q3THPM"
+  }
+ ],
+ "references": [
+  {
+   "regions": [],
+   "id": "ref_01M1ZJEFSXCWS63EWX",
+   "file": "WORKFLOW\\refs\\ref_01M1ZJEFSXCWS63EWX_v1.png",
+   "labels": [
+    "front"
+   ],
+   "kind": "target",
+   "notes": "",
+   "width": 120,
+   "height": 90,
+   "version": 1,
+   "canon_state": "approved",
+   "precedence_label": "owner_target",
+   "evidence_of_original": true,
+   "composite": false,
+   "declared": null,
+   "generation_id": null,
+   "derived_from": null,
+   "part_id": null,
+   "verdicts": {},
+   "verdict_summary": null,
+   "approval": null,
+   "rejection": null,
+   "original_path": "TMP\\front.png"
+  },
+  {
+   "regions": [],
+   "id": "ref_01M1ZJEFT6G7R1R0NQ",
+   "file": "WORKFLOW\\refs\\ref_01M1ZJEFT6G7R1R0NQ_v1.png",
+   "labels": [
+    "side"
+   ],
+   "kind": "target",
+   "notes": "",
+   "width": 120,
+   "height": 90,
+   "version": 1,
+   "canon_state": "approved",
+   "precedence_label": "owner_target",
+   "evidence_of_original": true,
+   "composite": false,
+   "declared": null,
+   "generation_id": null,
+   "derived_from": null,
+   "part_id": null,
+   "verdicts": {},
+   "verdict_summary": null,
+   "approval": null,
+   "rejection": null,
+   "original_path": "TMP\\side.png"
+  }
+ ],
+ "revisions": [
+  {
+   "id": "rev_01M1ZJEFTDCZMX2QXB",
+   "parent_revision_id": null,
+   "note": "fixture revision 0",
+   "created_at": "2026-09-08T03:54:33.682048Z",
+   "sha256": "d2186d3298aba63f3c7fd31c1fc5dad6001cf2b05d324ca380895a070b09e2ab",
+   "file": "WORKFLOW\\revisions\\rev_01M1ZJEFTDCZMX2QXB.blend",
+   "created_by_op_id": null
+  },
+  {
+   "id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "parent_revision_id": "rev_01M1ZJEFTDCZMX2QXB",
+   "note": "edit p_housing",
+   "created_at": "2026-09-08T03:54:34.391204Z",
+   "sha256": "27051498b50c7836dce2b1dce8676726dd07889fcf403c9711721f3c370dc63c",
+   "file": "WORKFLOW\\revisions\\rev_01M1ZJEGGMWB3ERXVJ.blend",
+   "created_by_op_id": "op_01M1ZJEGG13AWGCGTQ"
+  },
+  {
+   "id": "rev_01M1ZJEGX4H2Q3THPM",
+   "parent_revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "note": "edit p_bracket",
+   "created_at": "2026-09-08T03:54:34.792448Z",
+   "sha256": "b8d1abcfac64c6947b777eeb7f5bece9227027fc2563297f196cd7c0e3cc0269",
+   "file": "WORKFLOW\\revisions\\rev_01M1ZJEGX4H2Q3THPM.blend",
+   "created_by_op_id": "op_01M1ZJEGWHCYSPXP3R"
+  }
+ ],
+ "latest_revision_id": "rev_01M1ZJEGX4H2Q3THPM",
+ "renders": [
+  {
+   "id": "rnd_01M1ZJEG8CYQK83KTJ",
+   "view_name": "front",
+   "view_id": "view_01M1ZJEG81P35Z46G5",
+   "revision_id": "rev_01M1ZJEFTDCZMX2QXB",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEG8CYQK83KTJ.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "current model for t_01M1ZJEG7DE5GRM6SH",
+   "part_id": null,
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     0.0,
+     -2.5463104376711687,
+     2.05
+    ],
+    "rotation_euler": [
+     1.5707963267948966,
+     0.0,
+     -0.0
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "front",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.131055Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEG8P8YQ42ED2",
+   "view_name": "side",
+   "view_id": "view_01M1ZJEG82RBA0104Z",
+   "revision_id": "rev_01M1ZJEFTDCZMX2QXB",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEG8P8YQ42ED2.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "current model for t_01M1ZJEG7DE5GRM6SH",
+   "part_id": null,
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     2.5463104376711687,
+     0.0,
+     2.05
+    ],
+    "rotation_euler": [
+     1.5707963267948966,
+     0.0,
+     1.5707963267948966
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "side",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.140515Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEG90XEBGC2TG",
+   "view_name": "three_quarter",
+   "view_id": "view_01M1ZJEG833QZ1WG3T",
+   "revision_id": "rev_01M1ZJEFTDCZMX2QXB",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEG90XEBGC2TG.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "current model for t_01M1ZJEG7DE5GRM6SH",
+   "part_id": null,
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     1.5793443354884311,
+     -1.5793443354884311,
+     3.2727181952168496
+    ],
+    "rotation_euler": [
+     1.0699226087013314,
+     0.0,
+     0.7853981633974483
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "three_quarter",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.152201Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEG9BEC3JHEQ5",
+   "view_name": "three_quarter_material",
+   "view_id": "view_01M1ZJEG854S6JJP07",
+   "revision_id": "rev_01M1ZJEFTDCZMX2QXB",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEG9BEC3JHEQ5.png",
+   "mode": "material",
+   "state": "ok",
+   "reason": "current model for t_01M1ZJEG7DE5GRM6SH",
+   "part_id": null,
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     1.5793443354884311,
+     -1.5793443354884311,
+     3.2727181952168496
+    ],
+    "rotation_euler": [
+     1.0699226087013314,
+     0.0,
+     0.7853981633974483
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "three_quarter",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.161894Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEG9RFNVT1WRX",
+   "view_name": "whole_front",
+   "view_id": "view_01M1ZJEG86R59M8BGZ",
+   "revision_id": "rev_01M1ZJEFTDCZMX2QXB",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEG9RFNVT1WRX.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "current model for t_01M1ZJEG7DE5GRM6SH",
+   "part_id": null,
+   "evidence_label": "inferred_construction",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     0.0,
+     -2.5463104376711687,
+     2.05
+    ],
+    "rotation_euler": [
+     1.5707963267948966,
+     0.0,
+     -0.0
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "front",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.175052Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGA1ER2VSE67",
+   "view_name": "whole_three_quarter",
+   "view_id": "view_01M1ZJEG88GE5MYJP4",
+   "revision_id": "rev_01M1ZJEFTDCZMX2QXB",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGA1ER2VSE67.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "current model for t_01M1ZJEG7DE5GRM6SH",
+   "part_id": null,
+   "evidence_label": "inferred_construction",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     1.5793443354884311,
+     -1.5793443354884311,
+     3.2727181952168496
+    ],
+    "rotation_euler": [
+     1.0699226087013314,
+     0.0,
+     0.7853981633974483
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "three_quarter",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.184701Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGABT8N2SMZ1",
+   "view_name": "closeup:p_housing",
+   "view_id": "view_01M1ZJEG89SDCXH3MF",
+   "revision_id": "rev_01M1ZJEFTDCZMX2QXB",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGABT8N2SMZ1.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "current model for t_01M1ZJEG7DE5GRM6SH",
+   "part_id": "p_housing",
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     1.6912428098275645,
+     -1.6912428098275645,
+     3.259349272124566
+    ],
+    "rotation_euler": [
+     1.0699226087013316,
+     0.0,
+     0.7853981633974483
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      1.9500000000000002
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.5000000000000002
+     ],
+     "fit_radius": 0.5453439281774393,
+     "distance": 2.7267196408871963,
+     "direction": "three_quarter",
+     "margin": 1.35,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.194455Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGAN4H02B1KF",
+   "view_name": "closeup:p_bracket",
+   "view_id": "view_01M1ZJEG8AWZ0430PQ",
+   "revision_id": "rev_01M1ZJEFTDCZMX2QXB",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGAN4H02B1KF.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "current model for t_01M1ZJEG7DE5GRM6SH",
+   "part_id": "p_bracket",
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     0.675899750242521,
+     -0.675899750242521,
+     2.8732772259942094
+    ],
+    "rotation_euler": [
+     1.0699226087013316,
+     0.0,
+     0.7853981633974483
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.3499999999999996
+     ],
+     "size": [
+      0.3,
+      0.3,
+      0.10000000000000009
+     ],
+     "fit_radius": 0.21794494717703367,
+     "distance": 1.0897247358851683,
+     "direction": "three_quarter",
+     "margin": 1.35,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.203876Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGGZMVCPKD7V",
+   "view_name": "front",
+   "view_id": "view_01M1ZJEG81P35Z46G5",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGGZMVCPKD7V.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "review",
+   "part_id": null,
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     0.0,
+     -2.5463104376711687,
+     2.05
+    ],
+    "rotation_euler": [
+     1.5707963267948966,
+     0.0,
+     -0.0
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "front",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.406387Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGH8D7G0057F",
+   "view_name": "side",
+   "view_id": "view_01M1ZJEG82RBA0104Z",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGH8D7G0057F.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "review",
+   "part_id": null,
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     2.5463104376711687,
+     0.0,
+     2.05
+    ],
+    "rotation_euler": [
+     1.5707963267948966,
+     0.0,
+     1.5707963267948966
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "side",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.414469Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGHH5WMGCRPA",
+   "view_name": "three_quarter",
+   "view_id": "view_01M1ZJEG833QZ1WG3T",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGHH5WMGCRPA.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "review",
+   "part_id": null,
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     1.5793443354884311,
+     -1.5793443354884311,
+     3.2727181952168496
+    ],
+    "rotation_euler": [
+     1.0699226087013314,
+     0.0,
+     0.7853981633974483
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "three_quarter",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.423050Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGHSFK1QEQ5Y",
+   "view_name": "three_quarter_material",
+   "view_id": "view_01M1ZJEG854S6JJP07",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGHSFK1QEQ5Y.png",
+   "mode": "material",
+   "state": "ok",
+   "reason": "review",
+   "part_id": null,
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     1.5793443354884311,
+     -1.5793443354884311,
+     3.2727181952168496
+    ],
+    "rotation_euler": [
+     1.0699226087013314,
+     0.0,
+     0.7853981633974483
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "three_quarter",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.431566Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGJ28MSKJZ1C",
+   "view_name": "whole_front",
+   "view_id": "view_01M1ZJEG86R59M8BGZ",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGJ28MSKJZ1C.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "review",
+   "part_id": null,
+   "evidence_label": "inferred_construction",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     0.0,
+     -2.5463104376711687,
+     2.05
+    ],
+    "rotation_euler": [
+     1.5707963267948966,
+     0.0,
+     -0.0
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "front",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.441590Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGJBVQ75F599",
+   "view_name": "whole_three_quarter",
+   "view_id": "view_01M1ZJEG88GE5MYJP4",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGJBVQ75F599.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "review",
+   "part_id": null,
+   "evidence_label": "inferred_construction",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     1.5793443354884311,
+     -1.5793443354884311,
+     3.2727181952168496
+    ],
+    "rotation_euler": [
+     1.0699226087013314,
+     0.0,
+     0.7853981633974483
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "three_quarter",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.450624Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGJM5JXDQJVQ",
+   "view_name": "closeup:p_housing",
+   "view_id": "view_01M1ZJEG89SDCXH3MF",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGJM5JXDQJVQ.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "review",
+   "part_id": "p_housing",
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     1.6912428098275645,
+     -1.6912428098275645,
+     3.259349272124566
+    ],
+    "rotation_euler": [
+     1.0699226087013316,
+     0.0,
+     0.7853981633974483
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      1.9500000000000002
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.5000000000000002
+     ],
+     "fit_radius": 0.5453439281774393,
+     "distance": 2.7267196408871963,
+     "direction": "three_quarter",
+     "margin": 1.35,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.459387Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGJX1VXN2JA9",
+   "view_name": "closeup:p_bracket",
+   "view_id": "view_01M1ZJEG8AWZ0430PQ",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGJX1VXN2JA9.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "review",
+   "part_id": "p_bracket",
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     0.675899750242521,
+     -0.675899750242521,
+     2.8732772259942094
+    ],
+    "rotation_euler": [
+     1.0699226087013316,
+     0.0,
+     0.7853981633974483
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.3499999999999996
+     ],
+     "size": [
+      0.3,
+      0.3,
+      0.10000000000000009
+     ],
+     "fit_radius": 0.21794494717703367,
+     "distance": 1.0897247358851683,
+     "direction": "three_quarter",
+     "margin": 1.35,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.468198Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGXM45CCFKEV",
+   "view_name": "front",
+   "view_id": "view_01M1ZJEG81P35Z46G5",
+   "revision_id": "rev_01M1ZJEGX4H2Q3THPM",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGXM45CCFKEV.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "after correction attempt 1 of f_01M1ZJEGQG6F0CEY81",
+   "part_id": null,
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     0.0,
+     -2.5463104376711687,
+     2.05
+    ],
+    "rotation_euler": [
+     1.5707963267948966,
+     0.0,
+     -0.0
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "front",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": false,
+   "stale_reason": null,
+   "created_at": "2026-09-08T03:54:34.810585Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGXWJDSVTR4M",
+   "view_name": "side",
+   "view_id": "view_01M1ZJEG82RBA0104Z",
+   "revision_id": "rev_01M1ZJEGX4H2Q3THPM",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGXWJDSVTR4M.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "after correction attempt 1 of f_01M1ZJEGQG6F0CEY81",
+   "part_id": null,
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     2.5463104376711687,
+     0.0,
+     2.05
+    ],
+    "rotation_euler": [
+     1.5707963267948966,
+     0.0,
+     1.5707963267948966
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "side",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": false,
+   "stale_reason": null,
+   "created_at": "2026-09-08T03:54:34.819805Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGY682RB4Q2Z",
+   "view_name": "three_quarter",
+   "view_id": "view_01M1ZJEG833QZ1WG3T",
+   "revision_id": "rev_01M1ZJEGX4H2Q3THPM",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGY682RB4Q2Z.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "after correction attempt 1 of f_01M1ZJEGQG6F0CEY81",
+   "part_id": null,
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     1.5793443354884311,
+     -1.5793443354884311,
+     3.2727181952168496
+    ],
+    "rotation_euler": [
+     1.0699226087013314,
+     0.0,
+     0.7853981633974483
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "three_quarter",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": false,
+   "stale_reason": null,
+   "created_at": "2026-09-08T03:54:34.828463Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGYEZA8TKRP2",
+   "view_name": "three_quarter_material",
+   "view_id": "view_01M1ZJEG854S6JJP07",
+   "revision_id": "rev_01M1ZJEGX4H2Q3THPM",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGYEZA8TKRP2.png",
+   "mode": "material",
+   "state": "ok",
+   "reason": "after correction attempt 1 of f_01M1ZJEGQG6F0CEY81",
+   "part_id": null,
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     1.5793443354884311,
+     -1.5793443354884311,
+     3.2727181952168496
+    ],
+    "rotation_euler": [
+     1.0699226087013314,
+     0.0,
+     0.7853981633974483
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "three_quarter",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": false,
+   "stale_reason": null,
+   "created_at": "2026-09-08T03:54:34.837121Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGYQYENBRKXX",
+   "view_name": "whole_front",
+   "view_id": "view_01M1ZJEG86R59M8BGZ",
+   "revision_id": "rev_01M1ZJEGX4H2Q3THPM",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGYQYENBRKXX.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "after correction attempt 1 of f_01M1ZJEGQG6F0CEY81",
+   "part_id": null,
+   "evidence_label": "inferred_construction",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     0.0,
+     -2.5463104376711687,
+     2.05
+    ],
+    "rotation_euler": [
+     1.5707963267948966,
+     0.0,
+     -0.0
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "front",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": false,
+   "stale_reason": null,
+   "created_at": "2026-09-08T03:54:34.846062Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGZ0V7PG0Z4E",
+   "view_name": "whole_three_quarter",
+   "view_id": "view_01M1ZJEG88GE5MYJP4",
+   "revision_id": "rev_01M1ZJEGX4H2Q3THPM",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGZ0V7PG0Z4E.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "after correction attempt 1 of f_01M1ZJEGQG6F0CEY81",
+   "part_id": null,
+   "evidence_label": "inferred_construction",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     1.5793443354884311,
+     -1.5793443354884311,
+     3.2727181952168496
+    ],
+    "rotation_euler": [
+     1.0699226087013314,
+     0.0,
+     0.7853981633974483
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.05
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.7
+     ],
+     "fit_radius": 0.5978294071054049,
+     "distance": 2.5463104376711687,
+     "direction": "three_quarter",
+     "margin": 1.15,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": false,
+   "stale_reason": null,
+   "created_at": "2026-09-08T03:54:34.855054Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGZ9P9CENSES",
+   "view_name": "closeup:p_housing",
+   "view_id": "view_01M1ZJEG89SDCXH3MF",
+   "revision_id": "rev_01M1ZJEGX4H2Q3THPM",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGZ9P9CENSES.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "after correction attempt 1 of f_01M1ZJEGQG6F0CEY81",
+   "part_id": "p_housing",
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     1.6912428098275645,
+     -1.6912428098275645,
+     3.259349272124566
+    ],
+    "rotation_euler": [
+     1.0699226087013316,
+     0.0,
+     0.7853981633974483
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      1.9500000000000002
+     ],
+     "size": [
+      0.9,
+      0.36,
+      0.5000000000000002
+     ],
+     "fit_radius": 0.5453439281774393,
+     "distance": 2.7267196408871963,
+     "direction": "three_quarter",
+     "margin": 1.35,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": false,
+   "stale_reason": null,
+   "created_at": "2026-09-08T03:54:34.864349Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEGZJ43APM3E9",
+   "view_name": "closeup:p_bracket",
+   "view_id": "view_01M1ZJEG8AWZ0430PQ",
+   "revision_id": "rev_01M1ZJEGX4H2Q3THPM",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEGZJ43APM3E9.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "after correction attempt 1 of f_01M1ZJEGQG6F0CEY81",
+   "part_id": "p_bracket",
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     0.675899750242521,
+     -0.675899750242521,
+     2.8732772259942094
+    ],
+    "rotation_euler": [
+     1.0699226087013316,
+     0.0,
+     0.7853981633974483
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.3499999999999996
+     ],
+     "size": [
+      0.3,
+      0.3,
+      0.10000000000000009
+     ],
+     "fit_radius": 0.21794494717703367,
+     "distance": 1.0897247358851683,
+     "direction": "three_quarter",
+     "margin": 1.35,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": false,
+   "stale_reason": null,
+   "created_at": "2026-09-08T03:54:34.873026Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEH03C9SKEZJC",
+   "view_name": "closeup:p_bracket@side",
+   "view_id": "view_01M1ZJEH01MPFG5DJX",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEH03C9SKEZJC.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "close-up in the finding's view, before f_01M1ZJEGQG6F0CEY81",
+   "part_id": "p_bracket",
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     1.0897247358851683,
+     0.0,
+     2.3499999999999996
+    ],
+    "rotation_euler": [
+     1.5707963267948966,
+     0.0,
+     1.5707963267948966
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.3499999999999996
+     ],
+     "size": [
+      0.3,
+      0.3,
+      0.10000000000000009
+     ],
+     "fit_radius": 0.21794494717703367,
+     "distance": 1.0897247358851683,
+     "direction": "side",
+     "margin": 1.35,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": true,
+   "stale_reason": "revision_mismatch",
+   "created_at": "2026-09-08T03:54:34.889440Z",
+   "error": ""
+  },
+  {
+   "id": "rnd_01M1ZJEH0E3CVHVPVF",
+   "view_name": "closeup:p_bracket@side",
+   "view_id": "view_01M1ZJEH01MPFG5DJX",
+   "revision_id": "rev_01M1ZJEGX4H2Q3THPM",
+   "component_id": "cmp_01M1ZJEG353RGY67FJ",
+   "file": "WORKFLOW\\renders\\rnd_01M1ZJEH0E3CVHVPVF.png",
+   "mode": "clay",
+   "state": "ok",
+   "reason": "close-up in the finding's view, after f_01M1ZJEGQG6F0CEY81",
+   "part_id": "p_bracket",
+   "evidence_label": "matched",
+   "resolution": [
+    640,
+    480
+   ],
+   "camera": {
+    "location": [
+     1.0897247358851683,
+     0.0,
+     2.3499999999999996
+    ],
+    "rotation_euler": [
+     1.5707963267948966,
+     0.0,
+     1.5707963267948966
+    ],
+    "lens": 50.0,
+    "type": "PERSP",
+    "clip_start": 0.01,
+    "clip_end": 1000.0,
+    "framing": {
+     "center": [
+      0.0,
+      0.0,
+      2.3499999999999996
+     ],
+     "size": [
+      0.3,
+      0.3,
+      0.10000000000000009
+     ],
+     "fit_radius": 0.21794494717703367,
+     "distance": 1.0897247358851683,
+     "direction": "side",
+     "margin": 1.35,
+     "half_vertical_fov_rad": 0.26371183446226615,
+     "aspect": [
+      4,
+      3
+     ]
+    }
+   },
+   "engine": null,
+   "stale": false,
+   "stale_reason": null,
+   "created_at": "2026-09-08T03:54:34.901142Z",
+   "error": ""
+  }
+ ],
+ "parts": [
+  {
+   "id": "p_base",
+   "name": "p_base",
+   "parent_id": null,
+   "state": "planned",
+   "blender_ids": [
+    "p_base"
+   ],
+   "evidence_status": "observed",
+   "confidence": "medium",
+   "interpretation": "x",
+   "questions": [],
+   "dimensions": [],
+   "component": "Head",
+   "owner": "B",
+   "alloy_kind": null,
+   "instance_of": null,
+   "relations": []
+  },
+  {
+   "id": "p_post",
+   "name": "p_post",
+   "parent_id": null,
+   "state": "planned",
+   "blender_ids": [
+    "p_post"
+   ],
+   "evidence_status": "observed",
+   "confidence": "medium",
+   "interpretation": "x",
+   "questions": [],
+   "dimensions": [],
+   "component": "Head",
+   "owner": "B",
+   "alloy_kind": null,
+   "instance_of": null,
+   "relations": []
+  },
+  {
+   "id": "p_housing",
+   "name": "p_housing",
+   "parent_id": null,
+   "state": "planned",
+   "blender_ids": [
+    "p_housing"
+   ],
+   "evidence_status": "observed",
+   "confidence": "medium",
+   "interpretation": "x",
+   "questions": [],
+   "dimensions": [],
+   "component": "Head",
+   "owner": "B",
+   "alloy_kind": null,
+   "instance_of": null,
+   "relations": [
+    {
+     "id": "rel_01M1ZJEG7ASJXTZ9RV",
+     "type": "attached_to",
+     "from_part": "p_bracket",
+     "to_part": "p_housing",
+     "direction": "in",
+     "evidence": "plan"
+    }
+   ]
+  },
+  {
+   "id": "p_bracket",
+   "name": "p_bracket",
+   "parent_id": null,
+   "state": "planned",
+   "blender_ids": [
+    "p_bracket"
+   ],
+   "evidence_status": "observed",
+   "confidence": "medium",
+   "interpretation": "x",
+   "questions": [],
+   "dimensions": [],
+   "component": "Head",
+   "owner": "A",
+   "alloy_kind": null,
+   "instance_of": null,
+   "relations": [
+    {
+     "id": "rel_01M1ZJEG7ASJXTZ9RV",
+     "type": "attached_to",
+     "from_part": "p_bracket",
+     "to_part": "p_housing",
+     "direction": "out",
+     "evidence": "plan"
+    }
+   ]
+  },
+  {
+   "id": "p_lens",
+   "name": "p_lens",
+   "parent_id": null,
+   "state": "planned",
+   "blender_ids": [
+    "p_lens"
+   ],
+   "evidence_status": "observed",
+   "confidence": "medium",
+   "interpretation": "x",
+   "questions": [],
+   "dimensions": [],
+   "component": "Head",
+   "owner": "B",
+   "alloy_kind": null,
+   "instance_of": null,
+   "relations": []
+  },
+  {
+   "id": "p_bolt",
+   "name": "p_bolt",
+   "parent_id": null,
+   "state": "planned",
+   "blender_ids": [
+    "p_bolt"
+   ],
+   "evidence_status": "observed",
+   "confidence": "medium",
+   "interpretation": "x",
+   "questions": [],
+   "dimensions": [],
+   "component": "Head",
+   "owner": "B",
+   "alloy_kind": null,
+   "instance_of": null,
+   "relations": []
+  }
+ ],
+ "relations": [
+  {
+   "id": "rel_01M1ZJEG7ASJXTZ9RV",
+   "from_part": "p_bracket",
+   "to_part": "p_housing",
+   "type": "attached_to",
+   "evidence": "plan"
+  }
+ ],
+ "findings": [
+  {
+   "id": "f_01M1ZJEGQG6F0CEY81",
+   "state": "closed",
+   "part_id": "p_bracket",
+   "region": "mount",
+   "view": "side",
+   "severity": "high",
+   "confidence": "high",
+   "observed_mismatch": "bracket floats above housing",
+   "proposed_correction": "lower bracket onto housing",
+   "expected_improvement": "no gap visible in side view",
+   "alternative_hypotheses": [],
+   "kind": "defect",
+   "evidence_refs": [
+    "render:side"
+   ],
+   "evidence_render_ids": [
+    "rnd_01M1ZJEGH8D7G0057F"
+   ],
+   "before_render_ids": [
+    "rnd_01M1ZJEGGZMVCPKD7V",
+    "rnd_01M1ZJEGH8D7G0057F",
+    "rnd_01M1ZJEGHH5WMGCRPA",
+    "rnd_01M1ZJEGHSFK1QEQ5Y",
+    "rnd_01M1ZJEGJ28MSKJZ1C",
+    "rnd_01M1ZJEGJBVQ75F599",
+    "rnd_01M1ZJEGJM5JXDQJVQ",
+    "rnd_01M1ZJEGJX1VXN2JA9"
+   ],
+   "after_render_ids": [
+    "rnd_01M1ZJEGXM45CCFKEV",
+    "rnd_01M1ZJEGXWJDSVTR4M",
+    "rnd_01M1ZJEGY682RB4Q2Z",
+    "rnd_01M1ZJEGYEZA8TKRP2",
+    "rnd_01M1ZJEGYQYENBRKXX",
+    "rnd_01M1ZJEGZ0V7PG0Z4E",
+    "rnd_01M1ZJEGZ9P9CENSES",
+    "rnd_01M1ZJEGZJ43APM3E9",
+    "rnd_01M1ZJEH0E3CVHVPVF"
+   ],
+   "source_revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "reported_by": "ag_B",
+   "owner_agent_id": "ag_B",
+   "attempts": [
+    {
+     "id": "ca_01M1ZJEGT35X1PSX57",
+     "state": "improved",
+     "attempt_no": 1,
+     "before_render_ids": [
+      "rnd_01M1ZJEGGZMVCPKD7V",
+      "rnd_01M1ZJEGH8D7G0057F",
+      "rnd_01M1ZJEGHH5WMGCRPA",
+      "rnd_01M1ZJEGHSFK1QEQ5Y",
+      "rnd_01M1ZJEGJ28MSKJZ1C",
+      "rnd_01M1ZJEGJBVQ75F599",
+      "rnd_01M1ZJEGJM5JXDQJVQ",
+      "rnd_01M1ZJEGJX1VXN2JA9"
+     ],
+     "after_render_ids": [
+      "rnd_01M1ZJEGXM45CCFKEV",
+      "rnd_01M1ZJEGXWJDSVTR4M",
+      "rnd_01M1ZJEGY682RB4Q2Z",
+      "rnd_01M1ZJEGYEZA8TKRP2",
+      "rnd_01M1ZJEGYQYENBRKXX",
+      "rnd_01M1ZJEGZ0V7PG0Z4E",
+      "rnd_01M1ZJEGZ9P9CENSES",
+      "rnd_01M1ZJEGZJ43APM3E9"
+     ],
+     "aligned_closeup_view": "closeup:p_bracket@side"
+    }
+   ],
+   "resolution": {
+    "verdict": "improved",
+    "verified_by": "ag_A",
+    "invocation_id": "inv_01M1ZJEH4XPM6QBCT0",
+    "attempt_id": "ca_01M1ZJEGT35X1PSX57",
+    "at": "2026-09-08T03:54:35.046759Z",
+    "rationale": "scripted"
+   },
+   "last_verdict": null,
+   "user_requests": [],
+   "component_id": "cmp_01M1ZJEG353RGY67FJ"
+  }
+ ],
+ "coverage": [
+  {
+   "id": "cov_01M1ZJEGQJ76SZ9869",
+   "part_id": "p_base",
+   "view_name": "front",
+   "view_id": "view_01M1ZJEG81P35Z46G5",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQJSD18QYTB",
+   "part_id": "p_base",
+   "view_name": "side",
+   "view_id": "view_01M1ZJEG82RBA0104Z",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQKA955C5V9",
+   "part_id": "p_base",
+   "view_name": "three_quarter",
+   "view_id": "view_01M1ZJEG833QZ1WG3T",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQKZV50Z0RF",
+   "part_id": "p_post",
+   "view_name": "front",
+   "view_id": "view_01M1ZJEG81P35Z46G5",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQMWKRKTG9G",
+   "part_id": "p_post",
+   "view_name": "side",
+   "view_id": "view_01M1ZJEG82RBA0104Z",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQNPSPDWKBY",
+   "part_id": "p_post",
+   "view_name": "three_quarter",
+   "view_id": "view_01M1ZJEG833QZ1WG3T",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQNT7Q655MJ",
+   "part_id": "p_housing",
+   "view_name": "front",
+   "view_id": "view_01M1ZJEG81P35Z46G5",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQPSVVASXJ7",
+   "part_id": "p_housing",
+   "view_name": "side",
+   "view_id": "view_01M1ZJEG82RBA0104Z",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQPCZ9GRC0B",
+   "part_id": "p_housing",
+   "view_name": "three_quarter",
+   "view_id": "view_01M1ZJEG833QZ1WG3T",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQQGYEER189",
+   "part_id": "p_bracket",
+   "view_name": "front",
+   "view_id": "view_01M1ZJEG81P35Z46G5",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQQMR240EBP",
+   "part_id": "p_bracket",
+   "view_name": "side",
+   "view_id": "view_01M1ZJEG82RBA0104Z",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQRT3E5W1T7",
+   "part_id": "p_bracket",
+   "view_name": "three_quarter",
+   "view_id": "view_01M1ZJEG833QZ1WG3T",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQSXV6S1WPW",
+   "part_id": "p_lens",
+   "view_name": "front",
+   "view_id": "view_01M1ZJEG81P35Z46G5",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQS7RFZ7F7D",
+   "part_id": "p_lens",
+   "view_name": "side",
+   "view_id": "view_01M1ZJEG82RBA0104Z",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQTDXVZYBGW",
+   "part_id": "p_lens",
+   "view_name": "three_quarter",
+   "view_id": "view_01M1ZJEG833QZ1WG3T",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQTDMYW4XC6",
+   "part_id": "p_bolt",
+   "view_name": "front",
+   "view_id": "view_01M1ZJEG81P35Z46G5",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQVYCXQFFPH",
+   "part_id": "p_bolt",
+   "view_name": "side",
+   "view_id": "view_01M1ZJEG82RBA0104Z",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEGQVTFZFJ4VK",
+   "part_id": "p_bolt",
+   "view_name": "three_quarter",
+   "view_id": "view_01M1ZJEG833QZ1WG3T",
+   "revision_id": "rev_01M1ZJEGGMWB3ERXVJ",
+   "inspected_by": "B",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEH55G1XHXWY9",
+   "part_id": "p_bracket",
+   "view_name": "front",
+   "view_id": "view_01M1ZJEG81P35Z46G5",
+   "revision_id": "rev_01M1ZJEGX4H2Q3THPM",
+   "inspected_by": "A",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEH55KZHKGS77",
+   "part_id": "p_bracket",
+   "view_name": "side",
+   "view_id": "view_01M1ZJEG82RBA0104Z",
+   "revision_id": "rev_01M1ZJEGX4H2Q3THPM",
+   "inspected_by": "A",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  },
+  {
+   "id": "cov_01M1ZJEH56A1E89M6J",
+   "part_id": "p_bracket",
+   "view_name": "three_quarter",
+   "view_id": "view_01M1ZJEG833QZ1WG3T",
+   "revision_id": "rev_01M1ZJEGX4H2Q3THPM",
+   "inspected_by": "A",
+   "instances_inspected": "all",
+   "sampling_strategy": null
+  }
+ ],
+ "measurements": {
+  "rev_01M1ZJEFTDCZMX2QXB": {
+   "p_bracket": {
+    "min": [
+     -0.15,
+     -0.15,
+     2.3
+    ],
+    "max": [
+     0.15,
+     0.15,
+     2.4
+    ]
+   },
+   "p_housing": {
+    "min": [
+     -0.45,
+     -0.18,
+     1.7
+    ],
+    "max": [
+     0.45,
+     0.18,
+     2.2
+    ]
+   }
+  },
+  "rev_01M1ZJEGGMWB3ERXVJ": {
+   "p_bracket": {
+    "min": [
+     -0.15,
+     -0.15,
+     2.3
+    ],
+    "max": [
+     0.15,
+     0.15,
+     2.4
+    ]
+   },
+   "p_housing": {
+    "min": [
+     -0.45,
+     -0.18,
+     1.7
+    ],
+    "max": [
+     0.45,
+     0.18,
+     2.2
+    ]
+   }
+  },
+  "rev_01M1ZJEGX4H2Q3THPM": {
+   "p_bracket": {
+    "min": [
+     -0.15,
+     -0.15,
+     2.3
+    ],
+    "max": [
+     0.15,
+     0.15,
+     2.4
+    ]
+   },
+   "p_housing": {
+    "min": [
+     -0.45,
+     -0.18,
+     1.7
+    ],
+    "max": [
+     0.45,
+     0.18,
+     2.2
+    ]
+   }
+  }
+ },
+ "checkpoints": [
+  {
+   "id": "ck_01M1ZJEG7E02S0BXM2",
+   "name": "base before t_01M1ZJEG7DE5GRM6SH",
+   "revision_id": "rev_01M1ZJEFTDCZMX2QXB",
+   "created_at": "2026-09-08T03:54:34.094555Z"
+  },
+  {
+   "id": "ck_01M1ZJEH5Z6JBQ9J25",
+   "name": "review-ready cmp_01M1ZJEG353RGY67FJ",
+   "revision_id": "rev_01M1ZJEGX4H2Q3THPM",
+   "created_at": "2026-09-08T03:54:35.071312Z"
+  }
+ ],
+ "consumption": {
+  "elapsed_s": 1.149,
+  "requests": {
+   "inflight": 0,
+   "completed": 9
+  },
+  "renders": {
+   "inflight": 0,
+   "completed": 26
+  },
+  "cost": {
+   "measured": {
+    "kind": "unknown"
+   },
+   "estimated": {
+    "kind": "unknown"
+   },
+   "unknown_invocations": 19
+  },
+  "limits": {
+   "wall_clock_minutes": {
+    "value": 0,
+    "unlimited": true,
+    "enforceable": true
+   },
+   "max_cost_usd": {
+    "value": 0.0,
+    "unlimited": true,
+    "enforceable": false,
+    "note": "no monetary cap configured"
+   },
+   "max_requests": {
+    "value": 0,
+    "unlimited": true,
+    "enforceable": true
+   },
+   "max_renders": {
+    "value": 0,
+    "unlimited": true,
+    "enforceable": true
+   },
+   "attempts_per_finding": {
+    "value": 2,
+    "unlimited": false,
+    "enforceable": true
+   },
+   "stall_steps": {
+    "value": 12,
+    "unlimited": false,
+    "enforceable": true
+   }
+  },
+  "transport_retries": 0,
+  "correction_attempts": {
+   "f_01M1ZJEGQG6F0CEY81": 1
+  },
+  "max_invocation_cost": {},
+  "findings_at_attempt_limit": [],
+  "per_agent": {
+   "ag_A": {
+    "requests": 5,
+    "retries": 0
+   },
+   "ag_B": {
+    "requests": 4,
+    "retries": 0
+   }
+  },
+  "external": {
+   "preflight_probe": {
+    "measured": 0.0,
+    "estimated": 0.0,
+    "unknown_invocations": 10
+   }
+  },
+  "steps_without_progress": 1,
+  "last_progress_key": [
+   2,
+   1,
+   true,
+   1,
+   1,
+   1,
+   1,
+   0,
+   0,
+   0
+  ]
+ },
+ "contributions": {
+  "A": 1,
+  "B": 1
+ },
+ "questions_for_user": [],
+ "notes": [
+  {
+   "at": "2026-09-08T03:54:35.098985Z",
+   "stop_reason": "ready_for_user_review",
+   "note": "component Head is ready for user review at rev_01M1ZJEGX4H2Q3THPM; it is not accepted"
+  }
+ ],
+ "remaining_discrepancies": [],
+ "uncertainties": [],
+ "concept": {
+  "plan_id": null,
+  "mode": "each",
+  "mode_text": "approval mode each: the owner approves every generated image before it is used",
+  "canon_state": "no_canon",
+  "anchor": null,
+  "prompts": [],
+  "candidates": [],
+  "coverage": {},
+  "parts": {},
+  "missing": [],
+  "complete": false,
+  "conflicts": [],
+  "escalations": [],
+  "images": {
+   "count": 0,
+   "max": 40
+  },
+  "proceeded_partial": null,
+  "seat": {
+   "seat": "manual",
+   "label": "I",
+   "vendor": "chatgpt",
+   "model": "as declared by the owner at import (per request)",
+   "mode": "the owner generates in the vendor's app from the prompt Alloy wrote and imports the files",
+   "provenance": "declared by the owner at import; Alloy cannot verify the vendor or model and records both as declarations",
+   "cost": "not applicable (no vendor cost accounting for a manual seat, R-105)"
+  },
+  "cost": {
+   "kind": "not_applicable",
+   "reason": "manual image seat: the owner generated in an app; Alloy does no vendor cost accounting (D12)"
+  },
+  "art_director": null,
+  "rejected_rounds": 0,
+  "flow_confirmed_at": null,
+  "requests": {
+   "open": [],
+   "by_state": {
+    "open": 0,
+    "imported": 0,
+    "checked": 0,
+    "approved": 0,
+    "rejected": 0,
+    "abandoned": 0,
+    "failed": 0
+   }
+  }
+ },
+ "journal_tail": [
+  {
+   "seq": 230,
+   "ts": "2026-09-08T03:54:34.789902Z",
+   "actor": "engine",
+   "event": "op.promoting",
+   "record_kind": null,
+   "record_id": null,
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 231,
+   "ts": "2026-09-08T03:54:34.792481Z",
+   "actor": "engine",
+   "event": "revision.created",
+   "record_kind": "revision",
+   "record_id": "rev_01M1ZJEGX4H2Q3THPM",
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 232,
+   "ts": "2026-09-08T03:54:34.794498Z",
+   "actor": "engine",
+   "event": "op.committed",
+   "record_kind": "operation",
+   "record_id": "op_01M1ZJEGWHCYSPXP3R",
+   "from_state": "promoting",
+   "to_state": "committed",
+   "outcome": "committed"
+  },
+  {
+   "seq": 233,
+   "ts": "2026-09-08T03:54:34.795262Z",
+   "actor": "engine",
+   "event": "ownership.advanced",
+   "record_kind": "ownership",
+   "record_id": "own_01M1ZJEGSP3G9PKX7T",
+   "from_state": "held",
+   "to_state": "held",
+   "outcome": null
+  },
+  {
+   "seq": 234,
+   "ts": "2026-09-08T03:54:34.796590Z",
+   "actor": "engine",
+   "event": "run.transition",
+   "record_kind": "run",
+   "record_id": "run_01M1ZJEG34XTTW01GR",
+   "from_state": "rendering",
+   "to_state": "running",
+   "outcome": "running"
+  },
+  {
+   "seq": 235,
+   "ts": "2026-09-08T03:54:34.797433Z",
+   "actor": "engine",
+   "event": "task.done",
+   "record_kind": "task",
+   "record_id": "t_01M1ZJEGSQYNA5Z6NY",
+   "from_state": "in_progress",
+   "to_state": "done",
+   "outcome": null
+  },
+  {
+   "seq": 236,
+   "ts": "2026-09-08T03:54:34.801616Z",
+   "actor": "engine",
+   "event": "agent.context_tagged",
+   "record_kind": "agent",
+   "record_id": "ag_B",
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 237,
+   "ts": "2026-09-08T03:54:34.803670Z",
+   "actor": "engine",
+   "event": "run.transition",
+   "record_kind": "run",
+   "record_id": "run_01M1ZJEG34XTTW01GR",
+   "from_state": "running",
+   "to_state": "rendering",
+   "outcome": "rendering"
+  },
+  {
+   "seq": 238,
+   "ts": "2026-09-08T03:54:34.810644Z",
+   "actor": "engine",
+   "event": "render.created",
+   "record_kind": "render",
+   "record_id": "rnd_01M1ZJEGXM45CCFKEV",
+   "from_state": null,
+   "to_state": "ok",
+   "outcome": "ok"
+  },
+  {
+   "seq": 239,
+   "ts": "2026-09-08T03:54:34.819878Z",
+   "actor": "engine",
+   "event": "render.created",
+   "record_kind": "render",
+   "record_id": "rnd_01M1ZJEGXWJDSVTR4M",
+   "from_state": null,
+   "to_state": "ok",
+   "outcome": "ok"
+  },
+  {
+   "seq": 240,
+   "ts": "2026-09-08T03:54:34.828550Z",
+   "actor": "engine",
+   "event": "render.created",
+   "record_kind": "render",
+   "record_id": "rnd_01M1ZJEGY682RB4Q2Z",
+   "from_state": null,
+   "to_state": "ok",
+   "outcome": "ok"
+  },
+  {
+   "seq": 241,
+   "ts": "2026-09-08T03:54:34.837182Z",
+   "actor": "engine",
+   "event": "render.created",
+   "record_kind": "render",
+   "record_id": "rnd_01M1ZJEGYEZA8TKRP2",
+   "from_state": null,
+   "to_state": "ok",
+   "outcome": "ok"
+  },
+  {
+   "seq": 242,
+   "ts": "2026-09-08T03:54:34.846139Z",
+   "actor": "engine",
+   "event": "render.created",
+   "record_kind": "render",
+   "record_id": "rnd_01M1ZJEGYQYENBRKXX",
+   "from_state": null,
+   "to_state": "ok",
+   "outcome": "ok"
+  },
+  {
+   "seq": 243,
+   "ts": "2026-09-08T03:54:34.855113Z",
+   "actor": "engine",
+   "event": "render.created",
+   "record_kind": "render",
+   "record_id": "rnd_01M1ZJEGZ0V7PG0Z4E",
+   "from_state": null,
+   "to_state": "ok",
+   "outcome": "ok"
+  },
+  {
+   "seq": 244,
+   "ts": "2026-09-08T03:54:34.864412Z",
+   "actor": "engine",
+   "event": "render.created",
+   "record_kind": "render",
+   "record_id": "rnd_01M1ZJEGZ9P9CENSES",
+   "from_state": null,
+   "to_state": "ok",
+   "outcome": "ok"
+  },
+  {
+   "seq": 245,
+   "ts": "2026-09-08T03:54:34.873087Z",
+   "actor": "engine",
+   "event": "render.created",
+   "record_kind": "render",
+   "record_id": "rnd_01M1ZJEGZJ43APM3E9",
+   "from_state": null,
+   "to_state": "ok",
+   "outcome": "ok"
+  },
+  {
+   "seq": 246,
+   "ts": "2026-09-08T03:54:34.875632Z",
+   "actor": "engine",
+   "event": "run.transition",
+   "record_kind": "run",
+   "record_id": "run_01M1ZJEG34XTTW01GR",
+   "from_state": "rendering",
+   "to_state": "running",
+   "outcome": "running"
+  },
+  {
+   "seq": 247,
+   "ts": "2026-09-08T03:54:34.876544Z",
+   "actor": "engine",
+   "event": "correction_attempt.rendered",
+   "record_kind": "correction_attempt",
+   "record_id": "ca_01M1ZJEGT35X1PSX57",
+   "from_state": "in_progress",
+   "to_state": "in_progress",
+   "outcome": null
+  },
+  {
+   "seq": 248,
+   "ts": "2026-09-08T03:54:34.877183Z",
+   "actor": "engine",
+   "event": "finding.verify_pending",
+   "record_kind": "finding",
+   "record_id": "f_01M1ZJEGQG6F0CEY81",
+   "from_state": "correcting",
+   "to_state": "verify_pending",
+   "outcome": null
+  },
+  {
+   "seq": 249,
+   "ts": "2026-09-08T03:54:34.877871Z",
+   "actor": "engine",
+   "event": "run.stage",
+   "record_kind": "run",
+   "record_id": "run_01M1ZJEG34XTTW01GR",
+   "from_state": "running",
+   "to_state": "running",
+   "outcome": null
+  },
+  {
+   "seq": 250,
+   "ts": "2026-09-08T03:54:34.881265Z",
+   "actor": "engine",
+   "event": "camera.created",
+   "record_kind": "camera",
+   "record_id": "cam_01M1ZJEH01VD2NS98H",
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 251,
+   "ts": "2026-09-08T03:54:34.881787Z",
+   "actor": "engine",
+   "event": "view.created",
+   "record_kind": "view",
+   "record_id": "view_01M1ZJEH01MPFG5DJX",
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 252,
+   "ts": "2026-09-08T03:54:34.882281Z",
+   "actor": "engine",
+   "event": "run.transition",
+   "record_kind": "run",
+   "record_id": "run_01M1ZJEG34XTTW01GR",
+   "from_state": "running",
+   "to_state": "rendering",
+   "outcome": "rendering"
+  },
+  {
+   "seq": 253,
+   "ts": "2026-09-08T03:54:34.889502Z",
+   "actor": "engine",
+   "event": "render.created",
+   "record_kind": "render",
+   "record_id": "rnd_01M1ZJEH03C9SKEZJC",
+   "from_state": null,
+   "to_state": "ok",
+   "outcome": "ok"
+  },
+  {
+   "seq": 254,
+   "ts": "2026-09-08T03:54:34.891630Z",
+   "actor": "engine",
+   "event": "run.transition",
+   "record_kind": "run",
+   "record_id": "run_01M1ZJEG34XTTW01GR",
+   "from_state": "rendering",
+   "to_state": "running",
+   "outcome": "running"
+  },
+  {
+   "seq": 255,
+   "ts": "2026-09-08T03:54:34.893895Z",
+   "actor": "engine",
+   "event": "run.transition",
+   "record_kind": "run",
+   "record_id": "run_01M1ZJEG34XTTW01GR",
+   "from_state": "running",
+   "to_state": "rendering",
+   "outcome": "rendering"
+  },
+  {
+   "seq": 256,
+   "ts": "2026-09-08T03:54:34.901236Z",
+   "actor": "engine",
+   "event": "render.created",
+   "record_kind": "render",
+   "record_id": "rnd_01M1ZJEH0E3CVHVPVF",
+   "from_state": null,
+   "to_state": "ok",
+   "outcome": "ok"
+  },
+  {
+   "seq": 257,
+   "ts": "2026-09-08T03:54:34.903972Z",
+   "actor": "engine",
+   "event": "run.transition",
+   "record_kind": "run",
+   "record_id": "run_01M1ZJEG34XTTW01GR",
+   "from_state": "rendering",
+   "to_state": "running",
+   "outcome": "running"
+  },
+  {
+   "seq": 258,
+   "ts": "2026-09-08T03:54:34.909017Z",
+   "actor": "engine",
+   "event": "task.assigned",
+   "record_kind": "task",
+   "record_id": "t_01M1ZJEH0W4ABDRCQ7",
+   "from_state": null,
+   "to_state": "assigned",
+   "outcome": null
+  },
+  {
+   "seq": 259,
+   "ts": "2026-09-08T03:54:35.035485Z",
+   "actor": "engine",
+   "event": "packet.built",
+   "record_kind": "packet",
+   "record_id": "pk_01M1ZJEH0XR8WF3PCC",
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 260,
+   "ts": "2026-09-08T03:54:35.036827Z",
+   "actor": "engine",
+   "event": "task.in_progress",
+   "record_kind": "task",
+   "record_id": "t_01M1ZJEH0W4ABDRCQ7",
+   "from_state": "assigned",
+   "to_state": "in_progress",
+   "outcome": null
+  },
+  {
+   "seq": 261,
+   "ts": "2026-09-08T03:54:35.037738Z",
+   "actor": "engine",
+   "event": "invocation.started",
+   "record_kind": "invocation",
+   "record_id": "inv_01M1ZJEH4XPM6QBCT0",
+   "from_state": null,
+   "to_state": "running",
+   "outcome": null
+  },
+  {
+   "seq": 262,
+   "ts": "2026-09-08T03:54:35.038417Z",
+   "actor": "engine",
+   "event": "run.transition",
+   "record_kind": "run",
+   "record_id": "run_01M1ZJEG34XTTW01GR",
+   "from_state": "running",
+   "to_state": "waiting_for_provider",
+   "outcome": "waiting_for_provider"
+  },
+  {
+   "seq": 263,
+   "ts": "2026-09-08T03:54:35.039237Z",
+   "actor": "engine",
+   "event": "provider_session.used",
+   "record_kind": "provider_session",
+   "record_id": "ps_01M1ZJEFW9NJRNGFGY",
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 264,
+   "ts": "2026-09-08T03:54:35.039782Z",
+   "actor": "engine",
+   "event": "run.transition",
+   "record_kind": "run",
+   "record_id": "run_01M1ZJEG34XTTW01GR",
+   "from_state": "waiting_for_provider",
+   "to_state": "running",
+   "outcome": "running"
+  },
+  {
+   "seq": 265,
+   "ts": "2026-09-08T03:54:35.040384Z",
+   "actor": "engine",
+   "event": "invocation.completed",
+   "record_kind": "invocation",
+   "record_id": "inv_01M1ZJEH4XPM6QBCT0",
+   "from_state": "running",
+   "to_state": "completed",
+   "outcome": null
+  },
+  {
+   "seq": 266,
+   "ts": "2026-09-08T03:54:35.043476Z",
+   "actor": "engine",
+   "event": "correction_attempt.improved",
+   "record_kind": "correction_attempt",
+   "record_id": "ca_01M1ZJEGT35X1PSX57",
+   "from_state": "in_progress",
+   "to_state": "improved",
+   "outcome": null
+  },
+  {
+   "seq": 267,
+   "ts": "2026-09-08T03:54:35.044217Z",
+   "actor": "engine",
+   "event": "task.done",
+   "record_kind": "task",
+   "record_id": "t_01M1ZJEH0W4ABDRCQ7",
+   "from_state": "in_progress",
+   "to_state": "done",
+   "outcome": null
+  },
+  {
+   "seq": 268,
+   "ts": "2026-09-08T03:54:35.045200Z",
+   "actor": "engine",
+   "event": "coverage.recorded",
+   "record_kind": "coverage",
+   "record_id": "cov_01M1ZJEH55G1XHXWY9",
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 269,
+   "ts": "2026-09-08T03:54:35.045767Z",
+   "actor": "engine",
+   "event": "coverage.recorded",
+   "record_kind": "coverage",
+   "record_id": "cov_01M1ZJEH55KZHKGS77",
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 270,
+   "ts": "2026-09-08T03:54:35.046356Z",
+   "actor": "engine",
+   "event": "coverage.recorded",
+   "record_kind": "coverage",
+   "record_id": "cov_01M1ZJEH56A1E89M6J",
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 271,
+   "ts": "2026-09-08T03:54:35.046830Z",
+   "actor": "engine",
+   "event": "finding.closed",
+   "record_kind": "finding",
+   "record_id": "f_01M1ZJEGQG6F0CEY81",
+   "from_state": "verify_pending",
+   "to_state": "closed",
+   "outcome": null
+  },
+  {
+   "seq": 272,
+   "ts": "2026-09-08T03:54:35.047382Z",
+   "actor": "engine",
+   "event": "run.stage",
+   "record_kind": "run",
+   "record_id": "run_01M1ZJEG34XTTW01GR",
+   "from_state": "running",
+   "to_state": "running",
+   "outcome": null
+  },
+  {
+   "seq": 273,
+   "ts": "2026-09-08T03:54:35.049039Z",
+   "actor": "engine",
+   "event": "run.stage",
+   "record_kind": "run",
+   "record_id": "run_01M1ZJEG34XTTW01GR",
+   "from_state": "running",
+   "to_state": "running",
+   "outcome": null
+  },
+  {
+   "seq": 274,
+   "ts": "2026-09-08T03:54:35.051858Z",
+   "actor": "engine",
+   "event": "run.transition",
+   "record_kind": "run",
+   "record_id": "run_01M1ZJEG34XTTW01GR",
+   "from_state": "running",
+   "to_state": "rendering",
+   "outcome": "rendering"
+  },
+  {
+   "seq": 275,
+   "ts": "2026-09-08T03:54:35.053409Z",
+   "actor": "engine",
+   "event": "render.reused",
+   "record_kind": null,
+   "record_id": null,
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 276,
+   "ts": "2026-09-08T03:54:35.054532Z",
+   "actor": "engine",
+   "event": "render.reused",
+   "record_kind": null,
+   "record_id": null,
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 277,
+   "ts": "2026-09-08T03:54:35.055646Z",
+   "actor": "engine",
+   "event": "render.reused",
+   "record_kind": null,
+   "record_id": null,
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 278,
+   "ts": "2026-09-08T03:54:35.056617Z",
+   "actor": "engine",
+   "event": "render.reused",
+   "record_kind": null,
+   "record_id": null,
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 279,
+   "ts": "2026-09-08T03:54:35.057595Z",
+   "actor": "engine",
+   "event": "render.reused",
+   "record_kind": null,
+   "record_id": null,
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 280,
+   "ts": "2026-09-08T03:54:35.058740Z",
+   "actor": "engine",
+   "event": "render.reused",
+   "record_kind": null,
+   "record_id": null,
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 281,
+   "ts": "2026-09-08T03:54:35.059952Z",
+   "actor": "engine",
+   "event": "render.reused",
+   "record_kind": null,
+   "record_id": null,
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 282,
+   "ts": "2026-09-08T03:54:35.061073Z",
+   "actor": "engine",
+   "event": "render.reused",
+   "record_kind": null,
+   "record_id": null,
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 283,
+   "ts": "2026-09-08T03:54:35.061583Z",
+   "actor": "engine",
+   "event": "run.transition",
+   "record_kind": "run",
+   "record_id": "run_01M1ZJEG34XTTW01GR",
+   "from_state": "rendering",
+   "to_state": "running",
+   "outcome": "running"
+  },
+  {
+   "seq": 284,
+   "ts": "2026-09-08T03:54:35.069769Z",
+   "actor": "engine",
+   "event": "component.transition",
+   "record_kind": "component",
+   "record_id": "cmp_01M1ZJEG353RGY67FJ",
+   "from_state": "changes_required",
+   "to_state": "ready_for_user_review",
+   "outcome": "ready_for_user_review"
+  },
+  {
+   "seq": 285,
+   "ts": "2026-09-08T03:54:35.070817Z",
+   "actor": "engine",
+   "event": "ownership.released",
+   "record_kind": "ownership",
+   "record_id": "own_01M1ZJEGSP3G9PKX7T",
+   "from_state": "held",
+   "to_state": "released",
+   "outcome": null
+  },
+  {
+   "seq": 286,
+   "ts": "2026-09-08T03:54:35.092933Z",
+   "actor": "engine",
+   "event": "checkpoint.created",
+   "record_kind": "checkpoint",
+   "record_id": "ck_01M1ZJEH5Z6JBQ9J25",
+   "from_state": null,
+   "to_state": null,
+   "outcome": null
+  },
+  {
+   "seq": 287,
+   "ts": "2026-09-08T03:54:35.097962Z",
+   "actor": "engine",
+   "event": "acceptance.created",
+   "record_kind": "acceptance",
+   "record_id": "acc_01M1ZJEH6SGT9T7APW",
+   "from_state": null,
+   "to_state": "unaccepted",
+   "outcome": null
+  },
+  {
+   "seq": 288,
+   "ts": "2026-09-08T03:54:35.098469Z",
+   "actor": "engine",
+   "event": "run.stage",
+   "record_kind": "run",
+   "record_id": "run_01M1ZJEG34XTTW01GR",
+   "from_state": "running",
+   "to_state": "running",
+   "outcome": null
+  },
+  {
+   "seq": 289,
+   "ts": "2026-09-08T03:54:35.099071Z",
+   "actor": "engine",
+   "event": "run.transition",
+   "record_kind": "run",
+   "record_id": "run_01M1ZJEG34XTTW01GR",
+   "from_state": "running",
+   "to_state": "waiting_for_user",
+   "outcome": "waiting_for_user"
+  }
+ ]
+}

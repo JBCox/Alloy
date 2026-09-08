@@ -539,6 +539,18 @@ Relay-spawned **helpers** and **teams** are separate and off unless you enable
 them (`--spawn-helpers N` / `--spawn-teams N`, or the sidebar controls), since
 each one spends real account usage.
 
+## Model Builder
+
+Two seats rebuild a concept design as an editable Blender model, with renders as the evidence: the cube
+button at the top of the app nav opens the Model Builder view. New… creates a workflow folder for an asset
+(or the demo fixture on real Blender with scripted seats, which spends nothing), Add image… registers your
+reference sheets, Preflight (live)… probes the seats once (it says what it spends), Start runs the loop
+attended: it stops at "ready for user review" and waits for you to accept, reopen, or ask for a correction.
+Findings show as before/after renders with measured boxes; nothing is ever drawn without a measurement, and a
+stale render says so. Limits (cost, requests, renders, attempts) are yours to set; an unknown cost is never
+counted as zero. The CLI is `builder.cmd <verb>`; settings live in `sessions\builder.json`; the manual is
+`docs/builder/` and the design is `docs/plans/2026-09-07-collaborative-model-builder-design.md`.
+
 ## Notes
 
 - **Gemini** rides Google's **Antigravity CLI** (`agy`, installed at

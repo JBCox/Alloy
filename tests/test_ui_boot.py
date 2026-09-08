@@ -3653,6 +3653,79 @@ if (topLevelError) {
   // (bootSeats above is the record of what boot itself built.)
   try { ctx.addSeat('gpt'); ctx.addSeat('gemini'); } catch (e) {}
 
+
+  // ---- Model Builder view: the REAL uiEvent drives the real section -------------
+  // (tests/test_builder_ui.py pins the source; this is what only an executing
+  // page can answer: nothing throws, the switch flips, a snapshot paints every
+  // panel, busy darkens the Tk eleven and leaves the escape hatches lit)
+  try {
+    more.builder = {};
+    const B = more.builder;
+    const fix = process.env.BUILDER_SNAPSHOT ? JSON.parse(process.env.BUILDER_SNAPSHOT) : null;
+    const kids = el => Array.from((el && el.children) || []);
+    const rows = host => { const t = kids(host)[0]; const tb = t && kids(t)[1]; return tb ? kids(tb).length : -1; };
+    const text = host => kids(kids(host)[0]).map(d => d.textContent).join('\n');
+    B.hiddenAtBoot = !!byId['builderView'].hidden;
+    B.dotHiddenAtBoot = !!byId['builderDot'].hidden;
+    ctx.setBuilderOpen(true);
+    B.opened = !byId['builderView'].hidden;
+    B.bodyClass = String(document.body.className || '');
+    ctx.uiEvent({event: 'builder', payload: {kind: 'snapshot', snapshot: {}, state: {open: false}}});
+    B.emptyName = byId['bProjectName'].textContent;
+    B.emptyMode = byId['bModeLine'].textContent;
+    B.startDisabledWhenClosed = !!byId['bStart'].disabled;
+    if (fix) {
+      ctx.uiEvent({event: 'builder', payload: {kind: 'snapshot', snapshot: fix, state: {open: true}}});
+      B.name = byId['bProjectName'].textContent;
+      B.pills = kids(byId['bPills']).map(c => c.textContent);
+      B.partRows = rows(byId['bParts']);
+      B.findingRows = rows(byId['bFindings']);
+      B.coverageRows = rows(byId['bCoverage']);
+      B.refRows = rows(byId['bRefs']);
+      B.agentRows = rows(byId['bAgents']);
+      // the limits grid is rebuilt on every snapshot and keystroke, so rows are found by their label
+      const limRows = () => kids(kids(byId['bLimits'])[0]).filter(c => (c.className || '').includes('b-lim-row'));
+      const limRow = name => limRows().find(r => kids(r)[0] && kids(r)[0].textContent === name);
+      B.costState = limRow('max_cost_usd') ? kids(limRow('max_cost_usd'))[3].textContent : null;
+      B.limitNotes = kids(kids(byId['bLimits'])[0]).filter(c => (c.className || '').includes('b-lim-note')).map(c => c.textContent);
+      B.consumption = text(byId['bConsumption']);
+      B.stage = text(byId['bStageText']);
+      B.agentText = text(byId['bAgentText']);
+      B.startEnabledAtGate = !byId['bStart'].disabled;
+      B.acceptEnabled = !byId['bAccept'].disabled;
+      const stale = (fix.renders || []).find(r => r.stale && r.state === 'ok');
+      if (stale) { byId['bRenderSel'].value = stale.id; byId['bRenderSel'].onchange(); }
+      B.provRight = kids(byId['bPaneR'])[1] ? kids(byId['bPaneR'])[1].textContent : null;
+      B.provLeft = kids(byId['bPaneL'])[1] ? kids(byId['bPaneL'])[1].textContent : null;
+      const inp = limRow('max_requests') && kids(limRow('max_requests'))[1];
+      if (inp) { inp.value = '25'; inp.oninput(); }
+      B.typedState = limRow('max_requests') ? kids(limRow('max_requests'))[3].textContent : null;
+      B.applyEnabled = !byId['bApplyLimits'].disabled;
+      ctx.uiEvent({event: 'builder', payload: {kind: 'busy', job: 'open', state: {open: true, busy: 'open'}}});
+      B.busyJob = byId['bJob'].textContent;
+      B.busyStart = !!byId['bStart'].disabled; B.busyCancel = !!byId['bCancel'].disabled;
+      B.busyPause = !!byId['bPause'].disabled; B.busyFeedback = !!byId['bFeedback'].disabled;
+      B.busyDot = !byId['builderDot'].hidden;
+      ctx.uiEvent({event: 'builder', payload: {kind: 'done', job: 'open', result: {ok: true}, state: {open: true, busy: null}}});
+      B.doneStart = !!byId['bStart'].disabled; B.doneJob = byId['bJob'].textContent;
+      ctx.uiEvent({event: 'builder', payload: {kind: 'event', event: {event: 'stage', stage: 'build'}}});
+      const acts = kids(byId['bActivity']);
+      B.lastActivity = acts.length ? acts[acts.length - 1].textContent : null;
+      ctx.uiEvent({event: 'builder', payload: {kind: 'error', job: 'start', message: 'boom'}});
+      B.errorJob = byId['bJob'].textContent;
+      const ftable = kids(byId['bFindings'])[0];
+      const frow = ftable && kids(ftable)[1] && kids(kids(ftable)[1])[0];
+      if (frow && frow.onclick) frow.onclick();
+      B.leftTitle = kids(byId['bPaneL'])[0] ? kids(byId['bPaneL'])[0].textContent : null;
+      B.rightProvAfterFinding = kids(byId['bPaneR'])[1] ? kids(byId['bPaneR'])[1].textContent : null;
+      B.baChecked = !!byId['bCmpModeBA'].checked;
+      B.findingText = text(byId['bFindingText']);
+      B.partText = text(byId['bPartText']);
+    }
+    ctx.setBuilderOpen(false);
+    B.closed = !!byId['builderView'].hidden;
+    B.bodyClassAfter = String(document.body.className || '');
+  } catch (e) { more.builderError = String(e && e.stack || e); }
   report({bootRan: fns.length > 0, bootError, more});
 })();
 """
@@ -4878,6 +4951,9 @@ class UiBootTests(unittest.TestCase):
         "hooksModal": "closeHooks(", "roomsModal": "closeRooms(",
         "schedModal": "closeSched(", "statsModal": "closeStats(",
         "memModal": "closeMemory(",
+        # the Model Builder view's own dialogs share one closer
+        "bConfirmModal": "bCloseModals(", "bPromptModal": "bCloseModals(",
+        "bNewModal": "bCloseModals(",
         # these two REVERT a picker, so Escape checks them by id
         "deskModal": '$("deskModal")', "brwsModal": '$("brwsModal")',
     }
@@ -5761,6 +5837,87 @@ class UiBootTests(unittest.TestCase):
         self.assertIn("if (activeId !== openedId) return;", body)
         self.assertLess(body.index("await loadReport(openedId);"),
                         body.index("if (activeId !== openedId) return;"))
+
+
+@unittest.skipUnless(NODE, "node not installed")
+class BuilderViewUiTests(unittest.TestCase):
+    """The Model Builder view, driven through the REAL uiEvent with a real read model
+    (tests/fixtures/builder_snapshot.json: the fake-runner fixture run to its review gate)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        fixture = os.path.join(os.path.dirname(UI), "..", "tests", "fixtures", "builder_snapshot.json")
+        with open(fixture, encoding="utf-8") as f:
+            snap = f.read()
+        report = boot(UI, cls._tmp.name, extra_env={"BUILDER_SNAPSHOT": snap})
+        cls.err = report.get("builderError")
+        cls.b = report.get("builder") or {}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_probe_ran_clean(self):
+        self.assertIsNone(self.err, self.err)
+
+    def test_the_switch_shows_the_view_and_hides_the_chat(self):
+        self.assertTrue(self.b["hiddenAtBoot"])
+        self.assertTrue(self.b["dotHiddenAtBoot"])
+        self.assertTrue(self.b["opened"])
+        self.assertIn("builder-open", self.b["bodyClass"])
+        self.assertTrue(self.b["closed"])
+        self.assertNotIn("builder-open", self.b["bodyClassAfter"])
+
+    def test_an_empty_snapshot_is_the_no_project_state(self):
+        self.assertEqual(self.b["emptyName"], "no project open")
+        self.assertEqual(self.b["emptyMode"], "approval mode: -")
+        self.assertTrue(self.b["startDisabledWhenClosed"])
+
+    def test_a_real_snapshot_paints_every_panel(self):
+        self.assertTrue(self.b["name"].startswith("Lamp"), self.b["name"])
+        self.assertIn("execution waiting_for_user", self.b["pills"])
+        self.assertGreaterEqual(self.b["partRows"], 6)          # six parts plus the construction relation rows
+        self.assertEqual(self.b["findingRows"], 1)
+        self.assertEqual(self.b["coverageRows"], 21)
+        self.assertEqual(self.b["refRows"], 2)
+        self.assertEqual(self.b["agentRows"], 2)
+        self.assertIn("(unknown is never zero)", self.b["consumption"])
+        self.assertIn("ownership:", self.b["stage"])
+        self.assertIn("declared=", self.b["agentText"])
+        self.assertTrue(self.b["startEnabledAtGate"])
+        self.assertTrue(self.b["acceptEnabled"])
+
+    def test_a_stale_render_carries_its_rule_in_the_provenance_line(self):
+        self.assertIn("STALE (", self.b["provRight"])
+        self.assertIn("): not current evidence (R-64)", self.b["provRight"])
+        self.assertIn("evidence of original: yes", self.b["provLeft"])
+
+    def test_the_limits_card_states_typed_versus_in_force(self):
+        self.assertIn("in force:", self.b["costState"])
+        self.assertTrue(any(n.startswith("max_cost_usd enforceable=") for n in self.b["limitNotes"]), self.b["limitNotes"])
+        self.assertEqual(self.b["typedState"], "typed 25 — not applied yet")
+        self.assertTrue(self.b["applyEnabled"])
+
+    def test_busy_darkens_the_tk_eleven_and_leaves_the_escape_hatches_lit(self):
+        self.assertEqual(self.b["busyJob"], "working: open")
+        self.assertTrue(self.b["busyStart"])
+        self.assertFalse(self.b["busyCancel"])
+        self.assertFalse(self.b["busyPause"])
+        self.assertFalse(self.b["busyFeedback"])
+        self.assertTrue(self.b["busyDot"])
+        self.assertFalse(self.b["doneStart"])
+        self.assertEqual(self.b["doneJob"], "done: open")
+
+    def test_events_and_errors_reach_the_activity_log_and_the_status_line(self):
+        self.assertTrue(self.b["lastActivity"].endswith("[stage] build"), self.b["lastActivity"])
+        self.assertEqual(self.b["errorJob"], "error in start: boom")
+
+    def test_selecting_a_finding_flips_the_comparison_and_selects_its_part(self):
+        self.assertTrue(self.b["leftTitle"].startswith("Before · finding"), self.b["leftTitle"])
+        self.assertTrue(self.b["baChecked"])
+        self.assertIn("observed:", self.b["findingText"])
+        self.assertIn("p_bracket", self.b["partText"])
 
 
 if __name__ == "__main__":
