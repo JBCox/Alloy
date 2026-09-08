@@ -1,0 +1,33 @@
+Efficiency comparison (R-84): Fixture lamp  run run_01M1Z7HFZSS5GQ601F  stop reason ready_for_user_review
+agents: {'A': {'provider': 'mock', 'model': 'fable'}, 'B': {'provider': 'mock', 'model': 'gpt-6-astra'}}
+
+strategy            invocations   delivered bytes   images delivered
+packet delivery               9          17779786                128
+transcript replay             9          66280167                464   (simulated; nothing was sent)
+
+packet delivery bytes: text 94845, images 17674916, other 10025; replies 7651
+preflight probes (apart from both): 10 invocations, 49590 bytes
+packet delivery tokens: input=unknown, output=unknown, cached_input=unknown, reasoning=unknown; invocations with no reported usage: 9
+transcript replay tokens: input=unknown, output=unknown, cached_input=unknown, reasoning=unknown; invocations with no reported usage: 9 (never estimated: the simulated transcript was not sent to any provider, so no token count exists)
+
+preserved under both: 48 unique evidence files, 30 coverage rows, 1 of 1 findings closed on verified renders, 3 revisions, 31 renders
+withheld material: 4 packet(s) withhold material under packet delivery; the replayed transcript would expose it in 3 turn(s):
+  - intake_observation (inv_01M1Z7HG4ZKKME0QM9): the other agent's observations (R-11: independent observation at intake); carried by earlier replies ['inv_01M1Z7HG2CYRJC8HBF']
+  - review_task (inv_01M1Z7MBPJX0S4SQQ1): builder self-assessment (R-11: your initial findings are recorded before reconciliation); carried by earlier replies ['inv_01M1Z7HG2CYRJC8HBF', 'inv_01M1Z7HG7ECSH6WSYD', 'inv_01M1Z7HGA4SGYNVMZ1', 'inv_01M1Z7JV7FEBG6CMAY']
+  - verification (inv_01M1Z7P5D1FF4K189H): corrector self-assessment (R-74: closure is verified on renders, never on claims); carried by earlier replies ['inv_01M1Z7HG4ZKKME0QM9', 'inv_01M1Z7MBPJX0S4SQQ1', 'inv_01M1Z7MBWZ5J903FGA', 'inv_01M1Z7MF7VYQZ17E6W']
+
+per turn (packet delivery bytes -> replayed bytes):
+  intake_observation         912901 ->     912901   images 6 -> 6
+  intake_observation         912901 ->    1826854   images 6 -> 12
+  brief_draft                912398 ->    2740304   images 6 -> 18
+  construction_plan          911513 ->    3652326   images 6 -> 24
+  build_task                2368243 ->    6022322   images 15 -> 39
+  review_task               2678776 ->    8701453   images 24 -> 63
+  review_reconcile          2401864 ->   11105689   images 15 -> 78
+  correction_task           2425216 ->   13531001   images 18 -> 96
+  verification              4255974 ->   17787317   images 32 -> 128
+
+caveats:
+  - bytes are measured; tokens are reported only where the provider measured them and are unknown otherwise
+  - transcript replay is simulated from the same turns; nothing was sent, so it has no token count
+  - no reduction percentage is computed and no quality equivalence is claimed: the two deliveries carry the same evidence files and coverage rows, and only packet delivery honours the withheld material (R-11)

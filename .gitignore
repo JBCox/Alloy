@@ -24,3 +24,16 @@ attachments/
 *.png
 *.jpg
 _*.txt
+
+# builder: report screenshots are documentation (fixture lamp); everything under e11-mast is the owner's
+!docs/reports/phase3/*.png
+!docs/reports/phase4/*.png
+docs/reports/e11-mast/
+# builder: workflow state and Blender files must never be committed
+*.blend
+*.blend1
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+alloy-builder/
+.pytest_cache/

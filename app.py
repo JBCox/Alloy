@@ -21,6 +21,7 @@ import time
 
 import webview
 
+import builder_host
 import dictation
 import speaker
 import webhook as webhook_mod
@@ -145,6 +146,15 @@ IMAGE_MIME = {
 }
 IMAGE_MAX_BYTES = 15 * 1024 * 1024   # matches the composer's attachment cap
 THUMB_EDGE = 320                     # thumbnail bytes first; full res on click
+# Native file dialogs for the Model Builder. pywebview 6 names the dialog kind
+# FileDialog.OPEN; the older webview.OPEN_DIALOG constant prints a deprecation.
+BUILDER_IMAGE_DIALOG_TYPES = ("Images (*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.gif)", "All files (*.*)")
+BUILDER_BLEND_DIALOG_TYPES = ("Blender files (*.blend)", "All files (*.*)")
+
+
+def _open_dialog_type():
+    fd = getattr(webview, "FileDialog", None)
+    return fd.OPEN if fd is not None else webview.OPEN_DIALOG
 FILE_LIST_MAX = 200                  # rows returned to the Files rail
 FILE_SCAN_MAX = 4000                 # walk budget for huge picked folders
 TEXT_MAX_BYTES = 256 * 1024          # live code viewer read cap
@@ -822,6 +832,10 @@ class Api:
         # (currently the one-shot auto-title). main() flips this; tests
         # instantiating Api directly stay token-free by construction.
         self._side_calls_enabled = False
+        # The Model Builder's host is built lazily by _builder(): a directly-instantiated Api
+        # starts no builder thread, and nothing about it is a public attribute.
+        self._builder_lock = threading.Lock()
+        self._builder_host = None
         # Scheduled rooms. The THREAD is deliberately absent here — see
         # start_scheduler: a poller in the constructor would run against
         # Josh's real sessions/ folder inside every suite that builds an
@@ -1262,6 +1276,161 @@ class Api:
     def open_path(self, path):
         if path and os.path.exists(path):
             os.startfile(path)
+
+    # --------------------------------------------------------- model builder --
+    # The Collaborative Model Builder (builder/, docs/builder/) as a view of this
+    # window. builder_host.BuilderHost owns ONE BuilderSession per process: every
+    # method below only enqueues a job on the session's worker thread (or flips
+    # a thread-safe flag) and answers at once; truth arrives as `builder` events
+    # (`{"kind": "busy"|"done"|"error"|"event"|"snapshot"|"closed", ...}`) through
+    # the same emit queue as everything else. Payloads carry NO chat_id, so
+    # uiEvent must handle them above its not-my-chat gate. The bridge thread never
+    # computes a snapshot: builder_snapshot is the host's cache of the last one
+    # the worker published. Hiding the view never touches the session; only
+    # _builder_shutdown (app exit) closes it, and closing cancels.
+    def _builder(self):
+        with self._builder_lock:
+            if self._builder_host is None:
+                self._builder_host = builder_host.BuilderHost(
+                    settings_path=lambda: os.path.join(relay.SESSIONS_DIR, builder_host.SETTINGS_FILE),
+                    emit=self.emit, confine=confine_to_workspace)
+            return self._builder_host
+
+    def _builder_shutdown(self):
+        host = self._builder_host
+        if host is not None:
+            host.shutdown(5.0)
+
+    def builder_state(self):
+        return self._builder().state()
+
+    def builder_snapshot(self):
+        return self._builder().snapshot()
+
+    def builder_refresh(self):
+        return self._builder().refresh()
+
+    def builder_recent(self):
+        return self._builder().recent()
+
+    def builder_new_project(self, name=None, asset=None, project_dir=None, workflow_dir=None,
+                            first_component=None, preset_id=None):
+        return self._builder().new_project(name=name, asset=asset, project_dir=project_dir,
+                                           workflow_dir=workflow_dir, first_component=first_component,
+                                           preset_id=preset_id)
+
+    def builder_new_fixture(self, directory=None):
+        """The demo: the fixture lamp with scripted seats. Needs Blender, spends nothing."""
+        return self._builder().new_fixture(directory)
+
+    def builder_open(self, workflow_dir=None, screenplay=None):
+        return self._builder().open(workflow_dir, screenplay=screenplay)
+
+    def builder_close(self, force=False):
+        return self._builder().close_project(force=bool(force))
+
+    def builder_preflight(self, live=False):
+        """live=True spends provider usage (the UI confirms first); the local tier is free."""
+        return self._builder().preflight(live=bool(live))
+
+    def builder_start(self, attended=True, assignments=None, component=None):
+        # An UNATTENDED build runs without anyone to stop it, so it is gated by
+        # the same plan-quota brake as an unattended room -- decided on the
+        # STORED snapshot (probe=False): this is the bridge thread, where a
+        # probe's subprocess deadlocks the window (see _plan_brake_verdict).
+        if not attended:
+            ok, why = self._plan_brake_verdict(probe=False)
+            if not ok:
+                return {"ok": False, "reason": why}
+        return self._builder().start(attended=bool(attended), assignments=assignments, component=component)
+
+    def builder_resume(self):
+        return self._builder().resume()
+
+    def builder_pause(self):
+        return self._builder().pause()
+
+    def builder_cancel(self):
+        return self._builder().cancel()
+
+    def builder_feedback(self, text=None):
+        return self._builder().feedback(text)
+
+    def builder_accept(self, component_id=None):
+        return self._builder().accept(component_id)
+
+    def builder_reopen(self, component_id=None, reason=None):
+        return self._builder().reopen(component_id, reason)
+
+    def builder_waive(self, finding_id=None, rationale=None):
+        return self._builder().waive(finding_id, rationale)
+
+    def builder_request_correction(self, finding_id=None, note=""):
+        return self._builder().request_correction(finding_id, note)
+
+    def builder_restore_checkpoint(self, checkpoint_id=None):
+        return self._builder().restore_checkpoint(checkpoint_id)
+
+    def builder_set_limits(self, changes=None):
+        return self._builder().set_limits(changes)
+
+    def builder_add_reference(self, paths=None, labels=None, kind="target", composite=False, notes=""):
+        return self._builder().add_reference(paths, labels=labels, kind=kind, composite=composite, notes=notes)
+
+    def builder_register_source(self, path=None):
+        return self._builder().register_source(path)
+
+    def builder_register_empty(self):
+        return self._builder().register_empty_source()
+
+    def builder_overlay_rects(self, render_id=None):
+        return self._builder().overlay_rects(render_id)
+
+    def builder_read_image(self, path=None, full=False):
+        """Same contract as read_image, confined to the OPEN workflow directory
+        (refs/, renders/, concept/ are byte copies inside it). Forbidden and
+        missing are the identical quiet answer."""
+        found = self._builder().resolve_image(path)
+        if not found.get("ok"):
+            return found
+        real = found["path"]
+        mime = IMAGE_MIME.get(os.path.splitext(real)[1].lower())
+        if not mime:
+            return {"error": "not an image"}
+        try:
+            if os.path.getsize(real) > IMAGE_MAX_BYTES:
+                return {"error": "image too large to preview"}
+            data = None
+            if not full:
+                data, tmime = _thumb_bytes(real)
+                if data is not None:
+                    mime = tmime
+            if data is None:
+                with open(real, "rb") as f:
+                    data = f.read()
+        except OSError:
+            return {"error": "not available"}
+        return {"ok": True, "name": os.path.basename(real),
+                "data_uri": f"data:{mime};base64,"
+                            f"{base64.b64encode(data).decode('ascii')}"}
+
+    def builder_pick_files(self):
+        """Native multi-select image dialog. pick_folder already opens a dialog on
+        the bridge thread, which is what proves this is safe here."""
+        result = self._window.create_file_dialog(_open_dialog_type(), allow_multiple=True,
+                                                 file_types=BUILDER_IMAGE_DIALOG_TYPES)
+        return {"paths": [str(p) for p in (result or ())]}
+
+    def builder_pick_file(self, kind="blend"):
+        types = BUILDER_BLEND_DIALOG_TYPES if kind == "blend" else BUILDER_IMAGE_DIALOG_TYPES
+        result = self._window.create_file_dialog(_open_dialog_type(), allow_multiple=False, file_types=types)
+        return {"path": str(result[0]) if result else None}
+
+    def builder_get_settings(self):
+        return self._builder().get_settings()
+
+    def builder_save_settings(self, patch=None):
+        return self._builder().save_settings(patch)
 
     # ------------------------------------------------------------ dictation --
     # A microphone for the composer, on a LOCAL engine (dictation.py explains
@@ -4505,6 +4674,7 @@ def main():
         # release the webhook socket so the process can exit promptly
         api.stop_scheduler()
         api.webhook_stop_all()
+        api._builder_shutdown()          # closing the builder session cancels a run in flight
 
 
 if __name__ == "__main__":
